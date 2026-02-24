@@ -9,6 +9,7 @@ import queue
 import gc
 import json
 from tqdm import tqdm
+import pynvml
 
 # Hugging Face Imports
 from transformers import (
@@ -32,16 +33,15 @@ TOTAL_LAYERS = 32
 HIDDEN_SIZE = 4096
 HEADS = 32
 
+# Fixed by mentor — do not change these
 SEQ_LEN = 64  # Input (prefill) length
 MAX_NEW_TOKENS = 512  # Output (decode) length
 
-GLOBAL_BATCH_SIZE = 128
-
-# Microbatch sizes — must divide evenly into GLOBAL_BATCH_SIZE
-MICROBATCH_SIZES = [16, 32, 64]
+# Search dimensions — all three are swept in the benchmark
+BATCH_SIZES = [16, 32, 64, 128]  # Total sequences processed simultaneously
+MICROBATCH_SIZES = [16, 32, 64]  # How the batch is sliced for the pipeline
 
 # How often to sample GPU utilization during decode (every N steps).
-# Sampling every step would add overhead; every 10 steps is a good balance.
 UTIL_SAMPLE_INTERVAL = 10
 
 # --- MIG UUID MAPPING ---
@@ -59,8 +59,12 @@ LAYER_LIMITS = [24, 12, 6]
 # ---------------------------------------------------------------------------
 
 
-def get_wiki_sample() -> torch.Tensor:
-    print(f"Loading WikiText... (SEQ_LEN={SEQ_LEN}, BATCH={GLOBAL_BATCH_SIZE})")
+def get_wiki_sample(batch_size: int) -> torch.Tensor:
+    """
+    Load a fixed-length batch of token IDs from WikiText-2.
+    Takes batch_size as a parameter since we now sweep over batch sizes.
+    """
+    print(f"Loading WikiText... (SEQ_LEN={SEQ_LEN}, BATCH={batch_size})")
     try:
         dataset = load_dataset(
             "wikitext", "wikitext-2-raw-v1", split="test", streaming=True
@@ -81,11 +85,11 @@ def get_wiki_sample() -> torch.Tensor:
             padding="max_length",
             truncation=True,
         )
-        return inputs.input_ids.repeat(GLOBAL_BATCH_SIZE, 1)
+        return inputs.input_ids.repeat(batch_size, 1)
 
     except Exception:
         print("Warning: WikiText unavailable. Using random token IDs.")
-        return torch.randint(0, 32000, (GLOBAL_BATCH_SIZE, SEQ_LEN))
+        return torch.randint(0, 32000, (batch_size, SEQ_LEN))
 
 
 # ---------------------------------------------------------------------------
@@ -154,11 +158,7 @@ def load_specific_weights(rank, my_layers, my_layer_indices, model_components):
 
 
 def forward_through_layers(layers, current_hidden, position_embeddings, mask, cache):
-    """
-    Run hidden states through this rank's decoder layers.
-    Separated into its own function so it's easy to call from both
-    the prefill path and the async decode loop.
-    """
+    """Run hidden states through this rank's decoder layers."""
     for layer in layers:
         residual = current_hidden
         hidden_states = layer.input_layernorm(current_hidden)
@@ -196,8 +196,6 @@ def run_pipeline(
         os.environ["MASTER_PORT"] = "29500"
 
         dist.init_process_group("gloo", rank=rank, world_size=world_size)
-
-        # Register async-capable transport hooks (replaces dist.send/recv/isend/irecv)
         mig_transport.register_hooks()
 
         device = torch.device("cuda:0")
@@ -240,10 +238,12 @@ def run_pipeline(
         torch.cuda.empty_cache()
 
         input_ids = input_ids_seed.to(device)
-        batch_size, seq_length = input_ids.shape  # (128, 64)
+        batch_size, seq_length = input_ids.shape
         num_microbatches = batch_size // mb_size
 
-        # One DynamicCache per microbatch — isolated K/V history per sequence group
+        # One DynamicCache per microbatch — isolated K/V history per sequence group.
+        # DynamicCache grows linearly across the 512 decode steps — if rank 2 OOMs
+        # it will be caught by the except block and reported as OOM gracefully.
         past_key_values_list = [DynamicCache() for _ in range(num_microbatches)]
 
         # Full batch token tracking tensor — written by rank 2, read by rank 0
@@ -252,11 +252,17 @@ def run_pipeline(
         # GPU utilization samples — only collected by rank 2 during decode
         util_samples = []
 
+        #
+        nvml_handle = None
+        if rank == world_size - 1:
+            try:
+                pynvml.nvmlInit()
+                nvml_handle = pynvml.nvmlDeviceGetHandleByUUID(device_uuid.encode())
+            except Exception as e:
+                print(f"[Rank 2] pynvml init failed: {e}. Util will be 0.", flush=True)
+
         dist.barrier()
 
-        # --- TIMING: measure total end-to-end latency ---
-        # start_event fires before prefill, end_event fires after the last decode step.
-        # elapsed_time() between them = total response latency.
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)
         start_event.record()
@@ -264,13 +270,10 @@ def run_pipeline(
         with torch.no_grad():
 
             # ==================================================================
-            # STEP 0: PREFILL (process all 64 input tokens in one shot)
-            # Microbatches are still processed sequentially here — prefill is
-            # one-time and fast (64 tokens), so the overhead of async scheduling
-            # isn't worth the complexity. Concurrency matters in the decode phase.
+            # PREFILL: process all SEQ_LEN=64 input tokens
+            # Sequential microbatch processing here — prefill is one-time and
+            # fast, async overhead isn't worth the complexity.
             # ==================================================================
-            prefill_mb_buffers = []  # Store prefill outputs to kick off decode loop
-
             for mb_idx in range(num_microbatches):
                 start_idx = mb_idx * mb_size
                 end_idx = start_idx + mb_size
@@ -288,7 +291,6 @@ def run_pipeline(
                     dist.recv(recv_buf, src=rank - 1)
                     current_hidden = recv_buf
 
-                # Build causal mask for prefill
                 position_ids = torch.arange(
                     0, seq_length, dtype=torch.long, device=device
                 ).unsqueeze(0)
@@ -315,56 +317,55 @@ def run_pipeline(
                     next_tokens[start_idx:end_idx] = mb_next
 
                 if rank < world_size - 1:
-                    send_buf = current_hidden.clone()
-                    dist.send(send_buf, dst=rank + 1)
+                    dist.send(current_hidden.clone(), dst=rank + 1)
 
-            # After prefill: rank 2 sends first generated tokens to rank 0
+            # Rank 2 sends first generated tokens back to rank 0
             if rank == world_size - 1:
                 dist.send(next_tokens, dst=0)
             elif rank == 0:
                 dist.recv(next_tokens, src=world_size - 1)
 
-            dist.barrier()  # All ranks aligned before decode loop starts
+            dist.barrier()
 
             # ==================================================================
-            # STEPS 1..MAX_NEW_TOKENS: DECODE (concurrent async pipeline)
+            # DECODE: generate MAX_NEW_TOKENS=512 tokens autoregressively
             #
-            # This is the GPipe fill-drain schedule:
-            # - Rank 0 embeds MB0, sends it async, immediately starts MB1
-            # - Rank 1 receives MB0, processes it, sends async, receives MB1...
-            # - Rank 2 receives MB0, generates token, while rank 1 already has MB1
-            #
-            # Each rank maintains a queue of outstanding async send handles.
-            # It calls handle.wait() only when it needs to reuse that buffer slot,
-            # not immediately after isend — this is what enables overlap.
+            # Uses rolling prev_send_handle pattern:
+            # - Issue isend for current microbatch
+            # - Wait on it at the TOP of the NEXT microbatch iteration
+            # - This means send and next microbatch's recv/compute overlap
+            # - Only 1 slot occupied at a time — no slot exhaustion
             # ==================================================================
-
             for step in range(1, MAX_NEW_TOKENS + 1):
-                # Sample rank 2 GPU utilization periodically during decode.
-                # torch.cuda.utilization() returns SM utilization % (0-100).
-                # We sample here (top of step) so we capture utilization while
-                # the GPU is actively running decode kernels from the previous step.
+
+                # Sample rank 2 GPU utilization every UTIL_SAMPLE_INTERVAL steps
                 if rank == world_size - 1 and step % UTIL_SAMPLE_INTERVAL == 0:
-                    util_samples.append(torch.cuda.utilization())
+                    if nvml_handle is not None:
+                        try:
+                            rates = pynvml.nvmlDeviceGetUtilizationRates(nvml_handle)
+                            util_samples.append(rates.gpu)
+                        except Exception:
+                            pass
 
                 position_ids = torch.tensor(
                     [[seq_length + step - 1]], dtype=torch.long, device=device
                 ).expand(mb_size, -1)
 
-                # Outstanding async send handles from this step — we collect them
-                # all and wait at the end of the step to ensure all microbatch
-                # data has been received before moving to next step.
-                # This gives maximum overlap within a step while still maintaining
-                # correct ordering between steps.
-                send_handles = []
+                prev_send_handle = None
 
                 for mb_idx in range(num_microbatches):
                     start_idx = mb_idx * mb_size
                     end_idx = start_idx + mb_size
 
-                    # --- RECEIVE from previous rank (non-blocking) ---
+                    # Wait on the PREVIOUS microbatch's send before claiming
+                    # a new slot. This keeps slot usage at 1 at a time while
+                    # still overlapping the send with current microbatch compute.
+                    if prev_send_handle is not None:
+                        prev_send_handle.wait()
+                        prev_send_handle = None
+
+                    # --- RECEIVE ---
                     if rank == 0:
-                        # Rank 0 embeds the token predicted in previous step
                         current_hidden = model_components["embed"](
                             next_tokens[start_idx:end_idx]
                         ).half()
@@ -374,20 +375,17 @@ def run_pipeline(
                             dtype=torch.float16,
                             device=device,
                         )
-                        # Non-blocking recv — start receiving while we process
-                        # the previous microbatch's output on this rank
                         recv_handle = dist.irecv(recv_buf, src=rank - 1)
-                        # Must wait before we can use recv_buf for compute
                         recv_handle.wait()
                         current_hidden = recv_buf
 
-                    # --- COMPUTE: forward through this rank's layers ---
+                    # --- COMPUTE ---
                     position_embeddings = rotary_emb(current_hidden, position_ids)
                     current_hidden = forward_through_layers(
                         layers,
                         current_hidden,
                         position_embeddings,
-                        None,  # No causal mask needed for single-token decode
+                        None,
                         past_key_values_list[mb_idx],
                     )
 
@@ -398,24 +396,18 @@ def run_pipeline(
                         mb_next = torch.argmax(logits, dim=-1)
                         next_tokens[start_idx:end_idx] = mb_next
 
-                    # --- NON-BLOCKING SEND to next rank ---
-                    # isend fires immediately and returns a handle.
-                    # We don't wait here — we let the next microbatch's compute
-                    # overlap with this send completing in the background.
+                    # --- NON-BLOCKING SEND ---
+                    # Fire and move on — wait happens at top of next iteration
                     if rank < world_size - 1:
-                        send_buf = current_hidden.clone()
-                        handle = dist.isend(send_buf, dst=rank + 1)
-                        send_handles.append(handle)
+                        prev_send_handle = dist.isend(
+                            current_hidden.clone(), dst=rank + 1
+                        )
 
-                # Wait for all sends from this step to complete before
-                # moving to the next step. This ensures rank (n+1) has received
-                # all microbatches before we overwrite the send buffers.
-                for handle in send_handles:
-                    handle.wait()
+                # Wait on the final microbatch's send before leaving the step
+                if prev_send_handle is not None:
+                    prev_send_handle.wait()
 
-                # Global token feedback: rank 2 → rank 0 (blocking, once per step)
-                # This is necessarily sequential — rank 0 needs all new tokens
-                # before it can start the next decode step's embedding.
+                # Global token feedback: rank 2 → rank 0 (once per step, blocking)
                 if step < MAX_NEW_TOKENS:
                     if rank == world_size - 1:
                         dist.send(next_tokens, dst=0)
@@ -426,27 +418,37 @@ def run_pipeline(
         end_event.record()
         torch.cuda.synchronize()
 
-        # Total end-to-end latency: prefill + all 512 decode steps
         total_latency_ms = start_event.elapsed_time(end_event)
-
-        # Average GPU utilization on rank 2 across all sampled decode steps
         avg_util = sum(util_samples) / len(util_samples) if util_samples else 0.0
 
         if rank == 0:
-            # Send latency from rank 0 (it has the timing)
             result_queue.put(("latency", total_latency_ms))
-
         if rank == world_size - 1:
-            # Send utilization from rank 2 (it has the util samples)
             result_queue.put(("util", avg_util))
 
         dist.destroy_process_group()
+
+    except torch.cuda.OutOfMemoryError:
+        # OOM is expected for large batch + large microbatch + many layers on rank 2.
+        # Report it clearly so main() can log it and move on to the next config.
+        print(
+            f"[Rank {rank}] OOM — batch/microbatch too large for this split.",
+            flush=True,
+        )
+        result_queue.put(("oom", rank))
+        try:
+            dist.destroy_process_group()
+        except Exception:
+            pass
 
     except Exception:
         import traceback
 
         traceback.print_exc()
-        return
+        try:
+            dist.destroy_process_group()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -470,7 +472,6 @@ def generate_layer_splits():
 
 
 def main():
-    input_ids_seed = get_wiki_sample()
     selected_splits = generate_layer_splits()
 
     try:
@@ -478,15 +479,28 @@ def main():
     except RuntimeError:
         pass
 
-    total_runs = len(selected_splits) * len(MICROBATCH_SIZES)
+    # Build the full list of valid (batch_size, mb_size) combinations.
+    # mb_size must divide evenly into batch_size and must be <= batch_size.
+    valid_batch_mb_pairs = [
+        (bs, mb)
+        for bs in BATCH_SIZES
+        for mb in MICROBATCH_SIZES
+        if bs % mb == 0 and mb <= bs
+    ]
+
+    total_runs = len(selected_splits) * len(valid_batch_mb_pairs)
     results = []
     current_run = 1
 
     for split in selected_splits:
-        for mb_size in MICROBATCH_SIZES:
+        for batch_size, mb_size in valid_batch_mb_pairs:
             print(
-                f"\n[{current_run}/{total_runs}] Split {split} | Microbatch: {mb_size}"
+                f"\n[{current_run}/{total_runs}] "
+                f"Split {split} | Batch: {batch_size} | Microbatch: {mb_size}"
             )
+
+            # Load input data sized to this run's batch size
+            input_ids_seed = get_wiki_sample(batch_size)
 
             q = mp.Queue()
             procs: list[mp.Process] = []
@@ -512,34 +526,76 @@ def main():
                     p.join()
 
                 exit_codes = [p.exitcode for p in procs]
-                if any(code != 0 for code in exit_codes):
-                    print(f"  Failed (OOM/Crash). Exit codes: {exit_codes}")
+
+                # Collect all items the processes put in the queue
+                queue_items = {}
+                try:
+                    while True:
+                        key, val = q.get(timeout=2.0)
+                        queue_items[key] = val
+                except queue.Empty:
+                    pass
+
+                # Check for OOM first — if any rank reported OOM, skip this config
+                if "oom" in queue_items:
+                    oom_rank = queue_items["oom"]
+                    print(f"  OOM on Rank {oom_rank} — skipping this configuration.")
+                    results.append(
+                        {
+                            "split": str(split),
+                            "batch_size": batch_size,
+                            "microbatch_size": mb_size,
+                            "num_microbatches": batch_size // mb_size,
+                            "total_latency_ms": None,
+                            "rank2_gpu_util_pct": None,
+                            "status": f"OOM_rank{oom_rank}",
+                        }
+                    )
+
+                elif any(code != 0 for code in exit_codes):
+                    print(f"  Failed (Crash). Exit codes: {exit_codes}")
+                    results.append(
+                        {
+                            "split": str(split),
+                            "batch_size": batch_size,
+                            "microbatch_size": mb_size,
+                            "num_microbatches": batch_size // mb_size,
+                            "total_latency_ms": None,
+                            "rank2_gpu_util_pct": None,
+                            "status": "crash",
+                        }
+                    )
+
+                elif "latency" in queue_items and "util" in queue_items:
+                    latency = queue_items["latency"]
+                    util = queue_items["util"]
+                    print(f"  Total latency:   {latency:.0f} ms")
+                    print(f"  Rank 2 GPU util: {util:.1f}%")
+                    results.append(
+                        {
+                            "split": str(split),
+                            "batch_size": batch_size,
+                            "microbatch_size": mb_size,
+                            "num_microbatches": batch_size // mb_size,
+                            "total_latency_ms": latency,
+                            "rank2_gpu_util_pct": util,
+                            "status": "ok",
+                        }
+                    )
+
                 else:
-                    # Collect both metrics from the queue.
-                    # rank 0 puts latency, rank 2 puts utilization.
-                    metrics = {}
-                    try:
-                        for _ in range(2):  # Expecting exactly 2 items
-                            key, val = q.get(timeout=180.0)
-                            metrics[key] = val
-
-                        latency = metrics.get("latency", -1)
-                        util = metrics.get("util", -1)
-
-                        print(f"  Total latency:    {latency:.0f} ms")
-                        print(f"  Rank 2 GPU util:  {util:.1f}%")
-
-                        results.append(
-                            {
-                                "split": str(split),
-                                "batch_size": GLOBAL_BATCH_SIZE,
-                                "microbatch_size": mb_size,
-                                "total_latency_ms": latency,
-                                "rank2_gpu_util_pct": util,
-                            }
-                        )
-                    except queue.Empty:
-                        print("  Timeout waiting for results.")
+                    print("  Timeout — no results received.")
+                    results.append(
+                        {
+                            "split": str(split),
+                            "batch_size": batch_size,
+                            "microbatch_size": mb_size,
+                            "num_microbatches": batch_size // mb_size,
+                            "total_latency_ms": None,
+                            "rank2_gpu_util_pct": None,
+                            "status": "timeout",
+                        }
+                    )
 
             finally:
                 q.close()
@@ -554,22 +610,29 @@ def main():
     df = pd.DataFrame(results)
     df.to_csv("mig_benchmark_results.csv", index=False)
 
-    if not df.empty:
-        print("\n--- Best by Latency ---")
-        best_lat = df.loc[df["total_latency_ms"].idxmin()]
+    # Summary over successful runs only
+    successful = df[df["status"] == "ok"]
+    if not successful.empty:
+        print("\n--- Best by Latency (successful runs) ---")
+        best_lat = successful.loc[successful["total_latency_ms"].idxmin()]
         print(
-            f"  Split: {best_lat['split']} | MB: {best_lat['microbatch_size']} "
+            f"  Split: {best_lat['split']} | Batch: {best_lat['batch_size']} "
+            f"| MB: {best_lat['microbatch_size']} "
             f"| Latency: {best_lat['total_latency_ms']:.0f} ms "
             f"| Rank2 Util: {best_lat['rank2_gpu_util_pct']:.1f}%"
         )
 
-        print("\n--- Best by Rank 2 GPU Utilization ---")
-        best_util = df.loc[df["rank2_gpu_util_pct"].idxmax()]
+        print("\n--- Best by Rank 2 GPU Utilization (successful runs) ---")
+        best_util = successful.loc[successful["rank2_gpu_util_pct"].idxmax()]
         print(
-            f"  Split: {best_util['split']} | MB: {best_util['microbatch_size']} "
+            f"  Split: {best_util['split']} | Batch: {best_util['batch_size']} "
+            f"| MB: {best_util['microbatch_size']} "
             f"| Latency: {best_util['total_latency_ms']:.0f} ms "
             f"| Rank2 Util: {best_util['rank2_gpu_util_pct']:.1f}%"
         )
+
+        oom_count = len(df[df["status"].str.startswith("OOM", na=False)])
+        print(f"\n  ({oom_count} configurations skipped due to OOM)")
 
     print("\nDone. Results saved to mig_benchmark_results.csv")
 

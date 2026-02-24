@@ -14,15 +14,15 @@ _ORIGINAL_ISEND = dist.isend
 _ORIGINAL_IRECV = dist.irecv
 
 # Number of ring buffer slots per rank.
-# Must be >= number of microbatches in flight simultaneously.
-# With a fill-drain pipeline schedule, at most (world_size - 1) microbatches
-# are in flight at once, so NUM_SLOTS = world_size is always safe.
-NUM_SLOTS = 4
+# Must be >= max microbatches in flight at once.
+# Worst case: GLOBAL_BATCH_SIZE / min(MICROBATCH_SIZES) = 128 / 16 = 8.
+# Set to 10 for safety margin above that ceiling.
+NUM_SLOTS = 10
 
 
 class AsyncHandle:
     """
-    Wraps a non-blocking send or recv operation.
+    Wraps a non-blocking send operation.
     Mirrors the interface of torch.distributed's WorkHandle so callers
     can just do handle.wait() regardless of whether it came from us or gloo.
     """
@@ -89,8 +89,9 @@ class MIGPipelineTransport:
 
         # --- PRE-ALLOCATE PINNED MEMORY STAGING BUFFERS ---
         # Pinned (page-locked) CPU memory allows the CUDA DMA engine to transfer
-        # GPU tensors to CPU without involving the CPU cores, and allows non_blocking=True
-        # copies. One staging buffer per slot so concurrent transfers don't collide.
+        # GPU tensors to CPU without involving the CPU cores, and allows
+        # non_blocking=True copies. One staging buffer per slot so concurrent
+        # transfers don't collide.
         max_elements = self.slot_size // 2  # float16 = 2 bytes per element
         self.pinned_staging = [
             torch.zeros(max_elements, dtype=torch.float16).pin_memory()
@@ -132,7 +133,8 @@ class MIGPipelineTransport:
 
                 if not connected:
                     raise RuntimeError(
-                        f"Rank {rank} failed to connect to {peer_name} after {attempts} attempts"
+                        f"Rank {rank} failed to connect to {peer_name} "
+                        f"after {attempts} attempts"
                     )
 
         print(f"[MIG-Pipe] Rank {rank} connected to all peers. Ready.", flush=True)
@@ -141,8 +143,9 @@ class MIGPipelineTransport:
     def _get_free_slot(self):
         """
         Find the next free ring buffer slot.
-        Spins briefly if all slots are occupied (shouldn't happen if num_slots
-        is sized correctly relative to pipeline depth).
+        Spins briefly if all slots are occupied. With the rolling prev_send_handle
+        pattern in the pipeline (wait on previous before issuing next), only 1
+        slot is occupied at a time so this should never spin in practice.
         """
         for _ in range(10000):
             for slot in range(self.num_slots):
@@ -185,8 +188,9 @@ class MIGPipelineTransport:
 
     def irecv(self, tensor, src):
         """
-        Non-blocking recv. Returns an AsyncHandle. Caller must call .wait()
-        before reading from tensor — data isn't valid until the handshake arrives.
+        Non-blocking recv. Returns an AsyncHandleRecv whose .wait() must be
+        called before reading from tensor — data isn't valid until the
+        handshake arrives and SHM has been read.
         """
         # Allocate the handshake tensor HERE and store it on the handle so
         # wait() can read the slot index out of it after the irecv completes.
@@ -216,7 +220,7 @@ class MIGPipelineTransport:
             )
 
         if tensor.dtype == torch.float16:
-            # Fast path: use pinned staging buffer for DMA transfer
+            # Fast path: use pinned staging buffer for async DMA transfer
             numel = tensor.numel()
             staging = self.pinned_staging[slot]
             staging[:numel].copy_(tensor.view(-1), non_blocking=True)
@@ -224,8 +228,9 @@ class MIGPipelineTransport:
             raw = staging[:numel].numpy().view(np.uint8)
             self.my_np_slots[slot][:nbytes] = raw[:nbytes]
         else:
-            # Safe path: move to CPU preserving exact dtype, then write raw bytes.
-            # Used for next_tokens (torch.long), handshake tensors, etc.
+            # Safe path: preserve exact dtype, flatten to 1D before view(uint8).
+            # .flatten() is required — without it, a (128,1) int64 tensor gives
+            # a (128,8) uint8 array which can't broadcast into the flat SHM slot.
             cpu_tensor = tensor.detach().cpu().contiguous()
             raw = cpu_tensor.numpy().flatten().view(np.uint8)
             self.my_np_slots[slot][:nbytes] = raw[:nbytes]
@@ -234,6 +239,7 @@ class MIGPipelineTransport:
         """
         SHM → CPU → GPU.
         Reads from the sender's SHM slot and copies into the destination tensor.
+        Uses the destination tensor's dtype so int64/float16 are both handled correctly.
         """
         nbytes = tensor.numel() * tensor.element_size()
         target_dtype = tensor.cpu().numpy().dtype
@@ -253,7 +259,9 @@ class AsyncHandleRecv:
 
     def __init__(self, dist_handle, handshake, tensor, src, engine):
         self._dist_handle = dist_handle
-        self._handshake = handshake  # Tensor that irecv will fill with the slot index
+        self._handshake = (
+            handshake  # Filled in-place by _ORIGINAL_IRECV with slot index
+        )
         self._tensor = tensor
         self._src = src
         self._engine = engine
@@ -292,7 +300,7 @@ def register_hooks():
     torch.distributed.irecv = patched_irecv
 
     print(
-        f"[MIG-Pipe] Hooks registered for Rank {rank} " f"(blocking + async)",
+        f"[MIG-Pipe] Hooks registered for Rank {rank} (blocking + async)",
         flush=True,
     )
 
