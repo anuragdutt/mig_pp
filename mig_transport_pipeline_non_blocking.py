@@ -1,13 +1,21 @@
+import os
+import time
+from multiprocessing.shared_memory import SharedMemory
+from typing import Dict, List, Optional
+
+import numpy as np
 import torch
 import torch.distributed as dist
-from multiprocessing.shared_memory import SharedMemory
-import numpy as np
-import time
-import os
 
 # --- GLOBAL STATE ---
 _MIG_PIPE_ENGINE = None
-_MIG_SHM_HANDLES = []
+# Shared memory handles must be kept in memory;
+# if Python's garbage collector destroys the object, the shared memory can become inaccessible
+_MIG_SHM_HANDLES: List[SharedMemory] = []
+
+# Saving the _ORIGINAL_* functions is necessary
+# so we can intercept (monkey-patch) PyTorch's native calls later
+# while still retaining the ability to use the original PyTorch backend to send the tiny handshake messages
 _ORIGINAL_SEND = dist.send
 _ORIGINAL_RECV = dist.recv
 _ORIGINAL_ISEND = dist.isend
@@ -15,96 +23,171 @@ _ORIGINAL_IRECV = dist.irecv
 
 # Number of ring buffer slots per rank.
 # Must be >= max microbatches in flight at once.
-# Worst case: GLOBAL_BATCH_SIZE / min(MICROBATCH_SIZES) = 128 / 16 = 8.
-# Set to 10 for safety margin above that ceiling.
 NUM_SLOTS = 10
 
+# ACK tag is tag + ACK_TAG_OFFSET so it never collides with normal handshakes
+ACK_TAG_OFFSET = 10_000_000
 
+# Map torch dtype -> numpy dtype without forcing tensor.cpu()
+_TORCH_TO_NUMPY = {
+    torch.float16: np.float16,
+    torch.float32: np.float32,
+    torch.int64: np.int64,
+    torch.int32: np.int32,
+    torch.int16: np.int16,
+    torch.int8: np.int8,
+    torch.uint8: np.uint8,
+    torch.bool: np.bool_,
+}
+
+
+# When you use non-blocking communication (isend/irecv), PyTorch returns a "handle" you can wait on later.
+# Because this script overrides the backend, it must provide custom handles.
 class AsyncHandle:
     """
-    Wraps a non-blocking send operation.
-    Mirrors the interface of torch.distributed's WorkHandle so callers
-    can just do handle.wait() regardless of whether it came from us or gloo.
+    Async send handle.
+    IMPORTANT: slot becomes reusable only after receiver ACKs it has read SHM.
     """
 
-    def __init__(self, dist_handle, slot_idx, engine, is_send):
-        self._dist_handle = dist_handle  # The underlying gloo async handle
-        self._slot_idx = slot_idx  # Which ring buffer slot was used
-        self._engine = engine  # Back-reference to free the slot on wait()
-        self._is_send = is_send
+    def __init__(self, dist_handle, slot_idx, engine, dst, tag, group):
+        self._dist_handle = dist_handle
+        self._slot_idx = slot_idx
+        self._engine = engine
+        self._dst = dst
+        self._tag = tag
+        self._group = group
         self._waited = False
 
+    # sender side wait
     def wait(self):
-        if not self._waited:
-            # Block until the handshake TCP transfer completes
-            self._dist_handle.wait()
-            # Mark this slot as free so it can be reused for the next microbatch
-            if self._is_send:
-                self._engine.slot_free[self._slot_idx] = True
-            self._waited = True
+        if self._waited:
+            return
+
+        # 1) Wait until handshake send finishes (receiver got slot index)
+        self._dist_handle.wait()
+
+        # 2) Wait for ACK from receiver: "I have finished reading SHM slot"
+        ack = torch.empty((1,), dtype=torch.int32, device="cpu")
+        _ORIGINAL_RECV(
+            ack,
+            src=self._dst,
+            group=self._group,
+            tag=self._tag + ACK_TAG_OFFSET,
+        )
+
+        # Now safe to reuse slot
+        self._engine.slot_free[self._slot_idx] = True
+        self._waited = True
+
+
+class AsyncHandleRecv:
+    """
+    Async recv handle.
+    wait() completes handshake recv, reads SHM into tensor, then sends ACK.
+    """
+
+    def __init__(self, dist_handle, handshake, tensor, src, engine, tag, group):
+        self._dist_handle = dist_handle
+        self._handshake = handshake
+        self._tensor = tensor
+        self._src = src
+        self._engine = engine
+        self._tag = tag
+        self._group = group
+        self._waited = False
+
+    # This function is for the receiver
+    def wait(self):
+        if self._waited:
+            return
+
+        # Wait until handshake arrives (slot index)
+        self._dist_handle.wait()
+        slot = int(self._handshake.item())
+
+        # Read data from SHM slot into destination tensor
+        self._engine._read_tensor_from_slot(self._tensor, self._src, slot)
+
+        # Send ACK back so sender can reuse slot
+        ack = torch.tensor([slot], dtype=torch.int32, device="cpu")
+        _ORIGINAL_SEND(
+            ack,
+            dst=self._src,
+            group=self._group,
+            tag=self._tag + ACK_TAG_OFFSET,
+        )
+
+        # Marking the job as done
+        self._waited = True
 
 
 class MIGPipelineTransport:
-
     def __init__(self, rank, world_size, buffer_size_mb=128, num_slots=NUM_SLOTS):
+        # GPU id allocation
         self.rank = rank
+        # Total no of GPU's working together
         self.world_size = world_size
         self.num_slots = num_slots
-        # Each slot must be large enough for the largest tensor that will be sent.
-        # 128MB per slot covers (128 batch, 512 seq, 4096 hidden) in float16 comfortably.
+
+        # Each slot holds raw bytes for largest tensor.
         self.slot_size = buffer_size_mb * 1024 * 1024
 
         print(
-            f"[MIG-Pipe] Rank {rank} initializing async pipeline transport "
+            f"[MIG-Pipe] Rank {rank} initializing transport "
             f"({num_slots} slots x {buffer_size_mb}MB)...",
             flush=True,
         )
 
-        # --- CREATE RING BUFFER SLOTS (one SHM region per slot) ---
-        # Each slot is an independent shared memory block. When rank 0 is writing
-        # MB1 into slot 1, rank 1 can still be reading MB0 from slot 0 — no conflict.
-        self.my_shm_slots = []
-        self.my_np_slots = []
-        self.slot_free = [True] * num_slots  # Track which slots are available
+        # --- CREATE SHM SLOTS FOR THIS RANK ---
+        self.my_shm_slots: List[SharedMemory] = []
+        self.my_np_slots: List[np.ndarray] = []
+        self.slot_free = [True] * num_slots
 
         for slot in range(num_slots):
             name = f"mig_pipe_shm_{rank}_slot{slot}"
-            # Clean up any leftover SHM from a previous crashed run
+
+            # Clean stale /dev/shm entries if present
             try:
                 if os.path.exists(f"/dev/shm/{name}"):
                     os.unlink(f"/dev/shm/{name}")
             except Exception:
                 pass
 
+            # Creating the memory slots
             try:
                 shm = SharedMemory(name=name, create=True, size=self.slot_size)
             except FileExistsError:
                 shm = SharedMemory(name=name, create=False, size=self.slot_size)
 
+            # For preventing garbage collection
             _MIG_SHM_HANDLES.append(shm)
             self.my_shm_slots.append(shm)
+
+            # Wrap the raw shared memory buffer in a NumPy array.
+            # This creates a "view" into the memory, allowing us to easily read/write
+            # raw bytes without needing complex memory address math or extra data copies.
             self.my_np_slots.append(
                 np.ndarray((self.slot_size,), dtype=np.uint8, buffer=shm.buf)
             )
 
-        # --- PRE-ALLOCATE PINNED MEMORY STAGING BUFFERS ---
-        # Pinned (page-locked) CPU memory allows the CUDA DMA engine to transfer
-        # GPU tensors to CPU without involving the CPU cores, and allows
-        # non_blocking=True copies. One staging buffer per slot so concurrent
-        # transfers don't collide.
-        max_elements = self.slot_size // 2  # float16 = 2 bytes per element
+        # --- PINNED CPU STAGING (float16 fast-path) ---
+        # This tells the operating system: "Lock this specific chunk of RAM in place. Do not ever move it to the hard drive."
+        # Because it is permanently locked in place, the GPU can use Direct Memory Access (DMA) to bypass the CPU entirely
+        # and shove the massive tensor directly into this memory at maximum hardware speeds.
+        # We use float16 as 16-bit math is most widely used
+        max_elements = self.slot_size // 2  # float16 = 2 bytes
         self.pinned_staging = [
             torch.zeros(max_elements, dtype=torch.float16).pin_memory()
             for _ in range(num_slots)
         ]
 
-        # Wait for all ranks to finish creating their SHM slots before connecting
+        # Wait for all the peers to be done with Memory slot creation
+        # This has to be done before moving on to next step where we check for peer connections
+        # dist.barrier is a blocking synchronization mechanism
         dist.barrier()
 
-        # --- CONNECT TO PEER SHM SLOTS ---
-        # Each rank maps all other ranks' SHM regions into its own address space.
-        # Structure: self.peer_slots[peer_rank][slot_idx] = numpy array view
-        self.peer_slots = {}
+        # --- CONNECT TO PEER SLOTS ---
+        self.peer_slots: Dict[int, List[np.ndarray]] = {}
         for peer_rank in range(world_size):
             if peer_rank == rank:
                 continue
@@ -138,81 +221,100 @@ class MIGPipelineTransport:
                     )
 
         print(f"[MIG-Pipe] Rank {rank} connected to all peers. Ready.", flush=True)
+
+        # Nobody is allowed to start the actual workday (sending boxes) until everyone has finished mapping the building!
         dist.barrier()
 
-    def _get_free_slot(self):
-        """
-        Find the next free ring buffer slot.
-        Spins briefly if all slots are occupied. With the rolling prev_send_handle
-        pattern in the pipeline (wait on previous before issuing next), only 1
-        slot is occupied at a time so this should never spin in practice.
-        """
+    def _get_free_slot(self) -> int:
         for _ in range(10000):
             for slot in range(self.num_slots):
                 if self.slot_free[slot]:
-                    self.slot_free[slot] = False  # Mark as occupied
+                    self.slot_free[slot] = False
                     return slot
             time.sleep(0.001)
+
         raise RuntimeError(
             f"[Rank {self.rank}] No free SHM slots available — "
             f"increase NUM_SLOTS or reduce pipeline depth."
         )
 
-    def send(self, tensor, dst):
-        """Blocking send — used for tensors that must arrive before proceeding."""
+    # -----------------------------
+    # Public API used by patch hooks
+    # -----------------------------
+
+    def send(self, tensor, dst, group=None, tag: int = 0):
+        """
+        Blocking send:
+          - write SHM
+          - send handshake(slot)
+          - wait ACK
+        """
         slot = self._get_free_slot()
         self._write_tensor_to_slot(tensor, slot)
-        # Send the slot index as the handshake so receiver knows where to read from
-        handshake = torch.tensor([slot], dtype=torch.int32, device="cpu")
-        _ORIGINAL_SEND(handshake, dst)
-        self.slot_free[slot] = True  # Safe to reuse immediately after blocking send
 
-    def recv(self, tensor, src):
-        """Blocking recv — paired with blocking send."""
+        # Handshake is shared using original pytorch backend ie gloo
+        handshake = torch.tensor([slot], dtype=torch.int32, device="cpu")
+        _ORIGINAL_SEND(handshake, dst=dst, group=group, tag=tag)
+
+        # ACK ensures receiver finished reading this SHM slot
+        ack = torch.empty((1,), dtype=torch.int32, device="cpu")
+        _ORIGINAL_RECV(ack, src=dst, group=group, tag=tag + ACK_TAG_OFFSET)
+
+        self.slot_free[slot] = True
+
+    def recv(self, tensor, src, group=None, tag: int = 0):
+        """
+        Blocking recv:
+          - recv handshake(slot)
+          - read SHM into tensor
+          - send ACK
+        """
         handshake = torch.tensor([0], dtype=torch.int32, device="cpu")
-        _ORIGINAL_RECV(handshake, src)
-        slot = handshake.item()
+        _ORIGINAL_RECV(handshake, src=src, group=group, tag=tag)
+        slot = int(handshake.item())
+
         self._read_tensor_from_slot(tensor, src, slot)
 
-    def isend(self, tensor, dst):
+        ack = torch.tensor([slot], dtype=torch.int32, device="cpu")
+        _ORIGINAL_SEND(ack, dst=src, group=group, tag=tag + ACK_TAG_OFFSET)
+
+    def isend(self, tensor, dst, group=None, tag: int = 0) -> AsyncHandle:
         """
-        Non-blocking send. Returns an AsyncHandle whose .wait() must be called
-        before the slot can be considered free.
+        Non-blocking send:
+          - write SHM now
+          - isend handshake(slot)
+          - handle.wait() will wait ACK and free the slot
         """
         slot = self._get_free_slot()
         self._write_tensor_to_slot(tensor, slot)
-        # isend the slot index — non-blocking, returns immediately
+
         handshake = torch.tensor([slot], dtype=torch.int32, device="cpu")
-        dist_handle = _ORIGINAL_ISEND(handshake, dst)
-        return AsyncHandle(dist_handle, slot, self, is_send=True)
+        dist_handle = _ORIGINAL_ISEND(handshake, dst=dst, group=group, tag=tag)
 
-    def irecv(self, tensor, src):
+        return AsyncHandle(dist_handle, slot, self, dst=dst, tag=tag, group=group)
+
+    def irecv(self, tensor, src, group=None, tag: int = 0) -> AsyncHandleRecv:
         """
-        Non-blocking recv. Returns an AsyncHandleRecv whose .wait() must be
-        called before reading from tensor — data isn't valid until the
-        handshake arrives and SHM has been read.
+        Non-blocking recv:
+          - irecv handshake(slot)
+          - handle.wait() reads SHM into tensor and sends ACK
         """
-        # Allocate the handshake tensor HERE and store it on the handle so
-        # wait() can read the slot index out of it after the irecv completes.
-        # If we created it locally and didn't store it, wait() would have no
-        # way to know which SHM slot the sender wrote into.
         handshake = torch.tensor([0], dtype=torch.int32, device="cpu")
-        dist_handle = _ORIGINAL_IRECV(handshake, src)
-        return AsyncHandleRecv(dist_handle, handshake, tensor, src, self)
+        dist_handle = _ORIGINAL_IRECV(handshake, src=src, group=group, tag=tag)
+        return AsyncHandleRecv(
+            dist_handle, handshake, tensor, src, self, tag=tag, group=group
+        )
 
-    def _write_tensor_to_slot(self, tensor, slot):
+    # -----------------------------
+    # SHM read/write helpers
+    # -----------------------------
+
+    def _write_tensor_to_slot(self, tensor: torch.Tensor, slot: int):
         """
-        GPU → CPU → SHM.
-
-        For float16 tensors (hidden states): uses pre-allocated pinned memory
-        staging so the GPU→CPU copy goes through CUDA DMA (non_blocking=True).
-
-        For all other dtypes (e.g. torch.long for next_tokens): copies directly
-        to CPU and writes raw bytes into SHM without any dtype conversion.
-        Casting a long tensor to float16 would corrupt the token IDs.
+        GPU → CPU → SHM for float16 (via pinned staging).
+        Other dtypes copied safely CPU-contiguous → bytes.
         """
         nbytes = tensor.numel() * tensor.element_size()
-
         if nbytes > self.slot_size:
             raise ValueError(
                 f"Tensor {nbytes} bytes exceeds slot size {self.slot_size} bytes. "
@@ -220,62 +322,42 @@ class MIGPipelineTransport:
             )
 
         if tensor.dtype == torch.float16:
-            # Fast path: use pinned staging buffer for async DMA transfer
+            # For float16 we have pinned_staging (fast cart)
+            # Loading into fast cart
             numel = tensor.numel()
             staging = self.pinned_staging[slot]
             staging[:numel].copy_(tensor.view(-1), non_blocking=True)
+
+            # Stop right there. Freeze.
+            # Do not execute another line of Python code
+            # until the GPU confirms it has 100% finished all of its pending tasks
             torch.cuda.synchronize()
+
+            # Writing into memory from the fast cart
             raw = staging[:numel].numpy().view(np.uint8)
             self.my_np_slots[slot][:nbytes] = raw[:nbytes]
         else:
-            # Safe path: preserve exact dtype, flatten to 1D before view(uint8).
-            # .flatten() is required — without it, a (128,1) int64 tensor gives
-            # a (128,8) uint8 array which can't broadcast into the flat SHM slot.
+            # Slow path move from GPU to CPU
             cpu_tensor = tensor.detach().cpu().contiguous()
-            raw = cpu_tensor.numpy().flatten().view(np.uint8)
+            raw = cpu_tensor.numpy().reshape(-1).view(np.uint8)
             self.my_np_slots[slot][:nbytes] = raw[:nbytes]
 
-    def _read_tensor_from_slot(self, tensor, src, slot):
+    def _read_tensor_from_slot(self, tensor: torch.Tensor, src: int, slot: int):
         """
-        SHM → CPU → GPU.
-        Reads from the sender's SHM slot and copies into the destination tensor.
-        Uses the destination tensor's dtype so int64/float16 are both handled correctly.
+        SHM → CPU → GPU. Uses dtype map without forcing tensor.cpu().
         """
         nbytes = tensor.numel() * tensor.element_size()
-        target_dtype = tensor.cpu().numpy().dtype
+
+        np_dtype = _TORCH_TO_NUMPY.get(tensor.dtype)
+        if np_dtype is None:
+            raise TypeError(f"Unsupported dtype for SHM transport: {tensor.dtype}")
 
         raw_bytes = self.peer_slots[src][slot][:nbytes]
-        peer_data = np.frombuffer(raw_bytes, dtype=target_dtype)
+        peer_data = np.frombuffer(raw_bytes, dtype=np_dtype)
+
+        # copy() so numpy buffer doesn’t alias SHM as tensor lives beyond scope
         src_tensor = torch.from_numpy(peer_data.copy()).reshape(tensor.shape)
         tensor.copy_(src_tensor.to(tensor.device))
-
-
-class AsyncHandleRecv:
-    """
-    Specialized handle for non-blocking receives.
-    The actual SHM read happens inside wait() once the handshake confirms
-    the sender has finished writing.
-    """
-
-    def __init__(self, dist_handle, handshake, tensor, src, engine):
-        self._dist_handle = dist_handle
-        self._handshake = (
-            handshake  # Filled in-place by _ORIGINAL_IRECV with slot index
-        )
-        self._tensor = tensor
-        self._src = src
-        self._engine = engine
-        self._waited = False
-
-    def wait(self):
-        if not self._waited:
-            # Block until the handshake arrives from the sender.
-            # After this returns, self._handshake contains the slot index
-            # that the sender wrote its data into.
-            self._dist_handle.wait()
-            slot = self._handshake.item()
-            self._engine._read_tensor_from_slot(self._tensor, self._src, slot)
-            self._waited = True
 
 
 # --- MODULE LEVEL FUNCTIONS ---
@@ -283,6 +365,7 @@ class AsyncHandleRecv:
 
 def register_hooks():
     global _MIG_PIPE_ENGINE
+
     rank = dist.get_rank()
     world_size = dist.get_world_size()
 
@@ -294,38 +377,34 @@ def register_hooks():
     dist.recv = patched_recv
     dist.isend = patched_isend
     dist.irecv = patched_irecv
+
     torch.distributed.send = patched_send
     torch.distributed.recv = patched_recv
     torch.distributed.isend = patched_isend
     torch.distributed.irecv = patched_irecv
 
-    print(
-        f"[MIG-Pipe] Hooks registered for Rank {rank} (blocking + async)",
-        flush=True,
-    )
+    print(f"[MIG-Pipe] Hooks registered for Rank {rank} (ACK + tags)", flush=True)
 
 
 def patched_send(tensor, dst, group=None, tag=0):
     if _MIG_PIPE_ENGINE is not None:
-        _MIG_PIPE_ENGINE.send(tensor, dst)
-        return
-    return _ORIGINAL_SEND(tensor, dst, group, tag)
+        return _MIG_PIPE_ENGINE.send(tensor, dst, group=group, tag=tag)
+    return _ORIGINAL_SEND(tensor, dst, group=group, tag=tag)
 
 
 def patched_recv(tensor, src=None, group=None, tag=0):
     if _MIG_PIPE_ENGINE is not None:
-        _MIG_PIPE_ENGINE.recv(tensor, src)
-        return
-    return _ORIGINAL_RECV(tensor, src, group, tag)
+        return _MIG_PIPE_ENGINE.recv(tensor, src, group=group, tag=tag)
+    return _ORIGINAL_RECV(tensor, src, group=group, tag=tag)
 
 
 def patched_isend(tensor, dst, group=None, tag=0):
     if _MIG_PIPE_ENGINE is not None:
-        return _MIG_PIPE_ENGINE.isend(tensor, dst)
-    return _ORIGINAL_ISEND(tensor, dst, group, tag)
+        return _MIG_PIPE_ENGINE.isend(tensor, dst, group=group, tag=tag)
+    return _ORIGINAL_ISEND(tensor, dst, group=group, tag=tag)
 
 
 def patched_irecv(tensor, src=None, group=None, tag=0):
     if _MIG_PIPE_ENGINE is not None:
-        return _MIG_PIPE_ENGINE.irecv(tensor, src)
-    return _ORIGINAL_IRECV(tensor, src, group, tag)
+        return _MIG_PIPE_ENGINE.irecv(tensor, src, group=group, tag=tag)
+    return _ORIGINAL_IRECV(tensor, src, group=group, tag=tag)
