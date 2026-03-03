@@ -1,23 +1,20 @@
 import os
+import gc
+import json
+import queue
 import logging
 import traceback
-from typing import Dict, List, Tuple, Optional
+import datetime
+from typing import Dict, List, Optional
 
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 import torch.nn as nn
 import pandas as pd
-import queue
-import gc
-import json
 from tqdm import tqdm
 
-from transformers import (
-    DynamicCache,
-    LlamaConfig,
-    AutoTokenizer,
-)
+from transformers import DynamicCache, LlamaConfig, AutoTokenizer
 from transformers.models.llama.modeling_llama import (
     LlamaDecoderLayer,
     LlamaRMSNorm,
@@ -29,7 +26,6 @@ from datasets import load_dataset
 import mig_transport_pipeline_non_blocking as mig_transport
 import dcgm_mem_monitor as monitor
 
-
 # ---------------------------------------------------------------------------
 # LOGGING SETUP
 # ---------------------------------------------------------------------------
@@ -38,7 +34,6 @@ LOG_FILE = "benchmark.log"
 
 
 def setup_logging(log_file: str = LOG_FILE) -> None:
-    """Configure root logger to write to file only."""
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
@@ -49,7 +44,6 @@ def setup_logging(log_file: str = LOG_FILE) -> None:
 
 
 log = logging.getLogger(__name__)
-
 
 # --- CONFIGURATION ---
 MODEL_NAME = "lmsys/vicuna-7b-v1.5"
@@ -76,6 +70,10 @@ MIG_UUIDS = [
 
 LAYER_LIMITS = [24, 12, 6]
 
+# Dist message tag bases (avoid collisions)
+PREFILL_TAG_BASE = 1000
+DECODE_TAG_BASE = 2000
+TOKENS_TAG_BASE = 9000
 
 # ---------------------------------------------------------------------------
 # DATA LOADING
@@ -105,7 +103,6 @@ def get_wiki_sample(batch_size: int) -> torch.Tensor:
             truncation=True,
         )
         return inputs.input_ids.repeat(batch_size, 1)
-
     except Exception:
         log.warning("WikiText unavailable. Using random token IDs.")
         return torch.randint(0, 32000, (batch_size, SEQ_LEN))
@@ -135,7 +132,6 @@ def load_specific_weights(
         log.warning(f"[Rank {rank}] Weight map not found. Skipping.")
         return
 
-    # Speed: avoid repeated O(n) .index() calls
     layer_to_local: Dict[int, int] = {idx: i for i, idx in enumerate(my_layer_indices)}
 
     for shard_file in tqdm(shard_files, desc=f"Rank {rank} shards", leave=False):
@@ -176,12 +172,10 @@ def load_specific_weights(
                         sub_mod = getattr(sub_mod, sp)
                     getattr(sub_mod, sub_parts[-1]).data.copy_(value)
                 except AttributeError:
-                    # In case HF changes internals; keep benchmark running
                     pass
 
         del state_dict
         gc.collect()
-        # shard weights are CPU, but keep this (harmless) for safety in long runs
         torch.cuda.empty_cache()
 
     log.info(f"[Rank {rank}] Weights loaded.")
@@ -192,18 +186,49 @@ def load_specific_weights(
 # ---------------------------------------------------------------------------
 
 
+import torch
+import torch.nn as nn
+from typing import Optional, Tuple
+from transformers import DynamicCache
+
+
 def forward_through_layers(
     layers: nn.ModuleList,
     current_hidden: torch.Tensor,
-    position_embeddings,
+    position_embeddings: Tuple[torch.Tensor, torch.Tensor],
     mask: Optional[torch.Tensor],
     cache: DynamicCache,
 ) -> torch.Tensor:
-    for layer in layers:
-        residual = current_hidden
-        hidden_states = layer.input_layernorm(current_hidden)
+    """
+    Passes the input tensor sequentially through a specific chunk of Transformer layers.
 
-        attn_outputs = layer.self_attn(
+    Args:
+        layers: A list of LLaMA Decoder layers assigned to this specific GPU.
+        current_hidden: The input tensor containing the hidden states (activations) from the previous stage.
+        position_embeddings: A tuple of (cos, sin) tensors for Rotary Position Embeddings (RoPE) so the model knows word order.
+        mask: The attention mask (e.g., causal mask for prefill) to prevent words from looking into the future.
+        cache: The Key-Value cache storing previous context to speed up text generation.
+
+    Returns:
+        torch.Tensor: The upgraded hidden states after passing through all assigned layers.
+    """
+
+    # Loop through every single layer assigned to this specific GPU
+    for layer in layers:
+
+        # 1. SAVE THE RESIDUAL (Skip Connection)
+        # We keep an untouched copy of the data. If the complex math in this layer
+        # degrades the signal, the network can fall back on this original copy.
+        residual: torch.Tensor = current_hidden
+
+        # 2. PRE-ATTENTION NORMALIZATION (RMSNorm)
+        # Standardize the numbers to prevent them from growing too large and crashing the math.
+        hidden_states: torch.Tensor = layer.input_layernorm(current_hidden)
+
+        # 3. SELF-ATTENTION (The "Brain")
+        # Words look at other words in the sequence to gather context and meaning.
+        # It uses the cache to remember past words, and the mask to ignore future words.
+        attn_outputs: Tuple[torch.Tensor, ...] = layer.self_attn(
             hidden_states=hidden_states,
             position_embeddings=position_embeddings,
             attention_mask=mask,
@@ -211,13 +236,30 @@ def forward_through_layers(
             use_cache=True,
         )
 
+        # The self_attn function returns a tuple; the actual modified tensor is the first item [0].
         hidden_states = attn_outputs[0]
+
+        # 4. FIRST MERGE
+        # Add the new contextual insights (hidden_states) back into our untouched original copy (residual).
         hidden_states = residual + hidden_states
+
+        # 5. SAVE NEW RESIDUAL
+        # Update our "untouched copy" for the second half of the layer.
         residual = hidden_states
+
+        # 6. PRE-MLP NORMALIZATION
+        # Standardize the numbers again before the feed-forward network.
         hidden_states = layer.post_attention_layernorm(hidden_states)
+
+        # 7. MULTI-LAYER PERCEPTRON / MLP (The "Muscle")
+        # The AI processes the new context it just learned against its internal memorized weights.
         hidden_states = layer.mlp(hidden_states)
+
+        # 8. FINAL MERGE
+        # Add the MLP's output back into the residual to finalize this layer's upgrades.
         current_hidden = residual + hidden_states
 
+    # Hand the fully processed box of data back to the pipeline so it can be shipped to the next GPU
     return current_hidden
 
 
@@ -243,33 +285,52 @@ def run_pipeline(
         os.environ["MASTER_ADDR"] = "127.0.0.1"
         os.environ["MASTER_PORT"] = "29500"
 
-        dist.init_process_group("gloo", rank=rank, world_size=world_size)
+        dist.init_process_group(
+            backend="gloo",
+            rank=rank,
+            world_size=world_size,
+            timeout=datetime.timedelta(minutes=8),
+        )
 
         device = torch.device("cuda:0")
         torch.cuda.set_device(device)
 
-        # Patch dist send/recv to go through SHM transport
+        # Patch dist send/recv to go through SHM+ACK transport
         mig_transport.register_hooks()
 
+        # Getting model dimensions
         config = LlamaConfig.from_pretrained(MODEL_NAME)
+        # Using Scaled Dot-Product Attention (Flash attention)
         config._attn_implementation = "sdpa"
 
+        # Determing the start and end layer for each MIG instance
         start_layer = sum(split_config[:rank])
         end_layer = start_layer + split_config[rank]
         my_layer_indices = list(range(start_layer, end_layer))
 
         model_components: Dict[str, nn.Module] = {}
 
+        # In a pipeline setup, Rank 0 is the very first GPU in the assembly line. It is the only worker that actually receives the raw input text from the user.
+        # Because Ranks 1 and 2 only receive pre-processed mathematical data from the previous lockers,
+        # they don't need to know how to translate raw text. By putting this inside an if rank == 0 block,
+        # you prevent Ranks 1 and 2 from loading this translation dictionary into their memory, saving precious VRAM.
         if rank == 0:
             model_components["embed"] = (
                 nn.Embedding(config.vocab_size, config.hidden_size).to(device).half()
             )
 
+        # Registering layers with Torch
         layers = nn.ModuleList()
         for idx in my_layer_indices:
-            layers.append(LlamaDecoderLayer(config, layer_idx=idx).half().to(device))
+            layers.append(
+                LlamaDecoderLayer(config, layer_idx=idx).half().to(device)
+            )  # Empty physical layer
+
+            # This is critical to do for 5gb instance
             torch.cuda.empty_cache()
 
+        # Job of the last rank is the to translate raw data
+        # Into english sentences
         if rank == world_size - 1:
             model_components["norm"] = (
                 LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -282,15 +343,18 @@ def run_pipeline(
                 .half()
             )
 
-        # IMPORTANT: real inference mode (no dropout)
+        # Setting in inference mode
         for m in model_components.values():
             m.eval()
         layers.eval()
 
+        # RoPE (Rotary Position Embeddings)/
+        # This single line creates the mathematical compass (the sine and cosine angles)
+        # that will be passed into every single layer so the AI understands word order.
         rotary_emb = LlamaRotaryEmbedding(config=config, device=device)
-
         load_specific_weights(rank, layers, my_layer_indices, model_components)
 
+        # Deep clean after weight loading
         gc.collect()
         torch.cuda.empty_cache()
 
@@ -301,12 +365,14 @@ def run_pipeline(
             raise ValueError(
                 f"Batch size {batch_size} must be divisible by microbatch size {mb_size}"
             )
-        num_microbatches = batch_size // mb_size  # will be 1 for our test
+        num_microbatches = batch_size // mb_size
 
+        # Creating distinct KV cache for each microbatch
         past_key_values_list = [DynamicCache() for _ in range(num_microbatches)]
+        # waiting to hold the final predicted words for all batch_size amt of sentences.
         next_tokens = torch.zeros((batch_size, 1), dtype=torch.long, device=device)
 
-        # Precompute mask once (full causal mask for prefill)
+        # Standard prefill mask code
         prefill_mask = torch.full(
             (1, 1, seq_length, seq_length),
             torch.finfo(torch.float16).min,
@@ -314,38 +380,83 @@ def run_pipeline(
         )
         prefill_mask = torch.triu(prefill_mask, diagonal=1).half()
 
+        # Pre-allocate recv buffers (reuse; don’t allocate per step)
+        prefill_recv_bufs = None
+        decode_recv_bufs = None
+
+        # (the "Catching Mitts").
+        # Pre allocation of memory with zeroes so when we receive actual data
+        # There is no need for separate memory allocation
+        if rank > 0:
+            prefill_recv_bufs = [
+                torch.zeros(
+                    (mb_size, seq_length, config.hidden_size),
+                    dtype=torch.float16,
+                    device=device,
+                )
+                for _ in range(num_microbatches)
+            ]
+            decode_recv_bufs = [
+                torch.zeros(
+                    (mb_size, 1, config.hidden_size),
+                    dtype=torch.float16,
+                    device=device,
+                )
+                for _ in range(num_microbatches)
+            ]
+
         dist.barrier()
 
+        # Beginning of prefill loop
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)
         start_event.record()
 
+        # START FROM HERE
         with torch.no_grad():
 
-            # -------------------------
-            # PREFILL
-            # -------------------------
+            # =========================================================
+            # PREFILL — pipelined across microbatches
+            # =========================================================
+
+            # Rank > 0: post *all* irecvs up front (max overlap)
+            if rank > 0:
+                prefill_recv_bufs = [
+                    torch.zeros(
+                        (mb_size, seq_length, config.hidden_size),
+                        dtype=torch.float16,
+                        device=device,
+                    )
+                    for _ in range(num_microbatches)
+                ]
+                prefill_recv_handles = [
+                    dist.irecv(
+                        prefill_recv_bufs[i],
+                        src=rank - 1,
+                        tag=PREFILL_TAG_BASE + i,
+                    )
+                    for i in range(num_microbatches)
+                ]
+
+            send_handles = []
+
             for mb_idx in range(num_microbatches):
                 start_idx = mb_idx * mb_size
                 end_idx = start_idx + mb_size
+                tag = PREFILL_TAG_BASE + mb_idx
 
                 if rank == 0:
                     current_hidden = model_components["embed"](
                         input_ids[start_idx:end_idx]
                     ).half()
                 else:
-                    recv_buf = torch.zeros(
-                        (mb_size, seq_length, config.hidden_size),
-                        dtype=torch.float16,
-                        device=device,
-                    )
-                    dist.recv(recv_buf, src=rank - 1)
-                    current_hidden = recv_buf
+                    # Just wait when you actually need MB(k)
+                    prefill_recv_handles[mb_idx].wait()
+                    current_hidden = prefill_recv_bufs[mb_idx]
 
                 position_ids = torch.arange(
                     0, seq_length, dtype=torch.long, device=device
                 ).unsqueeze(0)
-
                 position_embeddings = rotary_emb(current_hidden, position_ids)
 
                 current_hidden = forward_through_layers(
@@ -359,53 +470,72 @@ def run_pipeline(
                 if rank == world_size - 1:
                     normed = model_components["norm"](current_hidden)
                     logits = model_components["lm_head"](normed[:, -1:, :])
-                    mb_next = torch.argmax(logits, dim=-1)
-                    next_tokens[start_idx:end_idx] = mb_next
+                    next_tokens[start_idx:end_idx] = torch.argmax(logits, dim=-1)
 
                 if rank < world_size - 1:
-                    # clone() keeps semantics safe if transport reads after return
-                    dist.send(current_hidden.clone(), dst=rank + 1)
+                    h = dist.isend(current_hidden.clone(), dst=rank + 1, tag=tag)
+                    send_handles.append(h)
 
-            # Share next tokens back to rank0
+            # Drain sends (and ACKs if your transport uses ACK on wait())
+            for h in send_handles:
+                h.wait()
+
+            # Share next_tokens rank2 → rank0 (tagged)
+            tok_tag = TOKENS_TAG_BASE + 0
             if rank == world_size - 1:
-                dist.send(next_tokens, dst=0)
+                dist.send(next_tokens, dst=0, tag=tok_tag)
             elif rank == 0:
-                dist.recv(next_tokens, src=world_size - 1)
+                dist.recv(next_tokens, src=world_size - 1, tag=tok_tag)
 
             dist.barrier()
 
-            # -------------------------
-            # DECODE (512 steps)
-            # -------------------------
+            # =========================================================
+            # DECODE — pipelined across microbatches
+            # =========================================================
             for step in range(1, MAX_NEW_TOKENS + 1):
-                # (mb_size, 1)
-                position_ids = torch.tensor(
-                    [[seq_length + step - 1]], dtype=torch.long, device=device
-                ).expand(mb_size, -1)
+                position_ids = (
+                    torch.tensor(
+                        [[seq_length + step - 1]], dtype=torch.long, device=device
+                    )
+                    .expand(mb_size, -1)
+                    .contiguous()
+                )
 
-                prev_send_handle = None
+                # Rank > 0: reuse decode buffers, post *all* irecvs up front
+                if rank > 0:
+                    # Allocate once outside the step loop if you want (better).
+                    # If you keep it here, it’s still correct but more overhead.
+                    decode_recv_bufs = [
+                        torch.zeros(
+                            (mb_size, 1, config.hidden_size),
+                            dtype=torch.float16,
+                            device=device,
+                        )
+                        for _ in range(num_microbatches)
+                    ]
+                    decode_recv_handles = [
+                        dist.irecv(
+                            decode_recv_bufs[i],
+                            src=rank - 1,
+                            tag=DECODE_TAG_BASE + step * 10_000 + i,
+                        )
+                        for i in range(num_microbatches)
+                    ]
+
+                send_handles = []
 
                 for mb_idx in range(num_microbatches):
                     start_idx = mb_idx * mb_size
                     end_idx = start_idx + mb_size
-
-                    if prev_send_handle is not None:
-                        prev_send_handle.wait()
-                        prev_send_handle = None
+                    tag = DECODE_TAG_BASE + step * 10_000 + mb_idx
 
                     if rank == 0:
                         current_hidden = model_components["embed"](
                             next_tokens[start_idx:end_idx]
                         ).half()
                     else:
-                        recv_buf = torch.zeros(
-                            (mb_size, 1, config.hidden_size),
-                            dtype=torch.float16,
-                            device=device,
-                        )
-                        recv_handle = dist.irecv(recv_buf, src=rank - 1)
-                        recv_handle.wait()
-                        current_hidden = recv_buf
+                        decode_recv_handles[mb_idx].wait()
+                        current_hidden = decode_recv_bufs[mb_idx]
 
                     position_embeddings = rotary_emb(current_hidden, position_ids)
 
@@ -420,22 +550,22 @@ def run_pipeline(
                     if rank == world_size - 1:
                         normed = model_components["norm"](current_hidden)
                         logits = model_components["lm_head"](normed)
-                        mb_next = torch.argmax(logits, dim=-1)
-                        next_tokens[start_idx:end_idx] = mb_next
+                        next_tokens[start_idx:end_idx] = torch.argmax(logits, dim=-1)
 
                     if rank < world_size - 1:
-                        prev_send_handle = dist.isend(
-                            current_hidden.clone(), dst=rank + 1
-                        )
+                        h = dist.isend(current_hidden.clone(), dst=rank + 1, tag=tag)
+                        send_handles.append(h)
 
-                if prev_send_handle is not None:
-                    prev_send_handle.wait()
+                for h in send_handles:
+                    h.wait()
 
+                # next_tokens exchange (still a sync point; not a “bug”)
                 if step < MAX_NEW_TOKENS:
+                    tok_tag = TOKENS_TAG_BASE + step
                     if rank == world_size - 1:
-                        dist.send(next_tokens, dst=0)
+                        dist.send(next_tokens, dst=0, tag=tok_tag)
                     elif rank == 0:
-                        dist.recv(next_tokens, src=world_size - 1)
+                        dist.recv(next_tokens, src=world_size - 1, tag=tok_tag)
 
         dist.barrier()
         end_event.record()
@@ -450,7 +580,7 @@ def run_pipeline(
         dist.destroy_process_group()
 
     except torch.cuda.OutOfMemoryError:
-        log.error(f"[Rank {rank}] OOM — unexpected for this safe config.")
+        log.error(f"[Rank {rank}] OOM")
         result_queue.put(("oom", rank))
         try:
             dist.destroy_process_group()
@@ -488,7 +618,6 @@ def generate_layer_splits():
 def main():
     setup_logging()
 
-    # Monitor optional; keep as you had
     log.info("Setting up DCGM monitor group...")
     monitor.setup_dcgm_group()
 
@@ -538,9 +667,7 @@ def main():
                     p.start()
                     procs.append(p)
 
-                # Wait up to N seconds for each rank; then kill any stragglers.
                 JOIN_TIMEOUT_S = 1200
-
                 for p in procs:
                     p.join(timeout=JOIN_TIMEOUT_S)
 
@@ -557,7 +684,10 @@ def main():
 
                 monitor.stop()
 
+                # Sample row: (timestamp, label, gpu_mb, gi0_mb, gi1_mb, gi2_mb)
+                # In your monitor file comment: gi0_mb is the 5GB slice (Rank2).
                 run_samples = list(monitor._samples)
+                print("rum samples", run_samples)
                 peak_gi5_mb = max((row[3] for row in run_samples), default=0)
                 avg_gi5_mb = (
                     (sum(row[3] for row in run_samples) / len(run_samples))
@@ -579,13 +709,13 @@ def main():
                     "batch_size": batch_size,
                     "microbatch_size": mb_size,
                     "num_microbatches": batch_size // mb_size,
+                    "max_new_tokens": MAX_NEW_TOKENS,
                     "peak_gi5gb_mb": peak_gi5_mb,
                     "avg_gi5gb_mb": round(avg_gi5_mb),
                     "total_latency_ms": None,
                     "status": None,
                 }
 
-                # IMPORTANT: hung must take priority and not be overwritten
                 if hung:
                     base_row["status"] = "hang"
 
@@ -629,8 +759,6 @@ def main():
     df = pd.DataFrame(results)
     df.to_csv("mig_benchmark_results.csv", index=False)
 
-    # Save full DCGM memory trace across all runs — one row per 500ms sample,
-    # labelled by configuration for post-run plotting
     monitor.save_csv("mig_memory_trace.csv")
 
     successful = df[df["status"] == "ok"]
@@ -641,17 +769,17 @@ def main():
             f"Split: {best_lat['split']} | Batch: {best_lat['batch_size']} "
             f"| MB: {best_lat['microbatch_size']} "
             f"| Latency: {best_lat['total_latency_ms']:.0f} ms "
-            f"| Peak GI-2: {best_lat['peak_gi2_mb']} MB"
+            f"| Peak 5GB: {best_lat['peak_gi5gb_mb']} MB"
         )
 
-        log.info("--- Most Memory Efficient (lowest peak GI-2 at batch=64) ---")
+        log.info("--- Most Memory Efficient (lowest peak 5GB at batch=64) ---")
         b64 = successful[successful["batch_size"] == 64]
         if not b64.empty:
-            best_mem = b64.loc[b64["peak_gi2_mb"].idxmin()]
+            best_mem = b64.loc[b64["peak_gi5gb_mb"].idxmin()]
             log.info(
                 f"Split: {best_mem['split']} | MB: {best_mem['microbatch_size']} "
                 f"| Latency: {best_mem['total_latency_ms']:.0f} ms "
-                f"| Peak GI-2: {best_mem['peak_gi2_mb']} MB"
+                f"| Peak 5GB: {best_mem['peak_gi5gb_mb']} MB"
             )
 
         oom_count = len(df[df["status"].str.startswith("OOM", na=False)])
