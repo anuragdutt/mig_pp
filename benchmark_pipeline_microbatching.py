@@ -56,16 +56,21 @@ MAX_NEW_TOKENS = 512
 
 BATCH_MB_PAIRS = [
     (32, 16),
-    (64, 16),
+    (32, 8),
+    (32, 4),
+    (32, 2),
+    # batch 64
     (64, 32),
-    (128, 16),
-    (128, 32),
+    (64, 16),
+    (64, 8),
+    (64, 4),
+    (64, 2),
 ]
 
 MIG_UUIDS = [
-    "MIG-c2cc1c36-c2ce-5fb7-b0b6-314533a3f0b4",  # Rank 0: 20GB
-    "MIG-e2bdc502-5cb8-54ef-af62-fc9961c40f92",  # Rank 1: 10GB
-    "MIG-55f42e36-5e0b-5895-be54-edd0181504fa",  # Rank 2: 5GB
+    "MIG-09a1bb3c-0991-56c2-9329-c02e8affb4b1",  # Rank 0: 20GB
+    "MIG-1b2ada91-968c-5633-9dfb-c2916f4635b8",  # Rank 1: 10GB
+    "MIG-9afa585a-bfb3-5290-b9cb-8e761eb503c9",  # Rank 2: 5GB
 ]
 
 LAYER_LIMITS = [24, 12, 6]
@@ -687,7 +692,7 @@ def main():
                 # Sample row: (timestamp, label, gpu_mb, gi0_mb, gi1_mb, gi2_mb)
                 # In your monitor file comment: gi0_mb is the 5GB slice (Rank2).
                 run_samples = list(monitor._samples)
-                print("rum samples", run_samples)
+                # print("rum samples", run_samples)
                 peak_gi5_mb = max((row[3] for row in run_samples), default=0)
                 avg_gi5_mb = (
                     (sum(row[3] for row in run_samples) / len(run_samples))
