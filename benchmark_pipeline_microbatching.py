@@ -68,12 +68,12 @@ BATCH_MB_PAIRS = [
 ]
 
 MIG_UUIDS = [
-    "MIG-09a1bb3c-0991-56c2-9329-c02e8affb4b1",  # Rank 0: 20GB
-    "MIG-1b2ada91-968c-5633-9dfb-c2916f4635b8",  # Rank 1: 10GB
-    "MIG-9afa585a-bfb3-5290-b9cb-8e761eb503c9",  # Rank 2: 5GB
+    "MIG-98f93df6-d522-5c00-9923-4326839cef2e",  # Rank 0: 20GB (3G)
+    "MIG-153fcb3c-9412-5240-937b-67bc18179f24",  # Rank 1: 10GB (2G)
+    "MIG-31c09df0-4c4c-5751-9328-6f4c6c7c8ab2",  # Rank 2: 10GB (2G)
 ]
 
-LAYER_LIMITS = [24, 12, 6]
+LAYER_LIMITS = [24, 12, 12]
 
 # Dist message tag bases (avoid collisions)
 PREFILL_TAG_BASE = 1000
