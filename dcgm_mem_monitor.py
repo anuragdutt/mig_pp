@@ -52,9 +52,9 @@ def _get_group_id() -> int:
 
 def setup_dcgm_group():
     """
-    Create ç group with:
+    Create a group with:
       - physical GPU 0
-      - ONLY the 5GB MIG slice (EntityID: 0)
+      - ONLY the first 5GB MIG slice (GI ID: 9, Rank 2)
     """
 
     # Delete existing group if present

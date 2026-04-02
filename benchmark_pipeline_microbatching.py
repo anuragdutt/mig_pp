@@ -68,12 +68,13 @@ BATCH_MB_PAIRS = [
 ]
 
 MIG_UUIDS = [
-    "MIG-98f93df6-d522-5c00-9923-4326839cef2e",  # Rank 0: 20GB (3G)
-    "MIG-153fcb3c-9412-5240-937b-67bc18179f24",  # Rank 1: 10GB (2G)
-    "MIG-31c09df0-4c4c-5751-9328-6f4c6c7c8ab2",  # Rank 2: 10GB (2G)
+    "MIG-98f93df6-d522-5c00-9923-4326839cef2e",  # Rank 0: 20GB (3g.20gb)
+    "MIG-153fcb3c-9412-5240-937b-67bc18179f24",  # Rank 1: 10GB (2g.10gb)
+    "MIG-222909dc-5318-5493-8680-34be7bab2cc6",  # Rank 2:  5GB (1g.5gb)
+    "MIG-1686f8c1-5536-5f2a-a26f-79b69db93f30",  # Rank 3:  5GB (1g.5gb)
 ]
 
-LAYER_LIMITS = [24, 12, 12]
+LAYER_LIMITS = [24, 12, 6, 6]
 
 # Dist message tag bases (avoid collisions)
 PREFILL_TAG_BASE = 1000
@@ -148,7 +149,7 @@ def load_specific_weights(
                 model_components["embed"].weight.data.copy_(value)
                 continue
 
-            if rank == 2:
+            if rank == 3:
                 if "norm.weight" in key and "norm" in model_components:
                     model_components["norm"].weight.data.copy_(value)
                     continue
@@ -609,9 +610,10 @@ def generate_layer_splits():
     valid_splits = []
     for l0 in range(1, LAYER_LIMITS[0] + 1):
         for l1 in range(1, LAYER_LIMITS[1] + 1):
-            l2 = TOTAL_LAYERS - (l0 + l1)
-            if 1 <= l2 <= LAYER_LIMITS[2]:
-                valid_splits.append([l0, l1, l2])
+            for l2 in range(1, LAYER_LIMITS[2] + 1):
+                l3 = TOTAL_LAYERS - (l0 + l1 + l2)
+                if 1 <= l3 <= LAYER_LIMITS[3]:
+                    valid_splits.append([l0, l1, l2, l3])
     return valid_splits
 
 
@@ -656,12 +658,12 @@ def main():
             procs: list[mp.Process] = []
 
             try:
-                for rank in range(3):
+                for rank in range(4):
                     p = mp.Process(
                         target=run_pipeline,
                         args=(
                             rank,
-                            3,
+                            4,
                             split,
                             q,
                             MIG_UUIDS[rank],
@@ -689,8 +691,8 @@ def main():
 
                 monitor.stop()
 
-                # Sample row: (timestamp, label, gpu_mb, gi0_mb, gi1_mb, gi2_mb)
-                # In your monitor file comment: gi0_mb is the 5GB slice (Rank2).
+                # Sample row: (timestamp, label, gpu_mb, gi0_mb, gi1_mb, gi2_mb, gi3_mb)
+                # gi2_mb / gi3_mb are the two 5GB slices (Ranks 2 and 3).
                 run_samples = list(monitor._samples)
                 # print("rum samples", run_samples)
                 peak_gi5_mb = max((row[3] for row in run_samples), default=0)
