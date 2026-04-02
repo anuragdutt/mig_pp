@@ -46,10 +46,10 @@ def setup_logging(log_file: str = LOG_FILE) -> None:
 log = logging.getLogger(__name__)
 
 # --- CONFIGURATION ---
-MODEL_NAME = "lmsys/vicuna-7b-v1.5"
-TOTAL_LAYERS = 32
-HIDDEN_SIZE = 4096
-HEADS = 32
+MODEL_NAME = "lmsys/vicuna-13b-v1.5"
+TOTAL_LAYERS = 40
+HIDDEN_SIZE = 5120
+HEADS = 40
 
 SEQ_LEN = 64
 MAX_NEW_TOKENS = 512
@@ -74,7 +74,7 @@ MIG_UUIDS = [
     "MIG-1686f8c1-5536-5f2a-a26f-79b69db93f30",  # Rank 3:  5GB (1g.5gb)
 ]
 
-LAYER_LIMITS = [24, 12, 6, 6]
+LAYER_LIMITS = [22, 10, 5, 5]
 
 # Dist message tag bases (avoid collisions)
 PREFILL_TAG_BASE = 1000
@@ -86,6 +86,7 @@ TOKENS_TAG_BASE = 9000
 # ---------------------------------------------------------------------------
 
 
+# COMPLETE
 def get_wiki_sample(batch_size: int) -> torch.Tensor:
     log.info(f"Loading WikiText... (SEQ_LEN={SEQ_LEN}, BATCH={batch_size})")
     try:
@@ -119,6 +120,7 @@ def get_wiki_sample(batch_size: int) -> torch.Tensor:
 # ---------------------------------------------------------------------------
 
 
+# COMPLETE
 def load_specific_weights(
     rank: int,
     my_layers: nn.ModuleList,
@@ -221,59 +223,22 @@ def forward_through_layers(
 
     # Loop through every single layer assigned to this specific GPU
     for layer in layers:
-
-        # 1. SAVE THE RESIDUAL (Skip Connection)
-        # We keep an untouched copy of the data. If the complex math in this layer
-        # degrades the signal, the network can fall back on this original copy.
-        residual: torch.Tensor = current_hidden
-
-        # 2. PRE-ATTENTION NORMALIZATION (RMSNorm)
-        # Standardize the numbers to prevent them from growing too large and crashing the math.
-        hidden_states: torch.Tensor = layer.input_layernorm(current_hidden)
-
-        # 3. SELF-ATTENTION (The "Brain")
-        # Words look at other words in the sequence to gather context and meaning.
-        # It uses the cache to remember past words, and the mask to ignore future words.
-        attn_outputs: Tuple[torch.Tensor, ...] = layer.self_attn(
-            hidden_states=hidden_states,
-            position_embeddings=position_embeddings,
+        layer_outputs: Tuple[torch.Tensor, ...] = layer(
+            hidden_states=current_hidden,
             attention_mask=mask,
-            past_key_values=cache,
+            position_embeddings=position_embeddings,
+            past_key_value=cache,
             use_cache=True,
         )
 
-        # The self_attn function returns a tuple; the actual modified tensor is the first item [0].
-        hidden_states = attn_outputs[0]
+        current_hidden = layer_outputs[0]
 
-        # 4. FIRST MERGE
-        # Add the new contextual insights (hidden_states) back into our untouched original copy (residual).
-        hidden_states = residual + hidden_states
-
-        # 5. SAVE NEW RESIDUAL
-        # Update our "untouched copy" for the second half of the layer.
-        residual = hidden_states
-
-        # 6. PRE-MLP NORMALIZATION
-        # Standardize the numbers again before the feed-forward network.
-        hidden_states = layer.post_attention_layernorm(hidden_states)
-
-        # 7. MULTI-LAYER PERCEPTRON / MLP (The "Muscle")
-        # The AI processes the new context it just learned against its internal memorized weights.
-        hidden_states = layer.mlp(hidden_states)
-
-        # 8. FINAL MERGE
-        # Add the MLP's output back into the residual to finalize this layer's upgrades.
-        current_hidden = residual + hidden_states
-
-    # Hand the fully processed box of data back to the pipeline so it can be shipped to the next GPU
     return current_hidden
 
 
 # ---------------------------------------------------------------------------
 # PIPELINE WORKER
 # ---------------------------------------------------------------------------
-
-
 def run_pipeline(
     rank: int,
     world_size: int,
@@ -418,23 +383,14 @@ def run_pipeline(
         end_event = torch.cuda.Event(enable_timing=True)
         start_event.record()
 
-        # START FROM HERE
         with torch.no_grad():
-
             # =========================================================
             # PREFILL — pipelined across microbatches
             # =========================================================
 
             # Rank > 0: post *all* irecvs up front (max overlap)
             if rank > 0:
-                prefill_recv_bufs = [
-                    torch.zeros(
-                        (mb_size, seq_length, config.hidden_size),
-                        dtype=torch.float16,
-                        device=device,
-                    )
-                    for _ in range(num_microbatches)
-                ]
+
                 prefill_recv_handles = [
                     dist.irecv(
                         prefill_recv_bufs[i],
@@ -509,16 +465,9 @@ def run_pipeline(
 
                 # Rank > 0: reuse decode buffers, post *all* irecvs up front
                 if rank > 0:
-                    # Allocate once outside the step loop if you want (better).
-                    # If you keep it here, it’s still correct but more overhead.
-                    decode_recv_bufs = [
-                        torch.zeros(
-                            (mb_size, 1, config.hidden_size),
-                            dtype=torch.float16,
-                            device=device,
-                        )
-                        for _ in range(num_microbatches)
-                    ]
+                    for buf in decode_recv_bufs:
+                        buf.zero_()
+
                     decode_recv_handles = [
                         dist.irecv(
                             decode_recv_bufs[i],
@@ -612,7 +561,10 @@ def generate_layer_splits():
         for l1 in range(1, LAYER_LIMITS[1] + 1):
             for l2 in range(1, LAYER_LIMITS[2] + 1):
                 l3 = TOTAL_LAYERS - (l0 + l1 + l2)
-                if 1 <= l3 <= LAYER_LIMITS[3]:
+                # Enforce that bigger MIG instances always get more layers than smaller ones.
+                # 20GB (l0) > 10GB (l1) > 5GB (l2) >= 5GB (l3).
+                # The last two are both 5GB so they're allowed to be equal.
+                if 1 <= l3 <= LAYER_LIMITS[3] and l0 > l1 > l2 >= l3:
                     valid_splits.append([l0, l1, l2, l3])
     return valid_splits
 
@@ -695,12 +647,18 @@ def main():
                 # gi2_mb / gi3_mb are the two 5GB slices (Ranks 2 and 3).
                 run_samples = list(monitor._samples)
                 # print("rum samples", run_samples)
-                peak_gi5_mb = max((row[3] for row in run_samples), default=0)
-                avg_gi5_mb = (
-                    (sum(row[3] for row in run_samples) / len(run_samples))
-                    if run_samples
-                    else 0
-                )
+                peak_per_rank = [
+                    max((row[3 + r] for row in run_samples), default=0)
+                    for r in range(4)
+                ]
+                avg_per_rank = [
+                    (
+                        (sum(row[3 + r] for row in run_samples) / len(run_samples))
+                        if run_samples
+                        else 0
+                    )
+                    for r in range(4)
+                ]
 
                 exit_codes = [p.exitcode for p in procs]
                 queue_items = {}
@@ -717,8 +675,14 @@ def main():
                     "microbatch_size": mb_size,
                     "num_microbatches": batch_size // mb_size,
                     "max_new_tokens": MAX_NEW_TOKENS,
-                    "peak_gi5gb_mb": peak_gi5_mb,
-                    "avg_gi5gb_mb": round(avg_gi5_mb),
+                    "peak_rank0_20gb_mb": peak_per_rank[0],
+                    "peak_rank1_10gb_mb": peak_per_rank[1],
+                    "peak_rank2_5gb_mb": peak_per_rank[2],
+                    "peak_rank3_5gb_mb": peak_per_rank[3],
+                    "avg_rank0_20gb_mb": round(avg_per_rank[0]),
+                    "avg_rank1_10gb_mb": round(avg_per_rank[1]),
+                    "avg_rank2_5gb_mb": round(avg_per_rank[2]),
+                    "avg_rank3_5gb_mb": round(avg_per_rank[3]),
                     "total_latency_ms": None,
                     "status": None,
                 }
@@ -738,8 +702,8 @@ def main():
                 elif "latency" in queue_items:
                     latency = queue_items["latency"]
                     log.info(f"Total latency:     {latency:.0f} ms")
-                    log.info(f"Peak 5GB memory:   {peak_gi5_mb} MB")
-                    log.info(f"Avg  5GB memory:   {avg_gi5_mb:.0f} MB")
+                    log.info(f"Peak 5GB memory:   {peak_per_rank[3]} MB")
+                    log.info(f"Avg  5GB memory:   {avg_per_rank[3]:.0f} MB")
                     base_row["total_latency_ms"] = latency
                     base_row["status"] = "ok"
 
@@ -772,21 +736,27 @@ def main():
     if not successful.empty:
         log.info("--- Best by Latency ---")
         best_lat = successful.loc[successful["total_latency_ms"].idxmin()]
+
         log.info(
             f"Split: {best_lat['split']} | Batch: {best_lat['batch_size']} "
             f"| MB: {best_lat['microbatch_size']} "
             f"| Latency: {best_lat['total_latency_ms']:.0f} ms "
-            f"| Peak 5GB: {best_lat['peak_gi5gb_mb']} MB"
+            f"| Peak R2: {best_lat['peak_rank2_5gb_mb']} MB "
+            f"| Peak R3: {best_lat['peak_rank3_5gb_mb']} MB"
         )
 
         log.info("--- Most Memory Efficient (lowest peak 5GB at batch=64) ---")
+
         b64 = successful[successful["batch_size"] == 64]
+
         if not b64.empty:
-            best_mem = b64.loc[b64["peak_gi5gb_mb"].idxmin()]
+            best_mem = b64.loc[b64["peak_rank2_5gb_mb"].idxmin()]
+
             log.info(
                 f"Split: {best_mem['split']} | MB: {best_mem['microbatch_size']} "
                 f"| Latency: {best_mem['total_latency_ms']:.0f} ms "
-                f"| Peak 5GB: {best_mem['peak_gi5gb_mb']} MB"
+                f"| Peak R2: {best_mem['peak_rank2_5gb_mb']} MB "
+                f"| Peak R3: {best_mem['peak_rank3_5gb_mb']} MB"
             )
 
         oom_count = len(df[df["status"].str.startswith("OOM", na=False)])

@@ -23,7 +23,8 @@ _ORIGINAL_IRECV = dist.irecv
 
 # Number of ring buffer slots per rank.
 # Must be >= max microbatches in flight at once.
-NUM_SLOTS = 10
+# Max microbatches comes from the smallest microbatch size: batch=64 / mb=2 = 32.
+NUM_SLOTS = 32
 
 # ACK tag is tag + ACK_TAG_OFFSET so it never collides with normal handshakes
 ACK_TAG_OFFSET = 10_000_000
@@ -39,6 +40,13 @@ _TORCH_TO_NUMPY = {
     torch.uint8: np.uint8,
     torch.bool: np.bool_,
 }
+
+
+def _compute_slot_size_mb(hidden_size=5120, max_mb_size=32, max_seq_len=64):
+    """Largest tensor: prefill activation (mb_size × seq_len × hidden × 2 bytes)"""
+    max_bytes = max_mb_size * max_seq_len * hidden_size * 2  # fp16
+    mb = (max_bytes // (1024 * 1024)) + 1  # round up
+    return mb
 
 
 # When you use non-blocking communication (isend/irecv), PyTorch returns a "handle" you can wait on later.
@@ -370,7 +378,9 @@ def register_hooks():
     world_size = dist.get_world_size()
 
     if _MIG_PIPE_ENGINE is None:
-        _MIG_PIPE_ENGINE = MIGPipelineTransport(rank, world_size)
+        _MIG_PIPE_ENGINE = MIGPipelineTransport(
+            rank, world_size, buffer_size_mb=_compute_slot_size_mb()
+        )
 
     # Patch both blocking and non-blocking variants
     dist.send = patched_send
