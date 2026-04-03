@@ -11,13 +11,23 @@ SAMPLE_INTERVAL_MS = 500
 FIELD_FBUSED = "252"  # DCGM's internal code for "Framebuffer Memory Used"
 NUM_MIG_INSTANCES = 4
 
+# DCGM GPU-I entity IDs (from: sudo dcgmi dmon -e 252)
+# These are NOT nvidia-smi GI IDs — they're DCGM's own numbering
+# Mapping confirmed by idle memory footprint
+DCGM_ID_TO_RANK = {
+    3: 0,  # GPU-I 3 → 37MB idle → 3g.20gb (Rank 0)
+    2: 1,  # GPU-I 2 → 25MB idle → 2g.10gb (Rank 1)
+    0: 2,  # GPU-I 0 → 12MB idle → 1g.5gb  (Rank 2)
+    1: 3,  # GPU-I 1 → 12MB idle → 1g.5gb  (Rank 3)
+}
+
 # Change the sample format to hold all 4 MIG instances
 # Samples: (timestamp, label, gpu_mb, gi0_mb, gi1_mb, gi2_mb, gi3_mb)
 _samples: List[Tuple[str, str, int, int, int, int, int]] = []
 
 # Maps DCGM GPU-I entity index → rank
 # Populated by setup_dcgm_group()
-_gi_index_to_rank: Dict[int, int] = {}
+# _gi_index_to_rank: Dict[int, int] = {}
 
 _label = "idle"
 _stop = threading.Event()
@@ -58,47 +68,9 @@ def _get_group_id() -> int:
 
 
 def setup_dcgm_group():
-    """
-    Auto-discover all MIG GPU Instance IDs via nvidia-smi,
-    map them to ranks by matching UUIDs, and create a DCGM group
-    with the physical GPU + all 4 GPU instances.
-    """
-    global _gi_index_to_rank
+    """Create DCGM group with GPU 0 + all 4 MIG instances."""
 
-    # --- Step 1: Discover GI IDs and their UUIDs ---
-    # nvidia-smi mig -lgi outputs lines like:
-    # +-------+-------+-------+------+------+------+-------+
-    # | GPU   | Name  |  ...  |  GI  | ...  | ... | UUID  |
-    # Format varies, so we parse nvidia-smi -L which is simpler
-
-    # Get MIG device list: "MIG 3g.20gb Device 0: ... (UUID: MIG-xxxxx)"
-    out = _run("nvidia-smi -L")
-
-    # Also get GI ID mapping from nvidia-smi
-    gi_out = _run("sudo nvidia-smi mig -lgi")
-
-    # Parse GI IDs from nvidia-smi mig -lgi
-    # Lines look like:
-    # +----+----------------------+-------+---------+...
-    # | 0  | 0  |  3g.20gb  | ...
-    # We need GI ID (second column) and profile name
-    gi_ids = []
-    for line in gi_out.splitlines():
-        # Match lines with GI data: "| GPU | GI ID | CI ID | ..."
-        m = re.match(r"\s*\|\s*\d+\s*\|\s*(\d+)\s*\|", line)
-        if m:
-            gi_ids.append(int(m.group(1)))
-
-    if len(gi_ids) < NUM_MIG_INSTANCES:
-        print(
-            f"[MemMonitor] WARNING: Found only {len(gi_ids)} GPU instances, "
-            f"expected {NUM_MIG_INSTANCES}. GI IDs: {gi_ids}"
-        )
-        print(f"[MemMonitor] Raw output:\n{gi_out}")
-
-    print(f"[MemMonitor] Discovered GI IDs: {gi_ids}")
-
-    # --- Step 2: Delete existing group if present ---
+    # Delete existing group if present
     out = _run("sudo dcgmi group -l")
     lines = out.splitlines()
     for i, line in enumerate(lines):
@@ -108,28 +80,25 @@ def setup_dcgm_group():
                 if m:
                     gid = m.group(1)
                     _run(f"sudo dcgmi group -d {gid}")
-                    print(f"[MemMonitor] Successfully removed group {gid}")
+                    print(f"[MemMonitor] Removed old group {gid}")
             break
 
-    # --- Step 3: Create group with GPU 0 + all GPU instances ---
-    # DCGM entity format: "0" for GPU 0, "i:<N>" for GPU Instance N
-    entity_parts = ["0"] + [f"i:{gi}" for gi in gi_ids]
-    entity_str = ",".join(entity_parts)
-
-    out = _run(f"sudo dcgmi group -c {DCGM_GROUP_NAME} -a {entity_str}")
+    # Create group with GPU 0
+    out = _run(f"sudo dcgmi group -c {DCGM_GROUP_NAME} -a 0")
     print(f"[MemMonitor] {out.strip()}")
 
-    # --- Step 4: Build DCGM GPU-I index → rank mapping ---
-    # dcgmi dmon outputs "GPU-I 0", "GPU-I 1", etc. in the order
-    # the instances were added. Map by GI ID order → rank.
-    # GI IDs are sorted by creation order which matches rank order
-    # if MIG was set up rank 0 first, rank 3 last.
-    _gi_index_to_rank = {}
-    for dcgm_idx, gi_id in enumerate(sorted(gi_ids)):
-        _gi_index_to_rank[dcgm_idx] = dcgm_idx  # rank == sorted position
+    # Parse the new group ID
+    m = re.search(r"group ID of (\d+)", out)
+    if not m:
+        raise RuntimeError(f"Failed to create DCGM group. Output: {out}")
+    group_id = m.group(1)
 
-    print(f"[MemMonitor] GPU-I index → rank mapping: {_gi_index_to_rank}")
-    print(f"[MemMonitor] VERIFY THIS: rank 0=20GB, rank 1=10GB, rank 2=5GB, rank 3=5GB")
+    # Add each GPU instance individually
+    for dcgm_id in sorted(DCGM_ID_TO_RANK.keys()):
+        out = _run(f"sudo dcgmi group -g {group_id} -a i:{dcgm_id}")
+        print(f"[MemMonitor] Added i:{dcgm_id} → {out.strip()}")
+
+    print(f"[MemMonitor] DCGM ID → Rank: {DCGM_ID_TO_RANK}")
 
 
 def _sample_loop(group_id: int):
@@ -157,14 +126,14 @@ def _sample_loop(group_id: int):
         entity, value = parsed
         sweep[entity] = value
 
-        # Emit once we have GPU 0 + all GPU-I entries
         gi_keys = sorted(k for k in sweep if k.startswith("GPU-I"))
         if "GPU 0" in sweep and len(gi_keys) >= NUM_MIG_INSTANCES:
-            # Build per-rank memory array
             rank_mem = [0] * NUM_MIG_INSTANCES
-            for idx, gi_key in enumerate(gi_keys):
-                rank = _gi_index_to_rank.get(idx, idx)
-                if rank < NUM_MIG_INSTANCES:
+            for gi_key in gi_keys:
+                # Extract DCGM ID from "GPU-I 3" → 3
+                dcgm_id = int(gi_key.split()[1])
+                rank = DCGM_ID_TO_RANK.get(dcgm_id)
+                if rank is not None and rank < NUM_MIG_INSTANCES:
                     rank_mem[rank] = int(sweep[gi_key])
 
             _samples.append(
@@ -172,10 +141,10 @@ def _sample_loop(group_id: int):
                     datetime.now().strftime("%H:%M:%S.%f")[:-3],
                     _label,
                     int(sweep["GPU 0"]),
-                    rank_mem[0],  # 20GB slice
-                    rank_mem[1],  # 10GB slice
-                    rank_mem[2],  # 5GB slice
-                    rank_mem[3],  # 5GB slice
+                    rank_mem[0],
+                    rank_mem[1],
+                    rank_mem[2],
+                    rank_mem[3],
                 )
             )
             sweep = {}
