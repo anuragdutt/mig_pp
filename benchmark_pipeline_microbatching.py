@@ -55,16 +55,21 @@ SEQ_LEN = 64
 MAX_NEW_TOKENS = 512
 
 BATCH_MB_PAIRS = [
-    (32, 16),
-    (32, 8),
-    (32, 4),
-    (32, 2),
-    # batch 64
-    (64, 32),
-    (64, 16),
-    (64, 8),
-    (64, 4),
-    (64, 2),
+    # (32, 16),
+    # (32, 8),
+    # (32, 4),
+    # (32, 2),
+    # # batch 64
+    # (64, 32),
+    # (64, 16),
+    # (64, 8),
+    # (64, 4),
+    # (64, 2),
+    (8, 4),
+    (8, 2),
+    (16, 8),
+    (16, 4),
+    (16, 2),
 ]
 
 MIG_UUIDS = [
@@ -200,6 +205,9 @@ from typing import Optional, Tuple
 from transformers import DynamicCache
 
 
+# This function was manually implemented to bypass a tensor shape mismatch
+# caused by the default Hugging Face implementation:
+# RuntimeError: The size of tensor a (40) must match the size of tensor b (128) at non-singleton dimension 3
 def forward_through_layers(
     layers: nn.ModuleList,
     current_hidden: torch.Tensor,
@@ -223,16 +231,51 @@ def forward_through_layers(
 
     # Loop through every single layer assigned to this specific GPU
     for layer in layers:
-        layer_outputs: Tuple[torch.Tensor, ...] = layer(
-            hidden_states=current_hidden,
-            attention_mask=mask,
+
+        # 1. SAVE THE RESIDUAL (Skip Connection)
+        # We keep an untouched copy of the data. If the complex math in this layer
+        # degrades the signal, the network can fall back on this original copy.
+        residual: torch.Tensor = current_hidden
+
+        # 2. PRE-ATTENTION NORMALIZATION (RMSNorm)
+        # Standardize the numbers to prevent them from growing too large and crashing the math.
+        hidden_states: torch.Tensor = layer.input_layernorm(current_hidden)
+
+        # 3. SELF-ATTENTION (The "Brain")
+        # Words look at other words in the sequence to gather context and meaning.
+        # It uses the cache to remember past words, and the mask to ignore future words.
+        attn_outputs: Tuple[torch.Tensor, ...] = layer.self_attn(
+            hidden_states=hidden_states,
             position_embeddings=position_embeddings,
-            past_key_value=cache,
+            attention_mask=mask,
+            past_key_values=cache,
             use_cache=True,
         )
 
-        current_hidden = layer_outputs[0]
+        # The self_attn function returns a tuple; the actual modified tensor is the first item [0].
+        hidden_states = attn_outputs[0]
 
+        # 4. FIRST MERGE
+        # Add the new contextual insights (hidden_states) back into our untouched original copy (residual).
+        hidden_states = residual + hidden_states
+
+        # 5. SAVE NEW RESIDUAL
+        # Update our "untouched copy" for the second half of the layer.
+        residual = hidden_states
+
+        # 6. PRE-MLP NORMALIZATION
+        # Standardize the numbers again before the feed-forward network.
+        hidden_states = layer.post_attention_layernorm(hidden_states)
+
+        # 7. MULTI-LAYER PERCEPTRON / MLP (The "Muscle")
+        # The AI processes the new context it just learned against its internal memorized weights.
+        hidden_states = layer.mlp(hidden_states)
+
+        # 8. FINAL MERGE
+        # Add the MLP's output back into the residual to finalize this layer's upgrades.
+        current_hidden = residual + hidden_states
+
+    # Hand the fully processed box of data back to the pipeline so it can be shipped to the next GPU
     return current_hidden
 
 
