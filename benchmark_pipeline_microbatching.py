@@ -55,31 +55,26 @@ SEQ_LEN = 64
 MAX_NEW_TOKENS = 512
 
 BATCH_MB_PAIRS = [
-    # (32, 16),
-    # (32, 8),
-    # (32, 4),
-    # (32, 2),
-    # # batch 64
-    # (64, 32),
-    # (64, 16),
-    # (64, 8),
-    # (64, 4),
-    # (64, 2),
-    (8, 4),
-    (8, 2),
-    (16, 8),
-    (16, 4),
-    (16, 2),
+    (32, 16),
+    (32, 8),
+    (32, 4),
+    (32, 2),
+    (64, 32),
+    (64, 16),
+    (64, 8),
+    (64, 4),
+    (64, 2),
 ]
+
 
 MIG_UUIDS = [
-    "MIG-98f93df6-d522-5c00-9923-4326839cef2e",  # Rank 0: 20GB (3g.20gb)
-    "MIG-153fcb3c-9412-5240-937b-67bc18179f24",  # Rank 1: 10GB (2g.10gb)
-    "MIG-222909dc-5318-5493-8680-34be7bab2cc6",  # Rank 2:  5GB (1g.5gb)
-    "MIG-1686f8c1-5536-5f2a-a26f-79b69db93f30",  # Rank 3:  5GB (1g.5gb)
+    "MIG-64fcca47-248b-5aa4-855f-84d6df67f3df",  # Rank 0: 40GB (3g.40gb)
+    "MIG-98a0dbc9-fa7e-57e2-9ba4-67ee78303330",  # Rank 1: 20GB (2g.20gb)
+    "MIG-b44f17b0-9750-5a38-b914-9bccf544a33c",  # Rank 2: 10GB (1g.10gb)
+    "MIG-1617776a-1bdc-5f7e-afb0-2da54538dbe6",  # Rank 3: 10GB (1g.10gb)
 ]
 
-LAYER_LIMITS = [22, 10, 5, 5]
+LAYER_LIMITS = [24, 10, 5, 5]
 
 # Dist message tag bases (avoid collisions)
 PREFILL_TAG_BASE = 1000
@@ -718,14 +713,14 @@ def main():
                     "microbatch_size": mb_size,
                     "num_microbatches": batch_size // mb_size,
                     "max_new_tokens": MAX_NEW_TOKENS,
-                    "peak_rank0_20gb_mb": peak_per_rank[0],
-                    "peak_rank1_10gb_mb": peak_per_rank[1],
-                    "peak_rank2_5gb_mb": peak_per_rank[2],
-                    "peak_rank3_5gb_mb": peak_per_rank[3],
-                    "avg_rank0_20gb_mb": round(avg_per_rank[0]),
-                    "avg_rank1_10gb_mb": round(avg_per_rank[1]),
-                    "avg_rank2_5gb_mb": round(avg_per_rank[2]),
-                    "avg_rank3_5gb_mb": round(avg_per_rank[3]),
+                    "peak_rank0_40gb_mb": peak_per_rank[0],
+                    "peak_rank1_20gb_mb": peak_per_rank[1],
+                    "peak_rank2_10gb_mb": peak_per_rank[2],
+                    "peak_rank3_10gb_mb": peak_per_rank[3],
+                    "avg_rank0_40gb_mb": round(avg_per_rank[0]),
+                    "avg_rank1_20gb_mb": round(avg_per_rank[1]),
+                    "avg_rank2_10gb_mb": round(avg_per_rank[2]),
+                    "avg_rank3_10gb_mb": round(avg_per_rank[3]),
                     "total_latency_ms": None,
                     "status": None,
                 }
@@ -745,8 +740,8 @@ def main():
                 elif "latency" in queue_items:
                     latency = queue_items["latency"]
                     log.info(f"Total latency:     {latency:.0f} ms")
-                    log.info(f"Peak 5GB memory:   {peak_per_rank[3]} MB")
-                    log.info(f"Avg  5GB memory:   {avg_per_rank[3]:.0f} MB")
+                    log.info(f"Peak 10GB memory:  {peak_per_rank[3]} MB")
+                    log.info(f"Avg  10GB memory:  {avg_per_rank[3]:.0f} MB")
                     base_row["total_latency_ms"] = latency
                     base_row["status"] = "ok"
 
@@ -784,8 +779,8 @@ def main():
             f"Split: {best_lat['split']} | Batch: {best_lat['batch_size']} "
             f"| MB: {best_lat['microbatch_size']} "
             f"| Latency: {best_lat['total_latency_ms']:.0f} ms "
-            f"| Peak R2: {best_lat['peak_rank2_5gb_mb']} MB "
-            f"| Peak R3: {best_lat['peak_rank3_5gb_mb']} MB"
+            f"| Peak R2: {best_lat['peak_rank2_10gb_mb']} MB "
+            f"| Peak R3: {best_lat['peak_rank3_10gb_mb']} MB"
         )
 
         log.info("--- Most Memory Efficient (lowest peak 5GB at batch=64) ---")
@@ -793,13 +788,13 @@ def main():
         b64 = successful[successful["batch_size"] == 64]
 
         if not b64.empty:
-            best_mem = b64.loc[b64["peak_rank2_5gb_mb"].idxmin()]
+            best_mem = b64.loc[b64["peak_rank2_10gb_mb"].idxmin()]
 
             log.info(
                 f"Split: {best_mem['split']} | MB: {best_mem['microbatch_size']} "
                 f"| Latency: {best_mem['total_latency_ms']:.0f} ms "
-                f"| Peak R2: {best_mem['peak_rank2_5gb_mb']} MB "
-                f"| Peak R3: {best_mem['peak_rank3_5gb_mb']} MB"
+                f"| Peak R2: {best_lat['peak_rank2_10gb_mb']} MB "
+                f"| Peak R3: {best_lat['peak_rank3_10gb_mb']} MB"
             )
 
         oom_count = len(df[df["status"].str.startswith("OOM", na=False)])

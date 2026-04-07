@@ -15,10 +15,10 @@ NUM_MIG_INSTANCES = 4
 # These are NOT nvidia-smi GI IDs — they're DCGM's own numbering
 # Mapping confirmed by idle memory footprint
 DCGM_ID_TO_RANK = {
-    3: 0,  # GPU-I 3 → 37MB idle → 3g.20gb (Rank 0)
-    2: 1,  # GPU-I 2 → 25MB idle → 2g.10gb (Rank 1)
-    0: 2,  # GPU-I 0 → 12MB idle → 1g.5gb  (Rank 2)
-    1: 3,  # GPU-I 1 → 12MB idle → 1g.5gb  (Rank 3)
+    3: 0,  # GPU-I 3 → 37MB idle → 3g.40gb (Rank 0)
+    2: 1,  # GPU-I 2 → 25MB idle → 2g.20gb (Rank 1)
+    0: 2,  # GPU-I 0 → 12MB idle → 1g.10gb (Rank 2)
+    1: 3,  # GPU-I 1 → 12MB idle → 1g.10gb (Rank 3)
 }
 
 # Change the sample format to hold all 4 MIG instances
@@ -202,10 +202,10 @@ def save_csv(path="mig_memory.csv"):
                 "timestamp",
                 "label",
                 "gpu_mb",
-                "rank0_20gb_mb",
-                "rank1_10gb_mb",
-                "rank2_5gb_mb",
-                "rank3_5gb_mb",
+                "rank0_40gb_mb",
+                "rank1_20gb_mb",
+                "rank2_10gb_mb",
+                "rank3_10gb_mb",
             ]
         )
         w.writerows(_samples)

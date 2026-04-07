@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # --- CONFIGURATION ---
-# NVIDIA A100 40GB Specific Constraints
+# NVIDIA A100 80GB Specific Constraints
 # Total Compute Slices available = 7
 MAX_SLICES=7
 
@@ -12,16 +12,17 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 echo "=========================================================="
-echo "   NVIDIA A100 (40GB) - Custom MIG Partitioner"
+echo "   NVIDIA A100 (80GB) - Custom MIG Partitioner"
 echo "=========================================================="
 echo "Total Available Capacity: $MAX_SLICES Compute Slices"
 echo ""
 echo "Supported Profiles Reference:"
-echo " - 1g.5gb   (Costs 1 Slice)"
-echo " - 2g.10gb  (Costs 2 Slices)"
-echo " - 3g.20gb  (Costs 3 Slices)"
-echo " - 4g.20gb  (Costs 4 Slices)"
-echo " - 7g.40gb  (Costs 7 Slices)"
+echo " - 1g.10gb  (Costs 1 Slice,  10GB Memory)"
+echo " - 1g.20gb  (Costs 1 Slice,  20GB Memory)"
+echo " - 2g.20gb  (Costs 2 Slices, 20GB Memory)"
+echo " - 3g.40gb  (Costs 3 Slices, 40GB Memory)"
+echo " - 4g.40gb  (Costs 4 Slices, 40GB Memory)"
+echo " - 7g.80gb  (Costs 7 Slices, 80GB Memory)"
 echo "=========================================================="
 echo ""
 
@@ -45,17 +46,18 @@ do
     echo "--- Configuring Instance #$i (Remaining Slices: $REMAINING) ---"
     
     while true; do
-        read -p "Enter profile name (e.g., 1g.5gb, 2g.10gb, 3g.20gb): " PROFILE_INPUT
+        read -p "Enter profile name (e.g., 1g.10gb, 2g.20gb, 3g.40gb): " PROFILE_INPUT
         
         # Determine slice cost based on input
         case $PROFILE_INPUT in
-            "1g.5gb") COST=1 ;;
-            "2g.10gb") COST=2 ;;
-            "3g.20gb") COST=3 ;;
-            "4g.20gb") COST=4 ;;
-            "7g.40gb") COST=7 ;;
+            "1g.10gb") COST=1 ;;
+            "1g.20gb") COST=1 ;;
+            "2g.20gb") COST=2 ;;
+            "3g.40gb") COST=3 ;;
+            "4g.40gb") COST=4 ;;
+            "7g.80gb") COST=7 ;;
             *) 
-                echo "Invalid profile name for A100 40GB. Please try again."
+                echo "Invalid profile name for A100 80GB. Please try again."
                 continue 
                 ;;
         esac
