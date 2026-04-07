@@ -49,30 +49,30 @@ def setup_logging(log_file: str = LOG_FILE) -> None:
 log = logging.getLogger(__name__)
 
 # --- CONFIGURATION ---
-MODEL_NAME = "Qwen/Qwen2.5-14B"
-TOTAL_LAYERS = 48
-HIDDEN_SIZE = 5120
-HEADS = 40
+MODEL_NAME = "Qwen/Qwen2.5-7B"
+TOTAL_LAYERS = 28
+HIDDEN_SIZE = 3584
+HEADS = 28
 
 SEQ_LEN = 64
 MAX_NEW_TOKENS = 512
 
 BATCH_MB_PAIRS = [
-    # (32, 16),
-    # (32, 8),
-    # (32, 4),
-    # (32, 2),
-    # # batch 64
-    # (64, 32),
-    # (64, 16),
-    # (64, 8),
-    # (64, 4),
-    # (64, 2),
     (8, 4),
     (8, 2),
     (16, 8),
     (16, 4),
     (16, 2),
+    (32, 16),
+    (32, 8),
+    (32, 4),
+    (32, 2),
+    # Commented out for now but run it again only for batch size = 64 and combine both the csv files
+    # (64, 32),
+    # (64, 16),
+    # (64, 8),
+    # (64, 4),
+    # (64, 2),
 ]
 
 MIG_UUIDS = [
@@ -82,7 +82,7 @@ MIG_UUIDS = [
     "MIG-1686f8c1-5536-5f2a-a26f-79b69db93f30",  # Rank 3:  5GB (1g.5gb)
 ]
 
-LAYER_LIMITS = [30, 15, 7, 0]
+LAYER_LIMITS = [16, 8, 4, 2]
 
 # Dist message tag bases (avoid collisions)
 PREFILL_TAG_BASE = 1000
@@ -266,7 +266,7 @@ def forward_through_layers(
             hidden_states=hidden_states,
             position_embeddings=position_embeddings,
             attention_mask=mask,
-            past_key_value=cache,
+            past_key_values=cache,
             use_cache=True,
         )
 
