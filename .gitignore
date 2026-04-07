@@ -3,3 +3,4 @@ __pycache__/
 *.py[cod]
 *$py.class*.deb
 *.deb.1
+requirements.txt
