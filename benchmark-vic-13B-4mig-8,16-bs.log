@@ -1,0 +1,1890 @@
+2026-04-07 14:36:21 [INFO] Setting up DCGM monitor group...
+2026-04-07 14:36:22 [INFO] [1/110] Split [20, 10, 5, 5] | Batch: 8 | Microbatch: 4 | Microbatches: 2
+2026-04-07 14:36:22 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=8)
+2026-04-07 14:36:43 [INFO] [Rank 2] Loading weights...
+2026-04-07 14:36:44 [INFO] [Rank 3] Loading weights...
+2026-04-07 14:36:55 [INFO] [Rank 1] Loading weights...
+2026-04-07 14:36:55 [INFO] [Rank 2] Weights loaded.
+2026-04-07 14:36:56 [INFO] [Rank 3] Weights loaded.
+2026-04-07 14:37:07 [INFO] [Rank 1] Weights loaded.
+2026-04-07 14:37:18 [INFO] [Rank 0] Loading weights...
+2026-04-07 14:37:31 [INFO] [Rank 0] Weights loaded.
+2026-04-07 14:38:57 [INFO] [Rank 2] Finished. Latency: 86016 ms
+2026-04-07 14:38:57 [INFO] [Rank 1] Finished. Latency: 86016 ms
+2026-04-07 14:38:57 [INFO] [Rank 0] Finished. Latency: 86016 ms
+2026-04-07 14:38:57 [INFO] [Rank 3] Finished. Latency: 86031 ms
+2026-04-07 14:39:01 [INFO] Total latency:     86016 ms
+2026-04-07 14:39:01 [INFO] Peak 10GB memory:  5488 MB
+2026-04-07 14:39:01 [INFO] Avg  10GB memory:  3550 MB
+2026-04-07 14:39:01 [INFO] [2/110] Split [20, 10, 5, 5] | Batch: 8 | Microbatch: 2 | Microbatches: 4
+2026-04-07 14:39:01 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=8)
+2026-04-07 14:39:22 [INFO] [Rank 2] Loading weights...
+2026-04-07 14:39:23 [INFO] [Rank 3] Loading weights...
+2026-04-07 14:39:33 [INFO] [Rank 1] Loading weights...
+2026-04-07 14:39:33 [INFO] [Rank 2] Weights loaded.
+2026-04-07 14:39:35 [INFO] [Rank 3] Weights loaded.
+2026-04-07 14:39:45 [INFO] [Rank 1] Weights loaded.
+2026-04-07 14:39:56 [INFO] [Rank 0] Loading weights...
+2026-04-07 14:40:09 [INFO] [Rank 0] Weights loaded.
+2026-04-07 14:42:48 [INFO] [Rank 1] Finished. Latency: 158348 ms
+2026-04-07 14:42:48 [INFO] [Rank 2] Finished. Latency: 158348 ms
+2026-04-07 14:42:48 [INFO] [Rank 0] Finished. Latency: 158348 ms
+2026-04-07 14:42:48 [INFO] [Rank 3] Finished. Latency: 158361 ms
+2026-04-07 14:42:52 [INFO] Total latency:     158348 ms
+2026-04-07 14:42:52 [INFO] Peak 10GB memory:  4162 MB
+2026-04-07 14:42:52 [INFO] Avg  10GB memory:  3519 MB
+2026-04-07 14:42:52 [INFO] [3/110] Split [20, 10, 5, 5] | Batch: 16 | Microbatch: 8 | Microbatches: 2
+2026-04-07 14:42:52 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 14:43:14 [INFO] [Rank 2] Loading weights...
+2026-04-07 14:43:15 [INFO] [Rank 3] Loading weights...
+2026-04-07 14:43:25 [INFO] [Rank 1] Loading weights...
+2026-04-07 14:43:25 [INFO] [Rank 2] Weights loaded.
+2026-04-07 14:43:27 [INFO] [Rank 3] Weights loaded.
+2026-04-07 14:43:37 [INFO] [Rank 1] Weights loaded.
+2026-04-07 14:43:49 [INFO] [Rank 0] Loading weights...
+2026-04-07 14:44:02 [INFO] [Rank 0] Weights loaded.
+2026-04-07 14:45:43 [INFO] [Rank 2] Finished. Latency: 100677 ms
+2026-04-07 14:45:43 [INFO] [Rank 1] Finished. Latency: 100677 ms
+2026-04-07 14:45:43 [INFO] [Rank 0] Finished. Latency: 100677 ms
+2026-04-07 14:45:43 [INFO] [Rank 3] Finished. Latency: 100697 ms
+2026-04-07 14:45:47 [INFO] Total latency:     100677 ms
+2026-04-07 14:45:47 [INFO] Peak 10GB memory:  9644 MB
+2026-04-07 14:45:47 [INFO] Avg  10GB memory:  4701 MB
+2026-04-07 14:45:47 [INFO] [4/110] Split [20, 10, 5, 5] | Batch: 16 | Microbatch: 4 | Microbatches: 4
+2026-04-07 14:45:47 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 14:46:08 [INFO] [Rank 2] Loading weights...
+2026-04-07 14:46:09 [INFO] [Rank 3] Loading weights...
+2026-04-07 14:46:20 [INFO] [Rank 1] Loading weights...
+2026-04-07 14:46:20 [INFO] [Rank 2] Weights loaded.
+2026-04-07 14:46:21 [INFO] [Rank 3] Weights loaded.
+2026-04-07 14:46:32 [INFO] [Rank 1] Weights loaded.
+2026-04-07 14:46:43 [INFO] [Rank 0] Loading weights...
+2026-04-07 14:46:56 [INFO] [Rank 0] Weights loaded.
+2026-04-07 14:49:48 [INFO] [Rank 2] Finished. Latency: 171349 ms
+2026-04-07 14:49:48 [INFO] [Rank 1] Finished. Latency: 171349 ms
+2026-04-07 14:49:48 [INFO] [Rank 0] Finished. Latency: 171349 ms
+2026-04-07 14:49:48 [INFO] [Rank 3] Finished. Latency: 171364 ms
+2026-04-07 14:49:52 [INFO] Total latency:     171349 ms
+2026-04-07 14:49:52 [INFO] Peak 10GB memory:  7348 MB
+2026-04-07 14:49:52 [INFO] Avg  10GB memory:  4147 MB
+2026-04-07 14:49:52 [INFO] [5/110] Split [20, 10, 5, 5] | Batch: 16 | Microbatch: 2 | Microbatches: 8
+2026-04-07 14:49:52 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 14:50:14 [INFO] [Rank 2] Loading weights...
+2026-04-07 14:50:15 [INFO] [Rank 3] Loading weights...
+2026-04-07 14:50:25 [INFO] [Rank 1] Loading weights...
+2026-04-07 14:50:25 [INFO] [Rank 2] Weights loaded.
+2026-04-07 14:50:26 [INFO] [Rank 3] Weights loaded.
+2026-04-07 14:50:37 [INFO] [Rank 1] Weights loaded.
+2026-04-07 14:50:48 [INFO] [Rank 0] Loading weights...
+2026-04-07 14:51:01 [INFO] [Rank 0] Weights loaded.
+2026-04-07 14:56:16 [INFO] [Rank 2] Finished. Latency: 314948 ms
+2026-04-07 14:56:16 [INFO] [Rank 1] Finished. Latency: 314948 ms
+2026-04-07 14:56:16 [INFO] [Rank 0] Finished. Latency: 314948 ms
+2026-04-07 14:56:16 [INFO] [Rank 3] Finished. Latency: 314961 ms
+2026-04-07 14:56:20 [INFO] Total latency:     314948 ms
+2026-04-07 14:56:20 [INFO] Peak 10GB memory:  4810 MB
+2026-04-07 14:56:20 [INFO] Avg  10GB memory:  3909 MB
+2026-04-07 14:56:20 [INFO] [6/110] Split [21, 9, 5, 5] | Batch: 8 | Microbatch: 4 | Microbatches: 2
+2026-04-07 14:56:20 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=8)
+2026-04-07 14:56:41 [INFO] [Rank 2] Loading weights...
+2026-04-07 14:56:42 [INFO] [Rank 3] Loading weights...
+2026-04-07 14:56:50 [INFO] [Rank 1] Loading weights...
+2026-04-07 14:56:52 [INFO] [Rank 2] Weights loaded.
+2026-04-07 14:56:54 [INFO] [Rank 3] Weights loaded.
+2026-04-07 14:57:02 [INFO] [Rank 1] Weights loaded.
+2026-04-07 14:57:18 [INFO] [Rank 0] Loading weights...
+2026-04-07 14:57:31 [INFO] [Rank 0] Weights loaded.
+2026-04-07 14:58:57 [INFO] [Rank 2] Finished. Latency: 85439 ms
+2026-04-07 14:58:57 [INFO] [Rank 0] Finished. Latency: 85439 ms
+2026-04-07 14:58:57 [INFO] [Rank 1] Finished. Latency: 85439 ms
+2026-04-07 14:58:57 [INFO] [Rank 3] Finished. Latency: 85455 ms
+2026-04-07 14:59:01 [INFO] Total latency:     85439 ms
+2026-04-07 14:59:01 [INFO] Peak 10GB memory:  5488 MB
+2026-04-07 14:59:01 [INFO] Avg  10GB memory:  3534 MB
+2026-04-07 14:59:01 [INFO] [7/110] Split [21, 9, 5, 5] | Batch: 8 | Microbatch: 2 | Microbatches: 4
+2026-04-07 14:59:01 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=8)
+2026-04-07 14:59:21 [INFO] [Rank 2] Loading weights...
+2026-04-07 14:59:23 [INFO] [Rank 3] Loading weights...
+2026-04-07 14:59:30 [INFO] [Rank 1] Loading weights...
+2026-04-07 14:59:33 [INFO] [Rank 2] Weights loaded.
+2026-04-07 14:59:34 [INFO] [Rank 3] Weights loaded.
+2026-04-07 14:59:42 [INFO] [Rank 1] Weights loaded.
+2026-04-07 14:59:58 [INFO] [Rank 0] Loading weights...
+2026-04-07 15:00:12 [INFO] [Rank 0] Weights loaded.
+2026-04-07 15:02:49 [INFO] [Rank 1] Finished. Latency: 157442 ms
+2026-04-07 15:02:49 [INFO] [Rank 2] Finished. Latency: 157442 ms
+2026-04-07 15:02:49 [INFO] [Rank 0] Finished. Latency: 157442 ms
+2026-04-07 15:02:49 [INFO] [Rank 3] Finished. Latency: 157455 ms
+2026-04-07 15:02:53 [INFO] Total latency:     157442 ms
+2026-04-07 15:02:53 [INFO] Peak 10GB memory:  4162 MB
+2026-04-07 15:02:53 [INFO] Avg  10GB memory:  3521 MB
+2026-04-07 15:02:53 [INFO] [8/110] Split [21, 9, 5, 5] | Batch: 16 | Microbatch: 8 | Microbatches: 2
+2026-04-07 15:02:53 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 15:03:14 [INFO] [Rank 2] Loading weights...
+2026-04-07 15:03:15 [INFO] [Rank 3] Loading weights...
+2026-04-07 15:03:23 [INFO] [Rank 1] Loading weights...
+2026-04-07 15:03:26 [INFO] [Rank 2] Weights loaded.
+2026-04-07 15:03:27 [INFO] [Rank 3] Weights loaded.
+2026-04-07 15:03:35 [INFO] [Rank 1] Weights loaded.
+2026-04-07 15:03:51 [INFO] [Rank 0] Loading weights...
+2026-04-07 15:04:04 [INFO] [Rank 0] Weights loaded.
+2026-04-07 15:05:44 [INFO] [Rank 1] Finished. Latency: 99813 ms
+2026-04-07 15:05:44 [INFO] [Rank 2] Finished. Latency: 99813 ms
+2026-04-07 15:05:44 [INFO] [Rank 0] Finished. Latency: 99813 ms
+2026-04-07 15:05:44 [INFO] [Rank 3] Finished. Latency: 99833 ms
+2026-04-07 15:05:49 [INFO] Total latency:     99813 ms
+2026-04-07 15:05:49 [INFO] Peak 10GB memory:  9644 MB
+2026-04-07 15:05:49 [INFO] Avg  10GB memory:  4695 MB
+2026-04-07 15:05:49 [INFO] [9/110] Split [21, 9, 5, 5] | Batch: 16 | Microbatch: 4 | Microbatches: 4
+2026-04-07 15:05:49 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 15:06:10 [INFO] [Rank 2] Loading weights...
+2026-04-07 15:06:12 [INFO] [Rank 3] Loading weights...
+2026-04-07 15:06:19 [INFO] [Rank 1] Loading weights...
+2026-04-07 15:06:22 [INFO] [Rank 2] Weights loaded.
+2026-04-07 15:06:24 [INFO] [Rank 3] Weights loaded.
+2026-04-07 15:06:31 [INFO] [Rank 1] Weights loaded.
+2026-04-07 15:06:47 [INFO] [Rank 0] Loading weights...
+2026-04-07 15:07:00 [INFO] [Rank 0] Weights loaded.
+2026-04-07 15:09:50 [INFO] [Rank 1] Finished. Latency: 169610 ms
+2026-04-07 15:09:50 [INFO] [Rank 0] Finished. Latency: 169610 ms
+2026-04-07 15:09:50 [INFO] [Rank 2] Finished. Latency: 169610 ms
+2026-04-07 15:09:50 [INFO] [Rank 3] Finished. Latency: 169626 ms
+2026-04-07 15:09:54 [INFO] Total latency:     169610 ms
+2026-04-07 15:09:54 [INFO] Peak 10GB memory:  7348 MB
+2026-04-07 15:09:54 [INFO] Avg  10GB memory:  4118 MB
+2026-04-07 15:09:54 [INFO] [10/110] Split [21, 9, 5, 5] | Batch: 16 | Microbatch: 2 | Microbatches: 8
+2026-04-07 15:09:54 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 15:10:15 [INFO] [Rank 2] Loading weights...
+2026-04-07 15:10:17 [INFO] [Rank 3] Loading weights...
+2026-04-07 15:10:24 [INFO] [Rank 1] Loading weights...
+2026-04-07 15:10:27 [INFO] [Rank 2] Weights loaded.
+2026-04-07 15:10:28 [INFO] [Rank 3] Weights loaded.
+2026-04-07 15:10:36 [INFO] [Rank 1] Weights loaded.
+2026-04-07 15:10:52 [INFO] [Rank 0] Loading weights...
+2026-04-07 15:11:05 [INFO] [Rank 0] Weights loaded.
+2026-04-07 15:16:17 [INFO] [Rank 1] Finished. Latency: 311524 ms
+2026-04-07 15:16:17 [INFO] [Rank 2] Finished. Latency: 311524 ms
+2026-04-07 15:16:17 [INFO] [Rank 0] Finished. Latency: 311524 ms
+2026-04-07 15:16:17 [INFO] [Rank 3] Finished. Latency: 311537 ms
+2026-04-07 15:16:21 [INFO] Total latency:     311524 ms
+2026-04-07 15:16:21 [INFO] Peak 10GB memory:  4810 MB
+2026-04-07 15:16:21 [INFO] Avg  10GB memory:  3899 MB
+2026-04-07 15:16:21 [INFO] [11/110] Split [21, 10, 5, 4] | Batch: 8 | Microbatch: 4 | Microbatches: 2
+2026-04-07 15:16:21 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=8)
+2026-04-07 15:16:42 [INFO] [Rank 3] Loading weights...
+2026-04-07 15:16:43 [INFO] [Rank 2] Loading weights...
+2026-04-07 15:16:53 [INFO] [Rank 3] Weights loaded.
+2026-04-07 15:16:54 [INFO] [Rank 1] Loading weights...
+2026-04-07 15:16:54 [INFO] [Rank 2] Weights loaded.
+2026-04-07 15:17:06 [INFO] [Rank 1] Weights loaded.
+2026-04-07 15:17:20 [INFO] [Rank 0] Loading weights...
+2026-04-07 15:17:33 [INFO] [Rank 0] Weights loaded.
+2026-04-07 15:18:57 [INFO] [Rank 1] Finished. Latency: 83454 ms
+2026-04-07 15:18:57 [INFO] [Rank 2] Finished. Latency: 83454 ms
+2026-04-07 15:18:57 [INFO] [Rank 0] Finished. Latency: 83454 ms
+2026-04-07 15:18:57 [INFO] [Rank 3] Finished. Latency: 83467 ms
+2026-04-07 15:19:01 [INFO] Total latency:     83454 ms
+2026-04-07 15:19:01 [INFO] Peak 10GB memory:  4496 MB
+2026-04-07 15:19:01 [INFO] Avg  10GB memory:  2935 MB
+2026-04-07 15:19:01 [INFO] [12/110] Split [21, 10, 5, 4] | Batch: 8 | Microbatch: 2 | Microbatches: 4
+2026-04-07 15:19:01 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=8)
+2026-04-07 15:19:20 [INFO] [Rank 3] Loading weights...
+2026-04-07 15:19:21 [INFO] [Rank 2] Loading weights...
+2026-04-07 15:19:32 [INFO] [Rank 3] Weights loaded.
+2026-04-07 15:19:33 [INFO] [Rank 1] Loading weights...
+2026-04-07 15:19:33 [INFO] [Rank 2] Weights loaded.
+2026-04-07 15:19:45 [INFO] [Rank 1] Weights loaded.
+2026-04-07 15:19:58 [INFO] [Rank 0] Loading weights...
+2026-04-07 15:20:12 [INFO] [Rank 0] Weights loaded.
+2026-04-07 15:22:46 [INFO] [Rank 1] Finished. Latency: 154104 ms
+2026-04-07 15:22:46 [INFO] [Rank 2] Finished. Latency: 154104 ms
+2026-04-07 15:22:46 [INFO] [Rank 0] Finished. Latency: 154104 ms
+2026-04-07 15:22:46 [INFO] [Rank 3] Finished. Latency: 154115 ms
+2026-04-07 15:22:50 [INFO] Total latency:     154104 ms
+2026-04-07 15:22:50 [INFO] Peak 10GB memory:  3482 MB
+2026-04-07 15:22:50 [INFO] Avg  10GB memory:  2922 MB
+2026-04-07 15:22:50 [INFO] [13/110] Split [21, 10, 5, 4] | Batch: 16 | Microbatch: 8 | Microbatches: 2
+2026-04-07 15:22:50 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 15:23:09 [INFO] [Rank 3] Loading weights...
+2026-04-07 15:23:11 [INFO] [Rank 2] Loading weights...
+2026-04-07 15:23:21 [INFO] [Rank 3] Weights loaded.
+2026-04-07 15:23:22 [INFO] [Rank 1] Loading weights...
+2026-04-07 15:23:22 [INFO] [Rank 2] Weights loaded.
+2026-04-07 15:23:34 [INFO] [Rank 1] Weights loaded.
+2026-04-07 15:23:48 [INFO] [Rank 0] Loading weights...
+2026-04-07 15:24:01 [INFO] [Rank 0] Weights loaded.
+2026-04-07 15:25:38 [INFO] [Rank 2] Finished. Latency: 96762 ms
+2026-04-07 15:25:38 [INFO] [Rank 1] Finished. Latency: 96762 ms
+2026-04-07 15:25:38 [INFO] [Rank 0] Finished. Latency: 96762 ms
+2026-04-07 15:25:38 [INFO] [Rank 3] Finished. Latency: 96778 ms
+2026-04-07 15:25:42 [INFO] Total latency:     96762 ms
+2026-04-07 15:25:42 [INFO] Peak 10GB memory:  9198 MB
+2026-04-07 15:25:42 [INFO] Avg  10GB memory:  4007 MB
+2026-04-07 15:25:42 [INFO] [14/110] Split [21, 10, 5, 4] | Batch: 16 | Microbatch: 4 | Microbatches: 4
+2026-04-07 15:25:42 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 15:26:01 [INFO] [Rank 3] Loading weights...
+2026-04-07 15:26:03 [INFO] [Rank 2] Loading weights...
+2026-04-07 15:26:13 [INFO] [Rank 3] Weights loaded.
+2026-04-07 15:26:14 [INFO] [Rank 1] Loading weights...
+2026-04-07 15:26:14 [INFO] [Rank 2] Weights loaded.
+2026-04-07 15:26:26 [INFO] [Rank 1] Weights loaded.
+2026-04-07 15:26:39 [INFO] [Rank 0] Loading weights...
+2026-04-07 15:26:53 [INFO] [Rank 0] Weights loaded.
+2026-04-07 15:29:38 [INFO] [Rank 1] Finished. Latency: 164874 ms
+2026-04-07 15:29:38 [INFO] [Rank 2] Finished. Latency: 164874 ms
+2026-04-07 15:29:38 [INFO] [Rank 0] Finished. Latency: 164874 ms
+2026-04-07 15:29:38 [INFO] [Rank 3] Finished. Latency: 164886 ms
+2026-04-07 15:29:42 [INFO] Total latency:     164874 ms
+2026-04-07 15:29:42 [INFO] Peak 10GB memory:  5972 MB
+2026-04-07 15:29:42 [INFO] Avg  10GB memory:  3412 MB
+2026-04-07 15:29:42 [INFO] [15/110] Split [21, 10, 5, 4] | Batch: 16 | Microbatch: 2 | Microbatches: 8
+2026-04-07 15:29:42 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 15:30:01 [INFO] [Rank 3] Loading weights...
+2026-04-07 15:30:02 [INFO] [Rank 2] Loading weights...
+2026-04-07 15:30:13 [INFO] [Rank 3] Weights loaded.
+2026-04-07 15:30:14 [INFO] [Rank 1] Loading weights...
+2026-04-07 15:30:14 [INFO] [Rank 2] Weights loaded.
+2026-04-07 15:30:26 [INFO] [Rank 1] Weights loaded.
+2026-04-07 15:30:39 [INFO] [Rank 0] Loading weights...
+2026-04-07 15:30:52 [INFO] [Rank 0] Weights loaded.
+2026-04-07 15:35:58 [INFO] [Rank 1] Finished. Latency: 305059 ms
+2026-04-07 15:35:58 [INFO] [Rank 2] Finished. Latency: 305059 ms
+2026-04-07 15:35:58 [INFO] [Rank 0] Finished. Latency: 305059 ms
+2026-04-07 15:35:58 [INFO] [Rank 3] Finished. Latency: 305069 ms
+2026-04-07 15:36:02 [INFO] Total latency:     305059 ms
+2026-04-07 15:36:02 [INFO] Peak 10GB memory:  3946 MB
+2026-04-07 15:36:02 [INFO] Avg  10GB memory:  3229 MB
+2026-04-07 15:36:02 [INFO] [16/110] Split [22, 8, 5, 5] | Batch: 8 | Microbatch: 4 | Microbatches: 2
+2026-04-07 15:36:02 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=8)
+2026-04-07 15:36:22 [INFO] [Rank 2] Loading weights...
+2026-04-07 15:36:24 [INFO] [Rank 3] Loading weights...
+2026-04-07 15:36:29 [INFO] [Rank 1] Loading weights...
+2026-04-07 15:36:34 [INFO] [Rank 2] Weights loaded.
+2026-04-07 15:36:35 [INFO] [Rank 3] Weights loaded.
+2026-04-07 15:36:41 [INFO] [Rank 1] Weights loaded.
+2026-04-07 15:37:01 [INFO] [Rank 0] Loading weights...
+2026-04-07 15:37:15 [INFO] [Rank 0] Weights loaded.
+2026-04-07 15:38:39 [INFO] [Rank 2] Finished. Latency: 84247 ms
+2026-04-07 15:38:39 [INFO] [Rank 1] Finished. Latency: 84247 ms
+2026-04-07 15:38:39 [INFO] [Rank 0] Finished. Latency: 84247 ms
+2026-04-07 15:38:39 [INFO] [Rank 3] Finished. Latency: 84262 ms
+2026-04-07 15:38:43 [INFO] Total latency:     84247 ms
+2026-04-07 15:38:43 [INFO] Peak 10GB memory:  5488 MB
+2026-04-07 15:38:43 [INFO] Avg  10GB memory:  3541 MB
+2026-04-07 15:38:43 [INFO] [17/110] Split [22, 8, 5, 5] | Batch: 8 | Microbatch: 2 | Microbatches: 4
+2026-04-07 15:38:43 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=8)
+2026-04-07 15:39:04 [INFO] [Rank 2] Loading weights...
+2026-04-07 15:39:06 [INFO] [Rank 3] Loading weights...
+2026-04-07 15:39:11 [INFO] [Rank 1] Loading weights...
+2026-04-07 15:39:16 [INFO] [Rank 2] Weights loaded.
+2026-04-07 15:39:17 [INFO] [Rank 3] Weights loaded.
+2026-04-07 15:39:23 [INFO] [Rank 1] Weights loaded.
+2026-04-07 15:39:43 [INFO] [Rank 0] Loading weights...
+2026-04-07 15:39:56 [INFO] [Rank 0] Weights loaded.
+2026-04-07 15:42:32 [INFO] [Rank 2] Finished. Latency: 155062 ms
+2026-04-07 15:42:32 [INFO] [Rank 1] Finished. Latency: 155062 ms
+2026-04-07 15:42:32 [INFO] [Rank 0] Finished. Latency: 155062 ms
+2026-04-07 15:42:32 [INFO] [Rank 3] Finished. Latency: 155075 ms
+2026-04-07 15:42:36 [INFO] Total latency:     155062 ms
+2026-04-07 15:42:36 [INFO] Peak 10GB memory:  4162 MB
+2026-04-07 15:42:36 [INFO] Avg  10GB memory:  3511 MB
+2026-04-07 15:42:36 [INFO] [18/110] Split [22, 8, 5, 5] | Batch: 16 | Microbatch: 8 | Microbatches: 2
+2026-04-07 15:42:36 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 15:42:56 [INFO] [Rank 2] Loading weights...
+2026-04-07 15:42:58 [INFO] [Rank 3] Loading weights...
+2026-04-07 15:43:03 [INFO] [Rank 1] Loading weights...
+2026-04-07 15:43:08 [INFO] [Rank 2] Weights loaded.
+2026-04-07 15:43:09 [INFO] [Rank 3] Weights loaded.
+2026-04-07 15:43:15 [INFO] [Rank 1] Weights loaded.
+2026-04-07 15:43:35 [INFO] [Rank 0] Loading weights...
+2026-04-07 15:43:49 [INFO] [Rank 0] Weights loaded.
+2026-04-07 15:45:27 [INFO] [Rank 2] Finished. Latency: 97635 ms
+2026-04-07 15:45:27 [INFO] [Rank 0] Finished. Latency: 97635 ms
+2026-04-07 15:45:27 [INFO] [Rank 1] Finished. Latency: 97635 ms
+2026-04-07 15:45:27 [INFO] [Rank 3] Finished. Latency: 97655 ms
+2026-04-07 15:45:31 [INFO] Total latency:     97635 ms
+2026-04-07 15:45:31 [INFO] Peak 10GB memory:  9644 MB
+2026-04-07 15:45:31 [INFO] Avg  10GB memory:  4683 MB
+2026-04-07 15:45:31 [INFO] [19/110] Split [22, 8, 5, 5] | Batch: 16 | Microbatch: 4 | Microbatches: 4
+2026-04-07 15:45:31 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 15:45:51 [INFO] [Rank 2] Loading weights...
+2026-04-07 15:45:52 [INFO] [Rank 3] Loading weights...
+2026-04-07 15:45:58 [INFO] [Rank 1] Loading weights...
+2026-04-07 15:46:03 [INFO] [Rank 2] Weights loaded.
+2026-04-07 15:46:04 [INFO] [Rank 3] Weights loaded.
+2026-04-07 15:46:10 [INFO] [Rank 1] Weights loaded.
+2026-04-07 15:46:29 [INFO] [Rank 0] Loading weights...
+2026-04-07 15:46:43 [INFO] [Rank 0] Weights loaded.
+2026-04-07 15:49:30 [INFO] [Rank 1] Finished. Latency: 166757 ms
+2026-04-07 15:49:30 [INFO] [Rank 2] Finished. Latency: 166757 ms
+2026-04-07 15:49:30 [INFO] [Rank 0] Finished. Latency: 166757 ms
+2026-04-07 15:49:30 [INFO] [Rank 3] Finished. Latency: 166773 ms
+2026-04-07 15:49:34 [INFO] Total latency:     166757 ms
+2026-04-07 15:49:34 [INFO] Peak 10GB memory:  7348 MB
+2026-04-07 15:49:34 [INFO] Avg  10GB memory:  4131 MB
+2026-04-07 15:49:34 [INFO] [20/110] Split [22, 8, 5, 5] | Batch: 16 | Microbatch: 2 | Microbatches: 8
+2026-04-07 15:49:34 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 15:49:55 [INFO] [Rank 2] Loading weights...
+2026-04-07 15:49:56 [INFO] [Rank 3] Loading weights...
+2026-04-07 15:50:02 [INFO] [Rank 1] Loading weights...
+2026-04-07 15:50:07 [INFO] [Rank 2] Weights loaded.
+2026-04-07 15:50:08 [INFO] [Rank 3] Weights loaded.
+2026-04-07 15:50:14 [INFO] [Rank 1] Weights loaded.
+2026-04-07 15:50:34 [INFO] [Rank 0] Loading weights...
+2026-04-07 15:50:47 [INFO] [Rank 0] Weights loaded.
+2026-04-07 15:55:55 [INFO] [Rank 1] Finished. Latency: 307369 ms
+2026-04-07 15:55:55 [INFO] [Rank 2] Finished. Latency: 307369 ms
+2026-04-07 15:55:55 [INFO] [Rank 0] Finished. Latency: 307370 ms
+2026-04-07 15:55:55 [INFO] [Rank 3] Finished. Latency: 307383 ms
+2026-04-07 15:55:59 [INFO] Total latency:     307370 ms
+2026-04-07 15:55:59 [INFO] Peak 10GB memory:  4810 MB
+2026-04-07 15:55:59 [INFO] Avg  10GB memory:  3903 MB
+2026-04-07 15:55:59 [INFO] [21/110] Split [22, 9, 5, 4] | Batch: 8 | Microbatch: 4 | Microbatches: 2
+2026-04-07 15:55:59 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=8)
+2026-04-07 15:56:19 [INFO] [Rank 3] Loading weights...
+2026-04-07 15:56:20 [INFO] [Rank 2] Loading weights...
+2026-04-07 15:56:29 [INFO] [Rank 1] Loading weights...
+2026-04-07 15:56:31 [INFO] [Rank 3] Weights loaded.
+2026-04-07 15:56:32 [INFO] [Rank 2] Weights loaded.
+2026-04-07 15:56:41 [INFO] [Rank 1] Weights loaded.
+2026-04-07 15:56:59 [INFO] [Rank 0] Loading weights...
+2026-04-07 15:57:12 [INFO] [Rank 0] Weights loaded.
+2026-04-07 15:58:35 [INFO] [Rank 0] Finished. Latency: 82536 ms
+2026-04-07 15:58:35 [INFO] [Rank 2] Finished. Latency: 82536 ms
+2026-04-07 15:58:35 [INFO] [Rank 1] Finished. Latency: 82536 ms
+2026-04-07 15:58:35 [INFO] [Rank 3] Finished. Latency: 82548 ms
+2026-04-07 15:58:39 [INFO] Total latency:     82536 ms
+2026-04-07 15:58:39 [INFO] Peak 10GB memory:  4496 MB
+2026-04-07 15:58:39 [INFO] Avg  10GB memory:  2918 MB
+2026-04-07 15:58:39 [INFO] [22/110] Split [22, 9, 5, 4] | Batch: 8 | Microbatch: 2 | Microbatches: 4
+2026-04-07 15:58:39 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=8)
+2026-04-07 15:58:59 [INFO] [Rank 3] Loading weights...
+2026-04-07 15:59:00 [INFO] [Rank 2] Loading weights...
+2026-04-07 15:59:09 [INFO] [Rank 1] Loading weights...
+2026-04-07 15:59:11 [INFO] [Rank 3] Weights loaded.
+2026-04-07 15:59:12 [INFO] [Rank 2] Weights loaded.
+2026-04-07 15:59:21 [INFO] [Rank 1] Weights loaded.
+2026-04-07 15:59:39 [INFO] [Rank 0] Loading weights...
+2026-04-07 15:59:53 [INFO] [Rank 0] Weights loaded.
+2026-04-07 16:02:25 [INFO] [Rank 2] Finished. Latency: 151822 ms
+2026-04-07 16:02:25 [INFO] [Rank 0] Finished. Latency: 151822 ms
+2026-04-07 16:02:25 [INFO] [Rank 1] Finished. Latency: 151822 ms
+2026-04-07 16:02:25 [INFO] [Rank 3] Finished. Latency: 151832 ms
+2026-04-07 16:02:29 [INFO] Total latency:     151822 ms
+2026-04-07 16:02:29 [INFO] Peak 10GB memory:  3482 MB
+2026-04-07 16:02:29 [INFO] Avg  10GB memory:  2902 MB
+2026-04-07 16:02:29 [INFO] [23/110] Split [22, 9, 5, 4] | Batch: 16 | Microbatch: 8 | Microbatches: 2
+2026-04-07 16:02:29 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 16:02:48 [INFO] [Rank 3] Loading weights...
+2026-04-07 16:02:50 [INFO] [Rank 2] Loading weights...
+2026-04-07 16:02:59 [INFO] [Rank 1] Loading weights...
+2026-04-07 16:03:00 [INFO] [Rank 3] Weights loaded.
+2026-04-07 16:03:01 [INFO] [Rank 2] Weights loaded.
+2026-04-07 16:03:10 [INFO] [Rank 1] Weights loaded.
+2026-04-07 16:03:28 [INFO] [Rank 0] Loading weights...
+2026-04-07 16:03:42 [INFO] [Rank 0] Weights loaded.
+2026-04-07 16:05:18 [INFO] [Rank 1] Finished. Latency: 95741 ms
+2026-04-07 16:05:18 [INFO] [Rank 2] Finished. Latency: 95741 ms
+2026-04-07 16:05:18 [INFO] [Rank 0] Finished. Latency: 95741 ms
+2026-04-07 16:05:18 [INFO] [Rank 3] Finished. Latency: 95757 ms
+2026-04-07 16:05:22 [INFO] Total latency:     95741 ms
+2026-04-07 16:05:22 [INFO] Peak 10GB memory:  9198 MB
+2026-04-07 16:05:22 [INFO] Avg  10GB memory:  3993 MB
+2026-04-07 16:05:22 [INFO] [24/110] Split [22, 9, 5, 4] | Batch: 16 | Microbatch: 4 | Microbatches: 4
+2026-04-07 16:05:22 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 16:05:42 [INFO] [Rank 3] Loading weights...
+2026-04-07 16:05:42 [INFO] [Rank 2] Loading weights...
+2026-04-07 16:05:52 [INFO] [Rank 1] Loading weights...
+2026-04-07 16:05:53 [INFO] [Rank 3] Weights loaded.
+2026-04-07 16:05:54 [INFO] [Rank 2] Weights loaded.
+2026-04-07 16:06:04 [INFO] [Rank 1] Weights loaded.
+2026-04-07 16:06:21 [INFO] [Rank 0] Loading weights...
+2026-04-07 16:06:35 [INFO] [Rank 0] Weights loaded.
+2026-04-07 16:09:18 [INFO] [Rank 1] Finished. Latency: 163260 ms
+2026-04-07 16:09:18 [INFO] [Rank 2] Finished. Latency: 163260 ms
+2026-04-07 16:09:18 [INFO] [Rank 0] Finished. Latency: 163260 ms
+2026-04-07 16:09:18 [INFO] [Rank 3] Finished. Latency: 163272 ms
+2026-04-07 16:09:22 [INFO] Total latency:     163260 ms
+2026-04-07 16:09:22 [INFO] Peak 10GB memory:  5972 MB
+2026-04-07 16:09:22 [INFO] Avg  10GB memory:  3394 MB
+2026-04-07 16:09:22 [INFO] [25/110] Split [22, 9, 5, 4] | Batch: 16 | Microbatch: 2 | Microbatches: 8
+2026-04-07 16:09:22 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 16:09:42 [INFO] [Rank 3] Loading weights...
+2026-04-07 16:09:43 [INFO] [Rank 2] Loading weights...
+2026-04-07 16:09:52 [INFO] [Rank 1] Loading weights...
+2026-04-07 16:09:54 [INFO] [Rank 3] Weights loaded.
+2026-04-07 16:09:55 [INFO] [Rank 2] Weights loaded.
+2026-04-07 16:10:04 [INFO] [Rank 1] Weights loaded.
+2026-04-07 16:10:22 [INFO] [Rank 0] Loading weights...
+2026-04-07 16:10:36 [INFO] [Rank 0] Weights loaded.
+2026-04-07 16:15:38 [INFO] [Rank 1] Finished. Latency: 301874 ms
+2026-04-07 16:15:38 [INFO] [Rank 2] Finished. Latency: 301874 ms
+2026-04-07 16:15:38 [INFO] [Rank 0] Finished. Latency: 301874 ms
+2026-04-07 16:15:38 [INFO] [Rank 3] Finished. Latency: 301885 ms
+2026-04-07 16:15:42 [INFO] Total latency:     301874 ms
+2026-04-07 16:15:42 [INFO] Peak 10GB memory:  3946 MB
+2026-04-07 16:15:42 [INFO] Avg  10GB memory:  3227 MB
+2026-04-07 16:15:42 [INFO] [26/110] Split [22, 10, 4, 4] | Batch: 8 | Microbatch: 4 | Microbatches: 2
+2026-04-07 16:15:42 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=8)
+2026-04-07 16:16:01 [INFO] [Rank 2] Loading weights...
+2026-04-07 16:16:02 [INFO] [Rank 3] Loading weights...
+2026-04-07 16:16:12 [INFO] [Rank 2] Weights loaded.
+2026-04-07 16:16:14 [INFO] [Rank 3] Weights loaded.
+2026-04-07 16:16:14 [INFO] [Rank 1] Loading weights...
+2026-04-07 16:16:26 [INFO] [Rank 1] Weights loaded.
+2026-04-07 16:16:42 [INFO] [Rank 0] Loading weights...
+2026-04-07 16:16:56 [INFO] [Rank 0] Weights loaded.
+2026-04-07 16:18:17 [INFO] [Rank 2] Finished. Latency: 80865 ms
+2026-04-07 16:18:17 [INFO] [Rank 1] Finished. Latency: 80865 ms
+2026-04-07 16:18:17 [INFO] [Rank 0] Finished. Latency: 80865 ms
+2026-04-07 16:18:17 [INFO] [Rank 3] Finished. Latency: 80878 ms
+2026-04-07 16:18:21 [INFO] Total latency:     80865 ms
+2026-04-07 16:18:21 [INFO] Peak 10GB memory:  4496 MB
+2026-04-07 16:18:21 [INFO] Avg  10GB memory:  2911 MB
+2026-04-07 16:18:21 [INFO] [27/110] Split [22, 10, 4, 4] | Batch: 8 | Microbatch: 2 | Microbatches: 4
+2026-04-07 16:18:21 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=8)
+2026-04-07 16:18:39 [INFO] [Rank 2] Loading weights...
+2026-04-07 16:18:40 [INFO] [Rank 3] Loading weights...
+2026-04-07 16:18:50 [INFO] [Rank 2] Weights loaded.
+2026-04-07 16:18:51 [INFO] [Rank 3] Weights loaded.
+2026-04-07 16:18:52 [INFO] [Rank 1] Loading weights...
+2026-04-07 16:19:04 [INFO] [Rank 1] Weights loaded.
+2026-04-07 16:19:20 [INFO] [Rank 0] Loading weights...
+2026-04-07 16:19:34 [INFO] [Rank 0] Weights loaded.
+2026-04-07 16:22:03 [INFO] [Rank 2] Finished. Latency: 148986 ms
+2026-04-07 16:22:03 [INFO] [Rank 1] Finished. Latency: 148986 ms
+2026-04-07 16:22:03 [INFO] [Rank 0] Finished. Latency: 148986 ms
+2026-04-07 16:22:03 [INFO] [Rank 3] Finished. Latency: 148996 ms
+2026-04-07 16:22:07 [INFO] Total latency:     148986 ms
+2026-04-07 16:22:07 [INFO] Peak 10GB memory:  3482 MB
+2026-04-07 16:22:07 [INFO] Avg  10GB memory:  2903 MB
+2026-04-07 16:22:07 [INFO] [28/110] Split [22, 10, 4, 4] | Batch: 16 | Microbatch: 8 | Microbatches: 2
+2026-04-07 16:22:07 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 16:22:26 [INFO] [Rank 2] Loading weights...
+2026-04-07 16:22:27 [INFO] [Rank 3] Loading weights...
+2026-04-07 16:22:37 [INFO] [Rank 2] Weights loaded.
+2026-04-07 16:22:39 [INFO] [Rank 3] Weights loaded.
+2026-04-07 16:22:39 [INFO] [Rank 1] Loading weights...
+2026-04-07 16:22:51 [INFO] [Rank 1] Weights loaded.
+2026-04-07 16:23:07 [INFO] [Rank 0] Loading weights...
+2026-04-07 16:23:20 [INFO] [Rank 0] Weights loaded.
+2026-04-07 16:24:54 [INFO] [Rank 2] Finished. Latency: 93856 ms
+2026-04-07 16:24:54 [INFO] [Rank 0] Finished. Latency: 93856 ms
+2026-04-07 16:24:54 [INFO] [Rank 1] Finished. Latency: 93856 ms
+2026-04-07 16:24:54 [INFO] [Rank 3] Finished. Latency: 93872 ms
+2026-04-07 16:24:58 [INFO] Total latency:     93856 ms
+2026-04-07 16:24:58 [INFO] Peak 10GB memory:  9198 MB
+2026-04-07 16:24:58 [INFO] Avg  10GB memory:  3982 MB
+2026-04-07 16:24:58 [INFO] [29/110] Split [22, 10, 4, 4] | Batch: 16 | Microbatch: 4 | Microbatches: 4
+2026-04-07 16:24:58 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 16:25:17 [INFO] [Rank 2] Loading weights...
+2026-04-07 16:25:18 [INFO] [Rank 3] Loading weights...
+2026-04-07 16:25:28 [INFO] [Rank 2] Weights loaded.
+2026-04-07 16:25:29 [INFO] [Rank 3] Weights loaded.
+2026-04-07 16:25:30 [INFO] [Rank 1] Loading weights...
+2026-04-07 16:25:42 [INFO] [Rank 1] Weights loaded.
+2026-04-07 16:25:58 [INFO] [Rank 0] Loading weights...
+2026-04-07 16:26:11 [INFO] [Rank 0] Weights loaded.
+2026-04-07 16:28:51 [INFO] [Rank 2] Finished. Latency: 159878 ms
+2026-04-07 16:28:51 [INFO] [Rank 1] Finished. Latency: 159878 ms
+2026-04-07 16:28:51 [INFO] [Rank 0] Finished. Latency: 159878 ms
+2026-04-07 16:28:51 [INFO] [Rank 3] Finished. Latency: 159891 ms
+2026-04-07 16:28:55 [INFO] Total latency:     159878 ms
+2026-04-07 16:28:55 [INFO] Peak 10GB memory:  5972 MB
+2026-04-07 16:28:55 [INFO] Avg  10GB memory:  3410 MB
+2026-04-07 16:28:55 [INFO] [30/110] Split [22, 10, 4, 4] | Batch: 16 | Microbatch: 2 | Microbatches: 8
+2026-04-07 16:28:55 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 16:29:14 [INFO] [Rank 2] Loading weights...
+2026-04-07 16:29:15 [INFO] [Rank 3] Loading weights...
+2026-04-07 16:29:26 [INFO] [Rank 2] Weights loaded.
+2026-04-07 16:29:27 [INFO] [Rank 3] Weights loaded.
+2026-04-07 16:29:28 [INFO] [Rank 1] Loading weights...
+2026-04-07 16:29:40 [INFO] [Rank 1] Weights loaded.
+2026-04-07 16:29:56 [INFO] [Rank 0] Loading weights...
+2026-04-07 16:30:10 [INFO] [Rank 0] Weights loaded.
+2026-04-07 16:35:05 [INFO] [Rank 1] Finished. Latency: 295187 ms
+2026-04-07 16:35:05 [INFO] [Rank 2] Finished. Latency: 295187 ms
+2026-04-07 16:35:05 [INFO] [Rank 0] Finished. Latency: 295187 ms
+2026-04-07 16:35:05 [INFO] [Rank 3] Finished. Latency: 295197 ms
+2026-04-07 16:35:09 [INFO] Total latency:     295187 ms
+2026-04-07 16:35:09 [INFO] Peak 10GB memory:  3946 MB
+2026-04-07 16:35:09 [INFO] Avg  10GB memory:  3211 MB
+2026-04-07 16:35:10 [INFO] [31/110] Split [22, 10, 5, 3] | Batch: 8 | Microbatch: 4 | Microbatches: 2
+2026-04-07 16:35:10 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=8)
+2026-04-07 16:35:27 [INFO] [Rank 3] Loading weights...
+2026-04-07 16:35:31 [INFO] [Rank 2] Loading weights...
+2026-04-07 16:35:38 [INFO] [Rank 3] Weights loaded.
+2026-04-07 16:35:42 [INFO] [Rank 1] Loading weights...
+2026-04-07 16:35:42 [INFO] [Rank 2] Weights loaded.
+2026-04-07 16:35:53 [INFO] [Rank 1] Weights loaded.
+2026-04-07 16:36:10 [INFO] [Rank 0] Loading weights...
+2026-04-07 16:36:23 [INFO] [Rank 0] Weights loaded.
+2026-04-07 16:37:44 [INFO] [Rank 2] Finished. Latency: 80728 ms
+2026-04-07 16:37:44 [INFO] [Rank 1] Finished. Latency: 80728 ms
+2026-04-07 16:37:44 [INFO] [Rank 0] Finished. Latency: 80728 ms
+2026-04-07 16:37:44 [INFO] [Rank 3] Finished. Latency: 80738 ms
+2026-04-07 16:37:48 [INFO] Total latency:     80728 ms
+2026-04-07 16:37:48 [INFO] Peak 10GB memory:  3504 MB
+2026-04-07 16:37:48 [INFO] Avg  10GB memory:  2309 MB
+2026-04-07 16:37:48 [INFO] [32/110] Split [22, 10, 5, 3] | Batch: 8 | Microbatch: 2 | Microbatches: 4
+2026-04-07 16:37:48 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=8)
+2026-04-07 16:38:06 [INFO] [Rank 3] Loading weights...
+2026-04-07 16:38:09 [INFO] [Rank 2] Loading weights...
+2026-04-07 16:38:17 [INFO] [Rank 3] Weights loaded.
+2026-04-07 16:38:21 [INFO] [Rank 2] Weights loaded.
+2026-04-07 16:38:21 [INFO] [Rank 1] Loading weights...
+2026-04-07 16:38:33 [INFO] [Rank 1] Weights loaded.
+2026-04-07 16:38:48 [INFO] [Rank 0] Loading weights...
+2026-04-07 16:39:02 [INFO] [Rank 0] Weights loaded.
+2026-04-07 16:41:31 [INFO] [Rank 1] Finished. Latency: 148920 ms
+2026-04-07 16:41:31 [INFO] [Rank 2] Finished. Latency: 148920 ms
+2026-04-07 16:41:31 [INFO] [Rank 0] Finished. Latency: 148920 ms
+2026-04-07 16:41:31 [INFO] [Rank 3] Finished. Latency: 148928 ms
+2026-04-07 16:41:35 [INFO] Total latency:     148920 ms
+2026-04-07 16:41:35 [INFO] Peak 10GB memory:  2874 MB
+2026-04-07 16:41:35 [INFO] Avg  10GB memory:  2299 MB
+2026-04-07 16:41:35 [INFO] [33/110] Split [22, 10, 5, 3] | Batch: 16 | Microbatch: 8 | Microbatches: 2
+2026-04-07 16:41:35 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 16:41:52 [INFO] [Rank 3] Loading weights...
+2026-04-07 16:41:55 [INFO] [Rank 2] Loading weights...
+2026-04-07 16:42:04 [INFO] [Rank 3] Weights loaded.
+2026-04-07 16:42:07 [INFO] [Rank 1] Loading weights...
+2026-04-07 16:42:07 [INFO] [Rank 2] Weights loaded.
+2026-04-07 16:42:19 [INFO] [Rank 1] Weights loaded.
+2026-04-07 16:42:34 [INFO] [Rank 0] Loading weights...
+2026-04-07 16:42:48 [INFO] [Rank 0] Weights loaded.
+2026-04-07 16:44:22 [INFO] [Rank 2] Finished. Latency: 93554 ms
+2026-04-07 16:44:22 [INFO] [Rank 1] Finished. Latency: 93554 ms
+2026-04-07 16:44:22 [INFO] [Rank 0] Finished. Latency: 93554 ms
+2026-04-07 16:44:22 [INFO] [Rank 3] Finished. Latency: 93567 ms
+2026-04-07 16:44:26 [INFO] Total latency:     93554 ms
+2026-04-07 16:44:26 [INFO] Peak 10GB memory:  8830 MB
+2026-04-07 16:44:26 [INFO] Avg  10GB memory:  3551 MB
+2026-04-07 16:44:26 [INFO] [34/110] Split [22, 10, 5, 3] | Batch: 16 | Microbatch: 4 | Microbatches: 4
+2026-04-07 16:44:26 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 16:44:43 [INFO] [Rank 3] Loading weights...
+2026-04-07 16:44:47 [INFO] [Rank 2] Loading weights...
+2026-04-07 16:44:54 [INFO] [Rank 3] Weights loaded.
+2026-04-07 16:44:58 [INFO] [Rank 1] Loading weights...
+2026-04-07 16:44:59 [INFO] [Rank 2] Weights loaded.
+2026-04-07 16:45:09 [INFO] [Rank 1] Weights loaded.
+2026-04-07 16:45:25 [INFO] [Rank 0] Loading weights...
+2026-04-07 16:45:39 [INFO] [Rank 0] Weights loaded.
+2026-04-07 16:48:19 [INFO] [Rank 2] Finished. Latency: 159752 ms
+2026-04-07 16:48:19 [INFO] [Rank 1] Finished. Latency: 159752 ms
+2026-04-07 16:48:19 [INFO] [Rank 0] Finished. Latency: 159752 ms
+2026-04-07 16:48:19 [INFO] [Rank 3] Finished. Latency: 159762 ms
+2026-04-07 16:48:23 [INFO] Total latency:     159752 ms
+2026-04-07 16:48:23 [INFO] Peak 10GB memory:  4596 MB
+2026-04-07 16:48:23 [INFO] Avg  10GB memory:  2680 MB
+2026-04-07 16:48:23 [INFO] [35/110] Split [22, 10, 5, 3] | Batch: 16 | Microbatch: 2 | Microbatches: 8
+2026-04-07 16:48:23 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 16:48:40 [INFO] [Rank 3] Loading weights...
+2026-04-07 16:48:44 [INFO] [Rank 2] Loading weights...
+2026-04-07 16:48:52 [INFO] [Rank 3] Weights loaded.
+2026-04-07 16:48:55 [INFO] [Rank 1] Loading weights...
+2026-04-07 16:48:55 [INFO] [Rank 2] Weights loaded.
+2026-04-07 16:49:07 [INFO] [Rank 1] Weights loaded.
+2026-04-07 16:49:22 [INFO] [Rank 0] Loading weights...
+2026-04-07 16:49:36 [INFO] [Rank 0] Weights loaded.
+2026-04-07 16:54:32 [INFO] [Rank 2] Finished. Latency: 296165 ms
+2026-04-07 16:54:32 [INFO] [Rank 1] Finished. Latency: 296165 ms
+2026-04-07 16:54:32 [INFO] [Rank 0] Finished. Latency: 296165 ms
+2026-04-07 16:54:32 [INFO] [Rank 3] Finished. Latency: 296173 ms
+2026-04-07 16:54:36 [INFO] Total latency:     296165 ms
+2026-04-07 16:54:36 [INFO] Peak 10GB memory:  3074 MB
+2026-04-07 16:54:36 [INFO] Avg  10GB memory:  2532 MB
+2026-04-07 16:54:36 [INFO] [36/110] Split [23, 7, 5, 5] | Batch: 8 | Microbatch: 4 | Microbatches: 2
+2026-04-07 16:54:36 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=8)
+2026-04-07 16:54:57 [INFO] [Rank 2] Loading weights...
+2026-04-07 16:54:59 [INFO] [Rank 3] Loading weights...
+2026-04-07 16:55:02 [INFO] [Rank 1] Loading weights...
+2026-04-07 16:55:09 [INFO] [Rank 2] Weights loaded.
+2026-04-07 16:55:10 [INFO] [Rank 3] Weights loaded.
+2026-04-07 16:55:14 [INFO] [Rank 1] Weights loaded.
+2026-04-07 16:55:38 [INFO] [Rank 0] Loading weights...
+2026-04-07 16:55:52 [INFO] [Rank 0] Weights loaded.
+2026-04-07 16:57:15 [INFO] [Rank 2] Finished. Latency: 83367 ms
+2026-04-07 16:57:15 [INFO] [Rank 0] Finished. Latency: 83367 ms
+2026-04-07 16:57:15 [INFO] [Rank 1] Finished. Latency: 83367 ms
+2026-04-07 16:57:15 [INFO] [Rank 3] Finished. Latency: 83383 ms
+2026-04-07 16:57:19 [INFO] Total latency:     83367 ms
+2026-04-07 16:57:19 [INFO] Peak 10GB memory:  5488 MB
+2026-04-07 16:57:19 [INFO] Avg  10GB memory:  3532 MB
+2026-04-07 16:57:19 [INFO] [37/110] Split [23, 7, 5, 5] | Batch: 8 | Microbatch: 2 | Microbatches: 4
+2026-04-07 16:57:19 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=8)
+2026-04-07 16:57:40 [INFO] [Rank 2] Loading weights...
+2026-04-07 16:57:41 [INFO] [Rank 3] Loading weights...
+2026-04-07 16:57:44 [INFO] [Rank 1] Loading weights...
+2026-04-07 16:57:51 [INFO] [Rank 2] Weights loaded.
+2026-04-07 16:57:53 [INFO] [Rank 3] Weights loaded.
+2026-04-07 16:57:56 [INFO] [Rank 1] Weights loaded.
+2026-04-07 16:58:20 [INFO] [Rank 0] Loading weights...
+2026-04-07 16:58:34 [INFO] [Rank 0] Weights loaded.
+2026-04-07 17:01:08 [INFO] [Rank 2] Finished. Latency: 153528 ms
+2026-04-07 17:01:08 [INFO] [Rank 1] Finished. Latency: 153528 ms
+2026-04-07 17:01:08 [INFO] [Rank 0] Finished. Latency: 153528 ms
+2026-04-07 17:01:08 [INFO] [Rank 3] Finished. Latency: 153541 ms
+2026-04-07 17:01:12 [INFO] Total latency:     153528 ms
+2026-04-07 17:01:12 [INFO] Peak 10GB memory:  4162 MB
+2026-04-07 17:01:12 [INFO] Avg  10GB memory:  3507 MB
+2026-04-07 17:01:12 [INFO] [38/110] Split [23, 7, 5, 5] | Batch: 16 | Microbatch: 8 | Microbatches: 2
+2026-04-07 17:01:12 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 17:01:33 [INFO] [Rank 2] Loading weights...
+2026-04-07 17:01:34 [INFO] [Rank 3] Loading weights...
+2026-04-07 17:01:37 [INFO] [Rank 1] Loading weights...
+2026-04-07 17:01:44 [INFO] [Rank 2] Weights loaded.
+2026-04-07 17:01:45 [INFO] [Rank 3] Weights loaded.
+2026-04-07 17:01:49 [INFO] [Rank 1] Weights loaded.
+2026-04-07 17:02:14 [INFO] [Rank 0] Loading weights...
+2026-04-07 17:02:28 [INFO] [Rank 0] Weights loaded.
+2026-04-07 17:04:04 [INFO] [Rank 2] Finished. Latency: 96337 ms
+2026-04-07 17:04:04 [INFO] [Rank 1] Finished. Latency: 96337 ms
+2026-04-07 17:04:04 [INFO] [Rank 0] Finished. Latency: 96337 ms
+2026-04-07 17:04:04 [INFO] [Rank 3] Finished. Latency: 96357 ms
+2026-04-07 17:04:08 [INFO] Total latency:     96337 ms
+2026-04-07 17:04:08 [INFO] Peak 10GB memory:  9644 MB
+2026-04-07 17:04:08 [INFO] Avg  10GB memory:  4659 MB
+2026-04-07 17:04:08 [INFO] [39/110] Split [23, 7, 5, 5] | Batch: 16 | Microbatch: 4 | Microbatches: 4
+2026-04-07 17:04:08 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 17:04:28 [INFO] [Rank 2] Loading weights...
+2026-04-07 17:04:30 [INFO] [Rank 3] Loading weights...
+2026-04-07 17:04:33 [INFO] [Rank 1] Loading weights...
+2026-04-07 17:04:40 [INFO] [Rank 2] Weights loaded.
+2026-04-07 17:04:41 [INFO] [Rank 3] Weights loaded.
+2026-04-07 17:04:45 [INFO] [Rank 1] Weights loaded.
+2026-04-07 17:05:09 [INFO] [Rank 0] Loading weights...
+2026-04-07 17:05:23 [INFO] [Rank 0] Weights loaded.
+2026-04-07 17:08:08 [INFO] [Rank 2] Finished. Latency: 165141 ms
+2026-04-07 17:08:08 [INFO] [Rank 1] Finished. Latency: 165141 ms
+2026-04-07 17:08:08 [INFO] [Rank 0] Finished. Latency: 165141 ms
+2026-04-07 17:08:08 [INFO] [Rank 3] Finished. Latency: 165157 ms
+2026-04-07 17:08:12 [INFO] Total latency:     165141 ms
+2026-04-07 17:08:12 [INFO] Peak 10GB memory:  7348 MB
+2026-04-07 17:08:12 [INFO] Avg  10GB memory:  4134 MB
+2026-04-07 17:08:12 [INFO] [40/110] Split [23, 7, 5, 5] | Batch: 16 | Microbatch: 2 | Microbatches: 8
+2026-04-07 17:08:12 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 17:08:33 [INFO] [Rank 2] Loading weights...
+2026-04-07 17:08:34 [INFO] [Rank 3] Loading weights...
+2026-04-07 17:08:38 [INFO] [Rank 1] Loading weights...
+2026-04-07 17:08:44 [INFO] [Rank 2] Weights loaded.
+2026-04-07 17:08:46 [INFO] [Rank 3] Weights loaded.
+2026-04-07 17:08:49 [INFO] [Rank 1] Weights loaded.
+2026-04-07 17:09:14 [INFO] [Rank 0] Loading weights...
+2026-04-07 17:09:27 [INFO] [Rank 0] Weights loaded.
+2026-04-07 17:14:33 [INFO] [Rank 2] Finished. Latency: 305090 ms
+2026-04-07 17:14:33 [INFO] [Rank 1] Finished. Latency: 305090 ms
+2026-04-07 17:14:33 [INFO] [Rank 0] Finished. Latency: 305090 ms
+2026-04-07 17:14:33 [INFO] [Rank 3] Finished. Latency: 305103 ms
+2026-04-07 17:14:37 [INFO] Total latency:     305090 ms
+2026-04-07 17:14:37 [INFO] Peak 10GB memory:  4810 MB
+2026-04-07 17:14:37 [INFO] Avg  10GB memory:  3904 MB
+2026-04-07 17:14:37 [INFO] [41/110] Split [23, 8, 5, 4] | Batch: 8 | Microbatch: 4 | Microbatches: 2
+2026-04-07 17:14:37 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=8)
+2026-04-07 17:14:57 [INFO] [Rank 3] Loading weights...
+2026-04-07 17:14:58 [INFO] [Rank 2] Loading weights...
+2026-04-07 17:15:05 [INFO] [Rank 1] Loading weights...
+2026-04-07 17:15:08 [INFO] [Rank 3] Weights loaded.
+2026-04-07 17:15:09 [INFO] [Rank 2] Weights loaded.
+2026-04-07 17:15:16 [INFO] [Rank 1] Weights loaded.
+2026-04-07 17:15:39 [INFO] [Rank 0] Loading weights...
+2026-04-07 17:15:52 [INFO] [Rank 0] Weights loaded.
+2026-04-07 17:17:14 [INFO] [Rank 2] Finished. Latency: 81539 ms
+2026-04-07 17:17:14 [INFO] [Rank 1] Finished. Latency: 81539 ms
+2026-04-07 17:17:14 [INFO] [Rank 0] Finished. Latency: 81539 ms
+2026-04-07 17:17:14 [INFO] [Rank 3] Finished. Latency: 81552 ms
+2026-04-07 17:17:18 [INFO] Total latency:     81539 ms
+2026-04-07 17:17:18 [INFO] Peak 10GB memory:  4496 MB
+2026-04-07 17:17:18 [INFO] Avg  10GB memory:  2928 MB
+2026-04-07 17:17:18 [INFO] [42/110] Split [23, 8, 5, 4] | Batch: 8 | Microbatch: 2 | Microbatches: 4
+2026-04-07 17:17:18 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=8)
+2026-04-07 17:17:38 [INFO] [Rank 3] Loading weights...
+2026-04-07 17:17:39 [INFO] [Rank 2] Loading weights...
+2026-04-07 17:17:46 [INFO] [Rank 1] Loading weights...
+2026-04-07 17:17:49 [INFO] [Rank 3] Weights loaded.
+2026-04-07 17:17:51 [INFO] [Rank 2] Weights loaded.
+2026-04-07 17:17:58 [INFO] [Rank 1] Weights loaded.
+2026-04-07 17:18:20 [INFO] [Rank 0] Loading weights...
+2026-04-07 17:18:34 [INFO] [Rank 0] Weights loaded.
+2026-04-07 17:21:05 [INFO] [Rank 2] Finished. Latency: 150437 ms
+2026-04-07 17:21:05 [INFO] [Rank 1] Finished. Latency: 150437 ms
+2026-04-07 17:21:05 [INFO] [Rank 0] Finished. Latency: 150437 ms
+2026-04-07 17:21:05 [INFO] [Rank 3] Finished. Latency: 150448 ms
+2026-04-07 17:21:09 [INFO] Total latency:     150437 ms
+2026-04-07 17:21:09 [INFO] Peak 10GB memory:  3482 MB
+2026-04-07 17:21:09 [INFO] Avg  10GB memory:  2900 MB
+2026-04-07 17:21:09 [INFO] [43/110] Split [23, 8, 5, 4] | Batch: 16 | Microbatch: 8 | Microbatches: 2
+2026-04-07 17:21:09 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 17:21:29 [INFO] [Rank 3] Loading weights...
+2026-04-07 17:21:30 [INFO] [Rank 2] Loading weights...
+2026-04-07 17:21:37 [INFO] [Rank 1] Loading weights...
+2026-04-07 17:21:40 [INFO] [Rank 3] Weights loaded.
+2026-04-07 17:21:42 [INFO] [Rank 2] Weights loaded.
+2026-04-07 17:21:48 [INFO] [Rank 1] Weights loaded.
+2026-04-07 17:22:10 [INFO] [Rank 0] Loading weights...
+2026-04-07 17:22:24 [INFO] [Rank 0] Weights loaded.
+2026-04-07 17:23:59 [INFO] [Rank 1] Finished. Latency: 94853 ms
+2026-04-07 17:23:59 [INFO] [Rank 2] Finished. Latency: 94853 ms
+2026-04-07 17:23:59 [INFO] [Rank 0] Finished. Latency: 94853 ms
+2026-04-07 17:23:59 [INFO] [Rank 3] Finished. Latency: 94869 ms
+2026-04-07 17:24:03 [INFO] Total latency:     94853 ms
+2026-04-07 17:24:03 [INFO] Peak 10GB memory:  9198 MB
+2026-04-07 17:24:03 [INFO] Avg  10GB memory:  3954 MB
+2026-04-07 17:24:03 [INFO] [44/110] Split [23, 8, 5, 4] | Batch: 16 | Microbatch: 4 | Microbatches: 4
+2026-04-07 17:24:03 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 17:24:23 [INFO] [Rank 3] Loading weights...
+2026-04-07 17:24:24 [INFO] [Rank 2] Loading weights...
+2026-04-07 17:24:31 [INFO] [Rank 1] Loading weights...
+2026-04-07 17:24:35 [INFO] [Rank 3] Weights loaded.
+2026-04-07 17:24:36 [INFO] [Rank 2] Weights loaded.
+2026-04-07 17:24:42 [INFO] [Rank 1] Weights loaded.
+2026-04-07 17:25:05 [INFO] [Rank 0] Loading weights...
+2026-04-07 17:25:19 [INFO] [Rank 0] Weights loaded.
+2026-04-07 17:28:00 [INFO] [Rank 2] Finished. Latency: 161353 ms
+2026-04-07 17:28:00 [INFO] [Rank 1] Finished. Latency: 161353 ms
+2026-04-07 17:28:00 [INFO] [Rank 0] Finished. Latency: 161353 ms
+2026-04-07 17:28:00 [INFO] [Rank 3] Finished. Latency: 161365 ms
+2026-04-07 17:28:04 [INFO] Total latency:     161353 ms
+2026-04-07 17:28:04 [INFO] Peak 10GB memory:  5972 MB
+2026-04-07 17:28:04 [INFO] Avg  10GB memory:  3395 MB
+2026-04-07 17:28:04 [INFO] [45/110] Split [23, 8, 5, 4] | Batch: 16 | Microbatch: 2 | Microbatches: 8
+2026-04-07 17:28:04 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 17:28:24 [INFO] [Rank 3] Loading weights...
+2026-04-07 17:28:25 [INFO] [Rank 2] Loading weights...
+2026-04-07 17:28:32 [INFO] [Rank 1] Loading weights...
+2026-04-07 17:28:36 [INFO] [Rank 3] Weights loaded.
+2026-04-07 17:28:37 [INFO] [Rank 2] Weights loaded.
+2026-04-07 17:28:44 [INFO] [Rank 1] Weights loaded.
+2026-04-07 17:29:06 [INFO] [Rank 0] Loading weights...
+2026-04-07 17:29:20 [INFO] [Rank 0] Weights loaded.
+2026-04-07 17:34:19 [INFO] [Rank 1] Finished. Latency: 299150 ms
+2026-04-07 17:34:19 [INFO] [Rank 2] Finished. Latency: 299150 ms
+2026-04-07 17:34:19 [INFO] [Rank 0] Finished. Latency: 299150 ms
+2026-04-07 17:34:19 [INFO] [Rank 3] Finished. Latency: 299160 ms
+2026-04-07 17:34:23 [INFO] Total latency:     299150 ms
+2026-04-07 17:34:23 [INFO] Peak 10GB memory:  3946 MB
+2026-04-07 17:34:23 [INFO] Avg  10GB memory:  3219 MB
+2026-04-07 17:34:23 [INFO] [46/110] Split [23, 9, 4, 4] | Batch: 8 | Microbatch: 4 | Microbatches: 2
+2026-04-07 17:34:23 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=8)
+2026-04-07 17:34:42 [INFO] [Rank 2] Loading weights...
+2026-04-07 17:34:43 [INFO] [Rank 3] Loading weights...
+2026-04-07 17:34:54 [INFO] [Rank 1] Loading weights...
+2026-04-07 17:34:54 [INFO] [Rank 2] Weights loaded.
+2026-04-07 17:34:55 [INFO] [Rank 3] Weights loaded.
+2026-04-07 17:35:05 [INFO] [Rank 1] Weights loaded.
+2026-04-07 17:35:26 [INFO] [Rank 0] Loading weights...
+2026-04-07 17:35:39 [INFO] [Rank 0] Weights loaded.
+2026-04-07 17:37:00 [INFO] [Rank 2] Finished. Latency: 80003 ms
+2026-04-07 17:37:00 [INFO] [Rank 0] Finished. Latency: 80003 ms
+2026-04-07 17:37:00 [INFO] [Rank 1] Finished. Latency: 80003 ms
+2026-04-07 17:37:00 [INFO] [Rank 3] Finished. Latency: 80016 ms
+2026-04-07 17:37:04 [INFO] Total latency:     80003 ms
+2026-04-07 17:37:04 [INFO] Peak 10GB memory:  4496 MB
+2026-04-07 17:37:04 [INFO] Avg  10GB memory:  2921 MB
+2026-04-07 17:37:04 [INFO] [47/110] Split [23, 9, 4, 4] | Batch: 8 | Microbatch: 2 | Microbatches: 4
+2026-04-07 17:37:04 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=8)
+2026-04-07 17:37:22 [INFO] [Rank 2] Loading weights...
+2026-04-07 17:37:23 [INFO] [Rank 3] Loading weights...
+2026-04-07 17:37:33 [INFO] [Rank 1] Loading weights...
+2026-04-07 17:37:34 [INFO] [Rank 2] Weights loaded.
+2026-04-07 17:37:35 [INFO] [Rank 3] Weights loaded.
+2026-04-07 17:37:45 [INFO] [Rank 1] Weights loaded.
+2026-04-07 17:38:06 [INFO] [Rank 0] Loading weights...
+2026-04-07 17:38:19 [INFO] [Rank 0] Weights loaded.
+2026-04-07 17:40:47 [INFO] [Rank 2] Finished. Latency: 147320 ms
+2026-04-07 17:40:47 [INFO] [Rank 1] Finished. Latency: 147320 ms
+2026-04-07 17:40:47 [INFO] [Rank 0] Finished. Latency: 147320 ms
+2026-04-07 17:40:47 [INFO] [Rank 3] Finished. Latency: 147331 ms
+2026-04-07 17:40:51 [INFO] Total latency:     147320 ms
+2026-04-07 17:40:51 [INFO] Peak 10GB memory:  3482 MB
+2026-04-07 17:40:51 [INFO] Avg  10GB memory:  2905 MB
+2026-04-07 17:40:51 [INFO] [48/110] Split [23, 9, 4, 4] | Batch: 16 | Microbatch: 8 | Microbatches: 2
+2026-04-07 17:40:51 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 17:41:09 [INFO] [Rank 2] Loading weights...
+2026-04-07 17:41:11 [INFO] [Rank 3] Loading weights...
+2026-04-07 17:41:21 [INFO] [Rank 2] Weights loaded.
+2026-04-07 17:41:21 [INFO] [Rank 1] Loading weights...
+2026-04-07 17:41:22 [INFO] [Rank 3] Weights loaded.
+2026-04-07 17:41:33 [INFO] [Rank 1] Weights loaded.
+2026-04-07 17:41:53 [INFO] [Rank 0] Loading weights...
+2026-04-07 17:42:06 [INFO] [Rank 0] Weights loaded.
+2026-04-07 17:43:39 [INFO] [Rank 1] Finished. Latency: 92760 ms
+2026-04-07 17:43:39 [INFO] [Rank 2] Finished. Latency: 92760 ms
+2026-04-07 17:43:39 [INFO] [Rank 0] Finished. Latency: 92760 ms
+2026-04-07 17:43:39 [INFO] [Rank 3] Finished. Latency: 92776 ms
+2026-04-07 17:43:43 [INFO] Total latency:     92760 ms
+2026-04-07 17:43:43 [INFO] Peak 10GB memory:  9198 MB
+2026-04-07 17:43:43 [INFO] Avg  10GB memory:  3963 MB
+2026-04-07 17:43:43 [INFO] [49/110] Split [23, 9, 4, 4] | Batch: 16 | Microbatch: 4 | Microbatches: 4
+2026-04-07 17:43:43 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 17:44:01 [INFO] [Rank 2] Loading weights...
+2026-04-07 17:44:03 [INFO] [Rank 3] Loading weights...
+2026-04-07 17:44:13 [INFO] [Rank 1] Loading weights...
+2026-04-07 17:44:13 [INFO] [Rank 2] Weights loaded.
+2026-04-07 17:44:14 [INFO] [Rank 3] Weights loaded.
+2026-04-07 17:44:24 [INFO] [Rank 1] Weights loaded.
+2026-04-07 17:44:45 [INFO] [Rank 0] Loading weights...
+2026-04-07 17:44:58 [INFO] [Rank 0] Weights loaded.
+2026-04-07 17:47:37 [INFO] [Rank 2] Finished. Latency: 158153 ms
+2026-04-07 17:47:37 [INFO] [Rank 1] Finished. Latency: 158153 ms
+2026-04-07 17:47:37 [INFO] [Rank 0] Finished. Latency: 158153 ms
+2026-04-07 17:47:37 [INFO] [Rank 3] Finished. Latency: 158165 ms
+2026-04-07 17:47:41 [INFO] Total latency:     158153 ms
+2026-04-07 17:47:41 [INFO] Peak 10GB memory:  5972 MB
+2026-04-07 17:47:41 [INFO] Avg  10GB memory:  3396 MB
+2026-04-07 17:47:41 [INFO] [50/110] Split [23, 9, 4, 4] | Batch: 16 | Microbatch: 2 | Microbatches: 8
+2026-04-07 17:47:41 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 17:48:00 [INFO] [Rank 2] Loading weights...
+2026-04-07 17:48:01 [INFO] [Rank 3] Loading weights...
+2026-04-07 17:48:11 [INFO] [Rank 1] Loading weights...
+2026-04-07 17:48:11 [INFO] [Rank 2] Weights loaded.
+2026-04-07 17:48:12 [INFO] [Rank 3] Weights loaded.
+2026-04-07 17:48:23 [INFO] [Rank 1] Weights loaded.
+2026-04-07 17:48:43 [INFO] [Rank 0] Loading weights...
+2026-04-07 17:48:56 [INFO] [Rank 0] Weights loaded.
+2026-04-07 17:53:49 [INFO] [Rank 2] Finished. Latency: 292384 ms
+2026-04-07 17:53:49 [INFO] [Rank 1] Finished. Latency: 292384 ms
+2026-04-07 17:53:49 [INFO] [Rank 0] Finished. Latency: 292384 ms
+2026-04-07 17:53:49 [INFO] [Rank 3] Finished. Latency: 292395 ms
+2026-04-07 17:53:53 [INFO] Total latency:     292384 ms
+2026-04-07 17:53:53 [INFO] Peak 10GB memory:  3946 MB
+2026-04-07 17:53:53 [INFO] Avg  10GB memory:  3212 MB
+2026-04-07 17:53:53 [INFO] [51/110] Split [23, 9, 5, 3] | Batch: 8 | Microbatch: 4 | Microbatches: 2
+2026-04-07 17:53:53 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=8)
+2026-04-07 17:54:11 [INFO] [Rank 3] Loading weights...
+2026-04-07 17:54:14 [INFO] [Rank 2] Loading weights...
+2026-04-07 17:54:23 [INFO] [Rank 3] Weights loaded.
+2026-04-07 17:54:23 [INFO] [Rank 1] Loading weights...
+2026-04-07 17:54:26 [INFO] [Rank 2] Weights loaded.
+2026-04-07 17:54:35 [INFO] [Rank 1] Weights loaded.
+2026-04-07 17:54:55 [INFO] [Rank 0] Loading weights...
+2026-04-07 17:55:09 [INFO] [Rank 0] Weights loaded.
+2026-04-07 17:56:29 [INFO] [Rank 2] Finished. Latency: 79916 ms
+2026-04-07 17:56:29 [INFO] [Rank 1] Finished. Latency: 79916 ms
+2026-04-07 17:56:29 [INFO] [Rank 0] Finished. Latency: 79916 ms
+2026-04-07 17:56:29 [INFO] [Rank 3] Finished. Latency: 79926 ms
+2026-04-07 17:56:33 [INFO] Total latency:     79916 ms
+2026-04-07 17:56:33 [INFO] Peak 10GB memory:  3504 MB
+2026-04-07 17:56:33 [INFO] Avg  10GB memory:  2320 MB
+2026-04-07 17:56:33 [INFO] [52/110] Split [23, 9, 5, 3] | Batch: 8 | Microbatch: 2 | Microbatches: 4
+2026-04-07 17:56:33 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=8)
+2026-04-07 17:56:51 [INFO] [Rank 3] Loading weights...
+2026-04-07 17:56:54 [INFO] [Rank 2] Loading weights...
+2026-04-07 17:57:02 [INFO] [Rank 3] Weights loaded.
+2026-04-07 17:57:03 [INFO] [Rank 1] Loading weights...
+2026-04-07 17:57:06 [INFO] [Rank 2] Weights loaded.
+2026-04-07 17:57:15 [INFO] [Rank 1] Weights loaded.
+2026-04-07 17:57:35 [INFO] [Rank 0] Loading weights...
+2026-04-07 17:57:49 [INFO] [Rank 0] Weights loaded.
+2026-04-07 18:00:16 [INFO] [Rank 1] Finished. Latency: 147412 ms
+2026-04-07 18:00:16 [INFO] [Rank 2] Finished. Latency: 147412 ms
+2026-04-07 18:00:16 [INFO] [Rank 0] Finished. Latency: 147412 ms
+2026-04-07 18:00:16 [INFO] [Rank 3] Finished. Latency: 147420 ms
+2026-04-07 18:00:20 [INFO] Total latency:     147412 ms
+2026-04-07 18:00:20 [INFO] Peak 10GB memory:  2874 MB
+2026-04-07 18:00:20 [INFO] Avg  10GB memory:  2298 MB
+2026-04-07 18:00:20 [INFO] [53/110] Split [23, 9, 5, 3] | Batch: 16 | Microbatch: 8 | Microbatches: 2
+2026-04-07 18:00:20 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 18:00:38 [INFO] [Rank 3] Loading weights...
+2026-04-07 18:00:41 [INFO] [Rank 2] Loading weights...
+2026-04-07 18:00:49 [INFO] [Rank 3] Weights loaded.
+2026-04-07 18:00:50 [INFO] [Rank 1] Loading weights...
+2026-04-07 18:00:53 [INFO] [Rank 2] Weights loaded.
+2026-04-07 18:01:02 [INFO] [Rank 1] Weights loaded.
+2026-04-07 18:01:22 [INFO] [Rank 0] Loading weights...
+2026-04-07 18:01:36 [INFO] [Rank 0] Weights loaded.
+2026-04-07 18:03:09 [INFO] [Rank 2] Finished. Latency: 92586 ms
+2026-04-07 18:03:09 [INFO] [Rank 1] Finished. Latency: 92586 ms
+2026-04-07 18:03:09 [INFO] [Rank 0] Finished. Latency: 92586 ms
+2026-04-07 18:03:09 [INFO] [Rank 3] Finished. Latency: 92599 ms
+2026-04-07 18:03:13 [INFO] Total latency:     92586 ms
+2026-04-07 18:03:13 [INFO] Peak 10GB memory:  8830 MB
+2026-04-07 18:03:13 [INFO] Avg  10GB memory:  3503 MB
+2026-04-07 18:03:13 [INFO] [54/110] Split [23, 9, 5, 3] | Batch: 16 | Microbatch: 4 | Microbatches: 4
+2026-04-07 18:03:13 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 18:03:30 [INFO] [Rank 3] Loading weights...
+2026-04-07 18:03:33 [INFO] [Rank 2] Loading weights...
+2026-04-07 18:03:42 [INFO] [Rank 3] Weights loaded.
+2026-04-07 18:03:42 [INFO] [Rank 1] Loading weights...
+2026-04-07 18:03:45 [INFO] [Rank 2] Weights loaded.
+2026-04-07 18:03:54 [INFO] [Rank 1] Weights loaded.
+2026-04-07 18:04:14 [INFO] [Rank 0] Loading weights...
+2026-04-07 18:04:28 [INFO] [Rank 0] Weights loaded.
+2026-04-07 18:07:06 [INFO] [Rank 2] Finished. Latency: 158123 ms
+2026-04-07 18:07:06 [INFO] [Rank 1] Finished. Latency: 158123 ms
+2026-04-07 18:07:06 [INFO] [Rank 0] Finished. Latency: 158123 ms
+2026-04-07 18:07:06 [INFO] [Rank 3] Finished. Latency: 158133 ms
+2026-04-07 18:07:10 [INFO] Total latency:     158123 ms
+2026-04-07 18:07:10 [INFO] Peak 10GB memory:  4596 MB
+2026-04-07 18:07:10 [INFO] Avg  10GB memory:  2655 MB
+2026-04-07 18:07:10 [INFO] [55/110] Split [23, 9, 5, 3] | Batch: 16 | Microbatch: 2 | Microbatches: 8
+2026-04-07 18:07:10 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 18:07:27 [INFO] [Rank 3] Loading weights...
+2026-04-07 18:07:30 [INFO] [Rank 2] Loading weights...
+2026-04-07 18:07:38 [INFO] [Rank 3] Weights loaded.
+2026-04-07 18:07:39 [INFO] [Rank 1] Loading weights...
+2026-04-07 18:07:42 [INFO] [Rank 2] Weights loaded.
+2026-04-07 18:07:51 [INFO] [Rank 1] Weights loaded.
+2026-04-07 18:08:11 [INFO] [Rank 0] Loading weights...
+2026-04-07 18:08:25 [INFO] [Rank 0] Weights loaded.
+2026-04-07 18:13:17 [INFO] [Rank 2] Finished. Latency: 291626 ms
+2026-04-07 18:13:17 [INFO] [Rank 0] Finished. Latency: 291626 ms
+2026-04-07 18:13:17 [INFO] [Rank 1] Finished. Latency: 291626 ms
+2026-04-07 18:13:17 [INFO] [Rank 3] Finished. Latency: 291634 ms
+2026-04-07 18:13:21 [INFO] Total latency:     291626 ms
+2026-04-07 18:13:21 [INFO] Peak 10GB memory:  3074 MB
+2026-04-07 18:13:21 [INFO] Avg  10GB memory:  2529 MB
+2026-04-07 18:13:21 [INFO] [56/110] Split [23, 10, 4, 3] | Batch: 8 | Microbatch: 4 | Microbatches: 2
+2026-04-07 18:13:21 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=8)
+2026-04-07 18:13:38 [INFO] [Rank 3] Loading weights...
+2026-04-07 18:13:39 [INFO] [Rank 2] Loading weights...
+2026-04-07 18:13:40 [WARNING] '(ReadTimeoutError("HTTPSConnectionPool(host='huggingface.co', port=443): Read timed out. (read timeout=10)"), '(Request ID: 3fadce2a-517e-4dae-ac21-5e35a187b488)')' thrown while requesting HEAD https://huggingface.co/lmsys/vicuna-13b-v1.5/resolve/main/config.json
+2026-04-07 18:13:40 [WARNING] Retrying in 1s [Retry 1/5].
+2026-04-07 18:13:50 [INFO] [Rank 3] Weights loaded.
+2026-04-07 18:13:51 [INFO] [Rank 2] Weights loaded.
+2026-04-07 18:14:04 [INFO] [Rank 1] Loading weights...
+2026-04-07 18:14:16 [INFO] [Rank 1] Weights loaded.
+2026-04-07 18:14:23 [INFO] [Rank 0] Loading weights...
+2026-04-07 18:14:36 [INFO] [Rank 0] Weights loaded.
+2026-04-07 18:15:55 [INFO] [Rank 1] Finished. Latency: 78242 ms
+2026-04-07 18:15:55 [INFO] [Rank 2] Finished. Latency: 78242 ms
+2026-04-07 18:15:55 [INFO] [Rank 0] Finished. Latency: 78242 ms
+2026-04-07 18:15:55 [INFO] [Rank 3] Finished. Latency: 78252 ms
+2026-04-07 18:15:59 [INFO] Total latency:     78242 ms
+2026-04-07 18:15:59 [INFO] Peak 10GB memory:  3504 MB
+2026-04-07 18:15:59 [INFO] Avg  10GB memory:  2317 MB
+2026-04-07 18:15:59 [INFO] [57/110] Split [23, 10, 4, 3] | Batch: 8 | Microbatch: 2 | Microbatches: 4
+2026-04-07 18:15:59 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=8)
+2026-04-07 18:16:09 [WARNING] '(ReadTimeoutError("HTTPSConnectionPool(host='huggingface.co', port=443): Read timed out. (read timeout=10)"), '(Request ID: 6872d195-d51e-4ce2-b414-86b029b8b085)')' thrown while requesting HEAD https://huggingface.co/datasets/Salesforce/wikitext/resolve/main/README.md
+2026-04-07 18:16:09 [WARNING] Retrying in 1s [Retry 1/5].
+2026-04-07 18:16:20 [WARNING] '(ReadTimeoutError("HTTPSConnectionPool(host='huggingface.co', port=443): Read timed out. (read timeout=10)"), '(Request ID: fb41454c-e456-4a2f-a187-e3fff4d2a739)')' thrown while requesting HEAD https://huggingface.co/datasets/Salesforce/wikitext/resolve/b08601e04326c79dfdd32d625aee71d232d685c3/.huggingface.yaml
+2026-04-07 18:16:20 [WARNING] Retrying in 1s [Retry 1/5].
+2026-04-07 18:16:38 [INFO] [Rank 3] Loading weights...
+2026-04-07 18:16:39 [INFO] [Rank 2] Loading weights...
+2026-04-07 18:16:49 [WARNING] '(ReadTimeoutError("HTTPSConnectionPool(host='huggingface.co', port=443): Read timed out. (read timeout=10)"), '(Request ID: d6e46a63-f5f4-4f1a-8bcd-accd1bb85e49)')' thrown while requesting HEAD https://huggingface.co/lmsys/vicuna-13b-v1.5/resolve/main/pytorch_model.bin.index.json
+2026-04-07 18:16:49 [WARNING] Retrying in 1s [Retry 1/5].
+2026-04-07 18:16:50 [INFO] [Rank 3] Weights loaded.
+2026-04-07 18:16:53 [INFO] [Rank 1] Loading weights...
+2026-04-07 18:17:02 [INFO] [Rank 2] Weights loaded.
+2026-04-07 18:17:05 [INFO] [Rank 1] Weights loaded.
+2026-04-07 18:17:23 [INFO] [Rank 0] Loading weights...
+2026-04-07 18:17:33 [WARNING] '(ReadTimeoutError("HTTPSConnectionPool(host='huggingface.co', port=443): Read timed out. (read timeout=10)"), '(Request ID: 765fd10d-b0e4-4d1f-9cef-05dad0d68422)')' thrown while requesting HEAD https://huggingface.co/lmsys/vicuna-13b-v1.5/resolve/main/pytorch_model.bin.index.json
+2026-04-07 18:17:33 [WARNING] Retrying in 1s [Retry 1/5].
+2026-04-07 18:17:44 [WARNING] '(ReadTimeoutError("HTTPSConnectionPool(host='huggingface.co', port=443): Read timed out. (read timeout=10)"), '(Request ID: bb713daa-6f28-499e-ba4e-04ee7d9980e0)')' thrown while requesting HEAD https://huggingface.co/lmsys/vicuna-13b-v1.5/resolve/main/pytorch_model.bin.index.json
+2026-04-07 18:17:44 [WARNING] Retrying in 2s [Retry 2/5].
+2026-04-07 18:18:00 [INFO] [Rank 0] Weights loaded.
+2026-04-07 18:20:24 [INFO] [Rank 2] Finished. Latency: 144023 ms
+2026-04-07 18:20:24 [INFO] [Rank 1] Finished. Latency: 144023 ms
+2026-04-07 18:20:24 [INFO] [Rank 0] Finished. Latency: 144025 ms
+2026-04-07 18:20:24 [INFO] [Rank 3] Finished. Latency: 144031 ms
+2026-04-07 18:20:28 [INFO] Total latency:     144025 ms
+2026-04-07 18:20:28 [INFO] Peak 10GB memory:  2874 MB
+2026-04-07 18:20:28 [INFO] Avg  10GB memory:  2292 MB
+2026-04-07 18:20:28 [INFO] [58/110] Split [23, 10, 4, 3] | Batch: 16 | Microbatch: 8 | Microbatches: 2
+2026-04-07 18:20:28 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 18:21:21 [INFO] [Rank 3] Loading weights...
+2026-04-07 18:21:22 [INFO] [Rank 2] Loading weights...
+2026-04-07 18:21:32 [INFO] [Rank 3] Weights loaded.
+2026-04-07 18:21:33 [INFO] [Rank 2] Weights loaded.
+2026-04-07 18:21:35 [INFO] [Rank 1] Loading weights...
+2026-04-07 18:21:47 [INFO] [Rank 1] Weights loaded.
+2026-04-07 18:22:05 [INFO] [Rank 0] Loading weights...
+2026-04-07 18:22:19 [INFO] [Rank 0] Weights loaded.
+2026-04-07 18:23:50 [INFO] [Rank 2] Finished. Latency: 90704 ms
+2026-04-07 18:23:50 [INFO] [Rank 1] Finished. Latency: 90704 ms
+2026-04-07 18:23:50 [INFO] [Rank 0] Finished. Latency: 90704 ms
+2026-04-07 18:23:50 [INFO] [Rank 3] Finished. Latency: 90717 ms
+2026-04-07 18:23:54 [INFO] Total latency:     90704 ms
+2026-04-07 18:23:54 [INFO] Peak 10GB memory:  8830 MB
+2026-04-07 18:23:54 [INFO] Avg  10GB memory:  3505 MB
+2026-04-07 18:23:54 [INFO] [59/110] Split [23, 10, 4, 3] | Batch: 16 | Microbatch: 4 | Microbatches: 4
+2026-04-07 18:23:54 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 18:24:11 [INFO] [Rank 3] Loading weights...
+2026-04-07 18:24:12 [INFO] [Rank 2] Loading weights...
+2026-04-07 18:24:22 [INFO] [Rank 3] Weights loaded.
+2026-04-07 18:24:24 [INFO] [Rank 2] Weights loaded.
+2026-04-07 18:24:25 [INFO] [Rank 1] Loading weights...
+2026-04-07 18:24:38 [INFO] [Rank 1] Weights loaded.
+2026-04-07 18:24:55 [INFO] [Rank 0] Loading weights...
+2026-04-07 18:25:09 [INFO] [Rank 0] Weights loaded.
+2026-04-07 18:27:44 [INFO] [Rank 2] Finished. Latency: 154409 ms
+2026-04-07 18:27:44 [INFO] [Rank 1] Finished. Latency: 154409 ms
+2026-04-07 18:27:44 [INFO] [Rank 0] Finished. Latency: 154409 ms
+2026-04-07 18:27:44 [INFO] [Rank 3] Finished. Latency: 154419 ms
+2026-04-07 18:27:48 [INFO] Total latency:     154409 ms
+2026-04-07 18:27:48 [INFO] Peak 10GB memory:  4596 MB
+2026-04-07 18:27:48 [INFO] Avg  10GB memory:  2659 MB
+2026-04-07 18:27:48 [INFO] [60/110] Split [23, 10, 4, 3] | Batch: 16 | Microbatch: 2 | Microbatches: 8
+2026-04-07 18:27:48 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 18:28:05 [INFO] [Rank 3] Loading weights...
+2026-04-07 18:28:06 [INFO] [Rank 2] Loading weights...
+2026-04-07 18:28:16 [INFO] [Rank 3] Weights loaded.
+2026-04-07 18:28:17 [INFO] [Rank 2] Weights loaded.
+2026-04-07 18:28:19 [INFO] [Rank 1] Loading weights...
+2026-04-07 18:28:31 [INFO] [Rank 1] Weights loaded.
+2026-04-07 18:28:49 [INFO] [Rank 0] Loading weights...
+2026-04-07 18:29:03 [INFO] [Rank 0] Weights loaded.
+2026-04-07 18:33:50 [INFO] [Rank 0] Finished. Latency: 287010 ms
+2026-04-07 18:33:50 [INFO] [Rank 2] Finished. Latency: 287010 ms
+2026-04-07 18:33:50 [INFO] [Rank 1] Finished. Latency: 287010 ms
+2026-04-07 18:33:50 [INFO] [Rank 3] Finished. Latency: 287018 ms
+2026-04-07 18:33:54 [INFO] Total latency:     287010 ms
+2026-04-07 18:33:54 [INFO] Peak 10GB memory:  3074 MB
+2026-04-07 18:33:54 [INFO] Avg  10GB memory:  2531 MB
+2026-04-07 18:33:54 [INFO] [61/110] Split [23, 10, 5, 2] | Batch: 8 | Microbatch: 4 | Microbatches: 2
+2026-04-07 18:33:54 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=8)
+2026-04-07 18:34:09 [INFO] [Rank 3] Loading weights...
+2026-04-07 18:34:15 [INFO] [Rank 2] Loading weights...
+2026-04-07 18:34:20 [INFO] [Rank 3] Weights loaded.
+2026-04-07 18:34:26 [INFO] [Rank 1] Loading weights...
+2026-04-07 18:34:26 [INFO] [Rank 2] Weights loaded.
+2026-04-07 18:34:38 [INFO] [Rank 1] Weights loaded.
+2026-04-07 18:34:56 [INFO] [Rank 0] Loading weights...
+2026-04-07 18:35:10 [INFO] [Rank 0] Weights loaded.
+2026-04-07 18:36:28 [INFO] [Rank 1] Finished. Latency: 78319 ms
+2026-04-07 18:36:28 [INFO] [Rank 2] Finished. Latency: 78319 ms
+2026-04-07 18:36:28 [INFO] [Rank 0] Finished. Latency: 78319 ms
+2026-04-07 18:36:28 [INFO] [Rank 3] Finished. Latency: 78326 ms
+2026-04-07 18:36:32 [INFO] Total latency:     78319 ms
+2026-04-07 18:36:32 [INFO] Peak 10GB memory:  2512 MB
+2026-04-07 18:36:32 [INFO] Avg  10GB memory:  1712 MB
+2026-04-07 18:36:32 [INFO] [62/110] Split [23, 10, 5, 2] | Batch: 8 | Microbatch: 2 | Microbatches: 4
+2026-04-07 18:36:32 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=8)
+2026-04-07 18:36:47 [INFO] [Rank 3] Loading weights...
+2026-04-07 18:36:53 [INFO] [Rank 2] Loading weights...
+2026-04-07 18:36:59 [INFO] [Rank 3] Weights loaded.
+2026-04-07 18:37:04 [INFO] [Rank 1] Loading weights...
+2026-04-07 18:37:04 [INFO] [Rank 2] Weights loaded.
+2026-04-07 18:37:16 [INFO] [Rank 1] Weights loaded.
+2026-04-07 18:37:34 [INFO] [Rank 0] Loading weights...
+2026-04-07 18:37:48 [INFO] [Rank 0] Weights loaded.
+2026-04-07 18:40:12 [INFO] [Rank 1] Finished. Latency: 144149 ms
+2026-04-07 18:40:12 [INFO] [Rank 2] Finished. Latency: 144149 ms
+2026-04-07 18:40:12 [INFO] [Rank 0] Finished. Latency: 144149 ms
+2026-04-07 18:40:12 [INFO] [Rank 3] Finished. Latency: 144155 ms
+2026-04-07 18:40:16 [INFO] Total latency:     144149 ms
+2026-04-07 18:40:16 [INFO] Peak 10GB memory:  2266 MB
+2026-04-07 18:40:16 [INFO] Avg  10GB memory:  1694 MB
+2026-04-07 18:40:16 [INFO] [63/110] Split [23, 10, 5, 2] | Batch: 16 | Microbatch: 8 | Microbatches: 2
+2026-04-07 18:40:16 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 18:40:31 [INFO] [Rank 3] Loading weights...
+2026-04-07 18:40:36 [INFO] [Rank 2] Loading weights...
+2026-04-07 18:40:42 [INFO] [Rank 3] Weights loaded.
+2026-04-07 18:40:48 [INFO] [Rank 1] Loading weights...
+2026-04-07 18:40:48 [INFO] [Rank 2] Weights loaded.
+2026-04-07 18:41:00 [INFO] [Rank 1] Weights loaded.
+2026-04-07 18:41:18 [INFO] [Rank 0] Loading weights...
+2026-04-07 18:41:31 [INFO] [Rank 0] Weights loaded.
+2026-04-07 18:43:02 [INFO] [Rank 1] Finished. Latency: 90464 ms
+2026-04-07 18:43:02 [INFO] [Rank 2] Finished. Latency: 90464 ms
+2026-04-07 18:43:02 [INFO] [Rank 0] Finished. Latency: 90464 ms
+2026-04-07 18:43:02 [INFO] [Rank 3] Finished. Latency: 90473 ms
+2026-04-07 18:43:06 [INFO] Total latency:     90464 ms
+2026-04-07 18:43:06 [INFO] Peak 10GB memory:  6218 MB
+2026-04-07 18:43:06 [INFO] Avg  10GB memory:  2540 MB
+2026-04-07 18:43:06 [INFO] [64/110] Split [23, 10, 5, 2] | Batch: 16 | Microbatch: 4 | Microbatches: 4
+2026-04-07 18:43:06 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 18:43:21 [INFO] [Rank 3] Loading weights...
+2026-04-07 18:43:27 [INFO] [Rank 2] Loading weights...
+2026-04-07 18:43:32 [INFO] [Rank 3] Weights loaded.
+2026-04-07 18:43:38 [INFO] [Rank 1] Loading weights...
+2026-04-07 18:43:38 [INFO] [Rank 2] Weights loaded.
+2026-04-07 18:43:50 [INFO] [Rank 1] Weights loaded.
+2026-04-07 18:44:07 [INFO] [Rank 0] Loading weights...
+2026-04-07 18:44:21 [INFO] [Rank 0] Weights loaded.
+2026-04-07 18:46:56 [INFO] [Rank 2] Finished. Latency: 154662 ms
+2026-04-07 18:46:56 [INFO] [Rank 1] Finished. Latency: 154662 ms
+2026-04-07 18:46:56 [INFO] [Rank 0] Finished. Latency: 154662 ms
+2026-04-07 18:46:56 [INFO] [Rank 3] Finished. Latency: 154669 ms
+2026-04-07 18:47:00 [INFO] Total latency:     154662 ms
+2026-04-07 18:47:00 [INFO] Peak 10GB memory:  3220 MB
+2026-04-07 18:47:00 [INFO] Avg  10GB memory:  1930 MB
+2026-04-07 18:47:00 [INFO] [65/110] Split [23, 10, 5, 2] | Batch: 16 | Microbatch: 2 | Microbatches: 8
+2026-04-07 18:47:00 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 18:47:15 [INFO] [Rank 3] Loading weights...
+2026-04-07 18:47:21 [INFO] [Rank 2] Loading weights...
+2026-04-07 18:47:27 [INFO] [Rank 3] Weights loaded.
+2026-04-07 18:47:32 [INFO] [Rank 1] Loading weights...
+2026-04-07 18:47:32 [INFO] [Rank 2] Weights loaded.
+2026-04-07 18:47:44 [INFO] [Rank 1] Weights loaded.
+2026-04-07 18:48:02 [INFO] [Rank 0] Loading weights...
+2026-04-07 18:48:16 [INFO] [Rank 0] Weights loaded.
+2026-04-07 18:53:02 [INFO] [Rank 2] Finished. Latency: 286554 ms
+2026-04-07 18:53:02 [INFO] [Rank 1] Finished. Latency: 286554 ms
+2026-04-07 18:53:02 [INFO] [Rank 0] Finished. Latency: 286554 ms
+2026-04-07 18:53:02 [INFO] [Rank 3] Finished. Latency: 286560 ms
+2026-04-07 18:53:06 [INFO] Total latency:     286554 ms
+2026-04-07 18:53:06 [INFO] Peak 10GB memory:  2266 MB
+2026-04-07 18:53:06 [INFO] Avg  10GB memory:  1849 MB
+2026-04-07 18:53:06 [INFO] [66/110] Split [24, 6, 5, 5] | Batch: 8 | Microbatch: 4 | Microbatches: 2
+2026-04-07 18:53:06 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=8)
+2026-04-07 18:53:28 [INFO] [Rank 2] Loading weights...
+2026-04-07 18:53:29 [INFO] [Rank 3] Loading weights...
+2026-04-07 18:53:30 [INFO] [Rank 1] Loading weights...
+2026-04-07 18:53:40 [INFO] [Rank 2] Weights loaded.
+2026-04-07 18:53:40 [INFO] [Rank 3] Weights loaded.
+2026-04-07 18:53:41 [INFO] [Rank 1] Weights loaded.
+2026-04-07 18:54:11 [INFO] [Rank 0] Loading weights...
+2026-04-07 18:54:25 [INFO] [Rank 0] Weights loaded.
+2026-04-07 18:55:47 [INFO] [Rank 2] Finished. Latency: 82467 ms
+2026-04-07 18:55:47 [INFO] [Rank 1] Finished. Latency: 82467 ms
+2026-04-07 18:55:47 [INFO] [Rank 0] Finished. Latency: 82467 ms
+2026-04-07 18:55:47 [INFO] [Rank 3] Finished. Latency: 82482 ms
+2026-04-07 18:55:51 [INFO] Total latency:     82467 ms
+2026-04-07 18:55:51 [INFO] Peak 10GB memory:  5488 MB
+2026-04-07 18:55:51 [INFO] Avg  10GB memory:  3522 MB
+2026-04-07 18:55:51 [INFO] [67/110] Split [24, 6, 5, 5] | Batch: 8 | Microbatch: 2 | Microbatches: 4
+2026-04-07 18:55:51 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=8)
+2026-04-07 18:56:12 [INFO] [Rank 2] Loading weights...
+2026-04-07 18:56:13 [INFO] [Rank 3] Loading weights...
+2026-04-07 18:56:15 [INFO] [Rank 1] Loading weights...
+2026-04-07 18:56:24 [INFO] [Rank 2] Weights loaded.
+2026-04-07 18:56:25 [INFO] [Rank 3] Weights loaded.
+2026-04-07 18:56:26 [INFO] [Rank 1] Weights loaded.
+2026-04-07 18:56:55 [INFO] [Rank 0] Loading weights...
+2026-04-07 18:57:09 [INFO] [Rank 0] Weights loaded.
+2026-04-07 18:59:42 [INFO] [Rank 2] Finished. Latency: 152438 ms
+2026-04-07 18:59:42 [INFO] [Rank 1] Finished. Latency: 152438 ms
+2026-04-07 18:59:42 [INFO] [Rank 0] Finished. Latency: 152438 ms
+2026-04-07 18:59:42 [INFO] [Rank 3] Finished. Latency: 152451 ms
+2026-04-07 18:59:46 [INFO] Total latency:     152438 ms
+2026-04-07 18:59:46 [INFO] Peak 10GB memory:  4162 MB
+2026-04-07 18:59:46 [INFO] Avg  10GB memory:  3508 MB
+2026-04-07 18:59:46 [INFO] [68/110] Split [24, 6, 5, 5] | Batch: 16 | Microbatch: 8 | Microbatches: 2
+2026-04-07 18:59:46 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 19:00:07 [INFO] [Rank 2] Loading weights...
+2026-04-07 19:00:09 [INFO] [Rank 3] Loading weights...
+2026-04-07 19:00:10 [INFO] [Rank 1] Loading weights...
+2026-04-07 19:00:19 [INFO] [Rank 2] Weights loaded.
+2026-04-07 19:00:20 [INFO] [Rank 3] Weights loaded.
+2026-04-07 19:00:21 [INFO] [Rank 1] Weights loaded.
+2026-04-07 19:00:50 [INFO] [Rank 0] Loading weights...
+2026-04-07 19:01:04 [INFO] [Rank 0] Weights loaded.
+2026-04-07 19:02:39 [INFO] [Rank 1] Finished. Latency: 95377 ms
+2026-04-07 19:02:39 [INFO] [Rank 2] Finished. Latency: 95377 ms
+2026-04-07 19:02:39 [INFO] [Rank 0] Finished. Latency: 95377 ms
+2026-04-07 19:02:39 [INFO] [Rank 3] Finished. Latency: 95397 ms
+2026-04-07 19:02:43 [INFO] Total latency:     95377 ms
+2026-04-07 19:02:43 [INFO] Peak 10GB memory:  9644 MB
+2026-04-07 19:02:43 [INFO] Avg  10GB memory:  4619 MB
+2026-04-07 19:02:43 [INFO] [69/110] Split [24, 6, 5, 5] | Batch: 16 | Microbatch: 4 | Microbatches: 4
+2026-04-07 19:02:43 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 19:03:04 [INFO] [Rank 2] Loading weights...
+2026-04-07 19:03:05 [INFO] [Rank 3] Loading weights...
+2026-04-07 19:03:06 [INFO] [Rank 1] Loading weights...
+2026-04-07 19:03:16 [INFO] [Rank 2] Weights loaded.
+2026-04-07 19:03:17 [INFO] [Rank 3] Weights loaded.
+2026-04-07 19:03:18 [INFO] [Rank 1] Weights loaded.
+2026-04-07 19:03:47 [INFO] [Rank 0] Loading weights...
+2026-04-07 19:04:01 [INFO] [Rank 0] Weights loaded.
+2026-04-07 19:06:44 [INFO] [Rank 2] Finished. Latency: 163257 ms
+2026-04-07 19:06:44 [INFO] [Rank 0] Finished. Latency: 163257 ms
+2026-04-07 19:06:44 [INFO] [Rank 1] Finished. Latency: 163257 ms
+2026-04-07 19:06:44 [INFO] [Rank 3] Finished. Latency: 163273 ms
+2026-04-07 19:06:48 [INFO] Total latency:     163257 ms
+2026-04-07 19:06:48 [INFO] Peak 10GB memory:  7348 MB
+2026-04-07 19:06:48 [INFO] Avg  10GB memory:  4119 MB
+2026-04-07 19:06:48 [INFO] [70/110] Split [24, 6, 5, 5] | Batch: 16 | Microbatch: 2 | Microbatches: 8
+2026-04-07 19:06:48 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 19:07:09 [INFO] [Rank 2] Loading weights...
+2026-04-07 19:07:11 [INFO] [Rank 3] Loading weights...
+2026-04-07 19:07:12 [INFO] [Rank 1] Loading weights...
+2026-04-07 19:07:21 [INFO] [Rank 2] Weights loaded.
+2026-04-07 19:07:22 [INFO] [Rank 3] Weights loaded.
+2026-04-07 19:07:23 [INFO] [Rank 1] Weights loaded.
+2026-04-07 19:07:53 [INFO] [Rank 0] Loading weights...
+2026-04-07 19:08:07 [INFO] [Rank 0] Weights loaded.
+2026-04-07 19:13:09 [INFO] [Rank 1] Finished. Latency: 302489 ms
+2026-04-07 19:13:09 [INFO] [Rank 2] Finished. Latency: 302489 ms
+2026-04-07 19:13:09 [INFO] [Rank 0] Finished. Latency: 302489 ms
+2026-04-07 19:13:09 [INFO] [Rank 3] Finished. Latency: 302502 ms
+2026-04-07 19:13:13 [INFO] Total latency:     302489 ms
+2026-04-07 19:13:13 [INFO] Peak 10GB memory:  4810 MB
+2026-04-07 19:13:13 [INFO] Avg  10GB memory:  3891 MB
+2026-04-07 19:13:13 [INFO] [71/110] Split [24, 7, 5, 4] | Batch: 8 | Microbatch: 4 | Microbatches: 2
+2026-04-07 19:13:13 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=8)
+2026-04-07 19:13:33 [INFO] [Rank 3] Loading weights...
+2026-04-07 19:13:35 [INFO] [Rank 2] Loading weights...
+2026-04-07 19:13:39 [INFO] [Rank 1] Loading weights...
+2026-04-07 19:13:45 [INFO] [Rank 3] Weights loaded.
+2026-04-07 19:13:46 [INFO] [Rank 2] Weights loaded.
+2026-04-07 19:13:51 [INFO] [Rank 1] Weights loaded.
+2026-04-07 19:14:18 [INFO] [Rank 0] Loading weights...
+2026-04-07 19:14:31 [INFO] [Rank 0] Weights loaded.
+2026-04-07 19:15:52 [INFO] [Rank 2] Finished. Latency: 80875 ms
+2026-04-07 19:15:52 [INFO] [Rank 0] Finished. Latency: 80875 ms
+2026-04-07 19:15:52 [INFO] [Rank 1] Finished. Latency: 80875 ms
+2026-04-07 19:15:52 [INFO] [Rank 3] Finished. Latency: 80888 ms
+2026-04-07 19:15:56 [INFO] Total latency:     80875 ms
+2026-04-07 19:15:56 [INFO] Peak 10GB memory:  4496 MB
+2026-04-07 19:15:56 [INFO] Avg  10GB memory:  2915 MB
+2026-04-07 19:15:56 [INFO] [72/110] Split [24, 7, 5, 4] | Batch: 8 | Microbatch: 2 | Microbatches: 4
+2026-04-07 19:15:56 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=8)
+2026-04-07 19:16:16 [INFO] [Rank 3] Loading weights...
+2026-04-07 19:16:17 [INFO] [Rank 2] Loading weights...
+2026-04-07 19:16:21 [INFO] [Rank 1] Loading weights...
+2026-04-07 19:16:27 [INFO] [Rank 3] Weights loaded.
+2026-04-07 19:16:28 [INFO] [Rank 2] Weights loaded.
+2026-04-07 19:16:33 [INFO] [Rank 1] Weights loaded.
+2026-04-07 19:17:00 [INFO] [Rank 0] Loading weights...
+2026-04-07 19:17:13 [INFO] [Rank 0] Weights loaded.
+2026-04-07 19:19:43 [INFO] [Rank 2] Finished. Latency: 149133 ms
+2026-04-07 19:19:43 [INFO] [Rank 1] Finished. Latency: 149132 ms
+2026-04-07 19:19:43 [INFO] [Rank 0] Finished. Latency: 149133 ms
+2026-04-07 19:19:43 [INFO] [Rank 3] Finished. Latency: 149143 ms
+2026-04-07 19:19:47 [INFO] Total latency:     149133 ms
+2026-04-07 19:19:47 [INFO] Peak 10GB memory:  3482 MB
+2026-04-07 19:19:47 [INFO] Avg  10GB memory:  2916 MB
+2026-04-07 19:19:47 [INFO] [73/110] Split [24, 7, 5, 4] | Batch: 16 | Microbatch: 8 | Microbatches: 2
+2026-04-07 19:19:47 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 19:20:06 [INFO] [Rank 3] Loading weights...
+2026-04-07 19:20:07 [INFO] [Rank 2] Loading weights...
+2026-04-07 19:20:11 [INFO] [Rank 1] Loading weights...
+2026-04-07 19:20:17 [INFO] [Rank 3] Weights loaded.
+2026-04-07 19:20:18 [INFO] [Rank 2] Weights loaded.
+2026-04-07 19:20:23 [INFO] [Rank 1] Weights loaded.
+2026-04-07 19:20:50 [INFO] [Rank 0] Loading weights...
+2026-04-07 19:21:04 [INFO] [Rank 0] Weights loaded.
+2026-04-07 19:22:37 [INFO] [Rank 2] Finished. Latency: 93490 ms
+2026-04-07 19:22:37 [INFO] [Rank 1] Finished. Latency: 93490 ms
+2026-04-07 19:22:37 [INFO] [Rank 0] Finished. Latency: 93490 ms
+2026-04-07 19:22:37 [INFO] [Rank 3] Finished. Latency: 93506 ms
+2026-04-07 19:22:41 [INFO] Total latency:     93490 ms
+2026-04-07 19:22:41 [INFO] Peak 10GB memory:  9198 MB
+2026-04-07 19:22:41 [INFO] Avg  10GB memory:  3949 MB
+2026-04-07 19:22:41 [INFO] [74/110] Split [24, 7, 5, 4] | Batch: 16 | Microbatch: 4 | Microbatches: 4
+2026-04-07 19:22:41 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 19:23:01 [INFO] [Rank 3] Loading weights...
+2026-04-07 19:23:02 [INFO] [Rank 2] Loading weights...
+2026-04-07 19:23:07 [INFO] [Rank 1] Loading weights...
+2026-04-07 19:23:13 [INFO] [Rank 3] Weights loaded.
+2026-04-07 19:23:14 [INFO] [Rank 2] Weights loaded.
+2026-04-07 19:23:18 [INFO] [Rank 1] Weights loaded.
+2026-04-07 19:23:45 [INFO] [Rank 0] Loading weights...
+2026-04-07 19:23:59 [INFO] [Rank 0] Weights loaded.
+2026-04-07 19:26:39 [INFO] [Rank 2] Finished. Latency: 159978 ms
+2026-04-07 19:26:39 [INFO] [Rank 1] Finished. Latency: 159978 ms
+2026-04-07 19:26:39 [INFO] [Rank 0] Finished. Latency: 159978 ms
+2026-04-07 19:26:39 [INFO] [Rank 3] Finished. Latency: 159991 ms
+2026-04-07 19:26:43 [INFO] Total latency:     159978 ms
+2026-04-07 19:26:43 [INFO] Peak 10GB memory:  5972 MB
+2026-04-07 19:26:43 [INFO] Avg  10GB memory:  3387 MB
+2026-04-07 19:26:43 [INFO] [75/110] Split [24, 7, 5, 4] | Batch: 16 | Microbatch: 2 | Microbatches: 8
+2026-04-07 19:26:43 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 19:27:04 [INFO] [Rank 3] Loading weights...
+2026-04-07 19:27:04 [INFO] [Rank 2] Loading weights...
+2026-04-07 19:27:09 [INFO] [Rank 1] Loading weights...
+2026-04-07 19:27:15 [INFO] [Rank 3] Weights loaded.
+2026-04-07 19:27:16 [INFO] [Rank 2] Weights loaded.
+2026-04-07 19:27:21 [INFO] [Rank 1] Weights loaded.
+2026-04-07 19:27:47 [INFO] [Rank 0] Loading weights...
+2026-04-07 19:28:01 [INFO] [Rank 0] Weights loaded.
+2026-04-07 19:32:56 [INFO] [Rank 1] Finished. Latency: 294648 ms
+2026-04-07 19:32:56 [INFO] [Rank 2] Finished. Latency: 294648 ms
+2026-04-07 19:32:56 [INFO] [Rank 0] Finished. Latency: 294648 ms
+2026-04-07 19:32:56 [INFO] [Rank 3] Finished. Latency: 294659 ms
+2026-04-07 19:33:00 [INFO] Total latency:     294648 ms
+2026-04-07 19:33:00 [INFO] Peak 10GB memory:  3946 MB
+2026-04-07 19:33:00 [INFO] Avg  10GB memory:  3214 MB
+2026-04-07 19:33:00 [INFO] [76/110] Split [24, 8, 4, 4] | Batch: 8 | Microbatch: 4 | Microbatches: 2
+2026-04-07 19:33:00 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=8)
+2026-04-07 19:33:18 [INFO] [Rank 2] Loading weights...
+2026-04-07 19:33:19 [INFO] [Rank 3] Loading weights...
+2026-04-07 19:33:27 [INFO] [Rank 1] Loading weights...
+2026-04-07 19:33:30 [INFO] [Rank 2] Weights loaded.
+2026-04-07 19:33:31 [INFO] [Rank 3] Weights loaded.
+2026-04-07 19:33:39 [INFO] [Rank 1] Weights loaded.
+2026-04-07 19:34:04 [INFO] [Rank 0] Loading weights...
+2026-04-07 19:34:17 [INFO] [Rank 0] Weights loaded.
+2026-04-07 19:35:37 [INFO] [Rank 2] Finished. Latency: 79156 ms
+2026-04-07 19:35:37 [INFO] [Rank 1] Finished. Latency: 79156 ms
+2026-04-07 19:35:37 [INFO] [Rank 0] Finished. Latency: 79156 ms
+2026-04-07 19:35:37 [INFO] [Rank 3] Finished. Latency: 79169 ms
+2026-04-07 19:35:41 [INFO] Total latency:     79156 ms
+2026-04-07 19:35:41 [INFO] Peak 10GB memory:  4496 MB
+2026-04-07 19:35:41 [INFO] Avg  10GB memory:  2930 MB
+2026-04-07 19:35:41 [INFO] [77/110] Split [24, 8, 4, 4] | Batch: 8 | Microbatch: 2 | Microbatches: 4
+2026-04-07 19:35:41 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=8)
+2026-04-07 19:35:59 [INFO] [Rank 2] Loading weights...
+2026-04-07 19:36:00 [INFO] [Rank 3] Loading weights...
+2026-04-07 19:36:08 [INFO] [Rank 1] Loading weights...
+2026-04-07 19:36:11 [INFO] [Rank 2] Weights loaded.
+2026-04-07 19:36:12 [INFO] [Rank 3] Weights loaded.
+2026-04-07 19:36:20 [INFO] [Rank 1] Weights loaded.
+2026-04-07 19:36:44 [INFO] [Rank 0] Loading weights...
+2026-04-07 19:36:58 [INFO] [Rank 0] Weights loaded.
+2026-04-07 19:39:24 [INFO] [Rank 2] Finished. Latency: 145850 ms
+2026-04-07 19:39:24 [INFO] [Rank 1] Finished. Latency: 145850 ms
+2026-04-07 19:39:24 [INFO] [Rank 0] Finished. Latency: 145850 ms
+2026-04-07 19:39:24 [INFO] [Rank 3] Finished. Latency: 145860 ms
+2026-04-07 19:39:28 [INFO] Total latency:     145850 ms
+2026-04-07 19:39:28 [INFO] Peak 10GB memory:  3482 MB
+2026-04-07 19:39:28 [INFO] Avg  10GB memory:  2896 MB
+2026-04-07 19:39:28 [INFO] [78/110] Split [24, 8, 4, 4] | Batch: 16 | Microbatch: 8 | Microbatches: 2
+2026-04-07 19:39:28 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 19:39:47 [INFO] [Rank 2] Loading weights...
+2026-04-07 19:39:48 [INFO] [Rank 3] Loading weights...
+2026-04-07 19:39:56 [INFO] [Rank 1] Loading weights...
+2026-04-07 19:39:58 [INFO] [Rank 2] Weights loaded.
+2026-04-07 19:40:00 [INFO] [Rank 3] Weights loaded.
+2026-04-07 19:40:08 [INFO] [Rank 1] Weights loaded.
+2026-04-07 19:40:32 [INFO] [Rank 0] Loading weights...
+2026-04-07 19:40:46 [INFO] [Rank 0] Weights loaded.
+2026-04-07 19:42:18 [INFO] [Rank 2] Finished. Latency: 91902 ms
+2026-04-07 19:42:18 [INFO] [Rank 1] Finished. Latency: 91902 ms
+2026-04-07 19:42:18 [INFO] [Rank 0] Finished. Latency: 91902 ms
+2026-04-07 19:42:18 [INFO] [Rank 3] Finished. Latency: 91918 ms
+2026-04-07 19:42:22 [INFO] Total latency:     91902 ms
+2026-04-07 19:42:22 [INFO] Peak 10GB memory:  9198 MB
+2026-04-07 19:42:22 [INFO] Avg  10GB memory:  3905 MB
+2026-04-07 19:42:22 [INFO] [79/110] Split [24, 8, 4, 4] | Batch: 16 | Microbatch: 4 | Microbatches: 4
+2026-04-07 19:42:22 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 19:42:41 [INFO] [Rank 2] Loading weights...
+2026-04-07 19:42:42 [INFO] [Rank 3] Loading weights...
+2026-04-07 19:42:50 [INFO] [Rank 1] Loading weights...
+2026-04-07 19:42:53 [INFO] [Rank 2] Weights loaded.
+2026-04-07 19:42:54 [INFO] [Rank 3] Weights loaded.
+2026-04-07 19:43:02 [INFO] [Rank 1] Weights loaded.
+2026-04-07 19:43:26 [INFO] [Rank 0] Loading weights...
+2026-04-07 19:43:40 [INFO] [Rank 0] Weights loaded.
+2026-04-07 19:46:17 [INFO] [Rank 1] Finished. Latency: 156242 ms
+2026-04-07 19:46:17 [INFO] [Rank 2] Finished. Latency: 156242 ms
+2026-04-07 19:46:17 [INFO] [Rank 0] Finished. Latency: 156242 ms
+2026-04-07 19:46:17 [INFO] [Rank 3] Finished. Latency: 156254 ms
+2026-04-07 19:46:21 [INFO] Total latency:     156242 ms
+2026-04-07 19:46:21 [INFO] Peak 10GB memory:  5972 MB
+2026-04-07 19:46:21 [INFO] Avg  10GB memory:  3383 MB
+2026-04-07 19:46:21 [INFO] [80/110] Split [24, 8, 4, 4] | Batch: 16 | Microbatch: 2 | Microbatches: 8
+2026-04-07 19:46:21 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 19:46:40 [INFO] [Rank 2] Loading weights...
+2026-04-07 19:46:41 [INFO] [Rank 3] Loading weights...
+2026-04-07 19:46:48 [INFO] [Rank 1] Loading weights...
+2026-04-07 19:46:51 [INFO] [Rank 2] Weights loaded.
+2026-04-07 19:46:52 [INFO] [Rank 3] Weights loaded.
+2026-04-07 19:47:00 [INFO] [Rank 1] Weights loaded.
+2026-04-07 19:47:25 [INFO] [Rank 0] Loading weights...
+2026-04-07 19:47:38 [INFO] [Rank 0] Weights loaded.
+2026-04-07 19:52:27 [INFO] [Rank 1] Finished. Latency: 288832 ms
+2026-04-07 19:52:27 [INFO] [Rank 2] Finished. Latency: 288832 ms
+2026-04-07 19:52:27 [INFO] [Rank 0] Finished. Latency: 288832 ms
+2026-04-07 19:52:27 [INFO] [Rank 3] Finished. Latency: 288843 ms
+2026-04-07 19:52:31 [INFO] Total latency:     288832 ms
+2026-04-07 19:52:31 [INFO] Peak 10GB memory:  3946 MB
+2026-04-07 19:52:31 [INFO] Avg  10GB memory:  3206 MB
+2026-04-07 19:52:31 [INFO] [81/110] Split [24, 8, 5, 3] | Batch: 8 | Microbatch: 4 | Microbatches: 2
+2026-04-07 19:52:31 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=8)
+2026-04-07 19:52:49 [INFO] [Rank 3] Loading weights...
+2026-04-07 19:52:53 [INFO] [Rank 2] Loading weights...
+2026-04-07 19:53:00 [INFO] [Rank 1] Loading weights...
+2026-04-07 19:53:01 [INFO] [Rank 3] Weights loaded.
+2026-04-07 19:53:04 [INFO] [Rank 2] Weights loaded.
+2026-04-07 19:53:11 [INFO] [Rank 1] Weights loaded.
+2026-04-07 19:53:36 [INFO] [Rank 0] Loading weights...
+2026-04-07 19:53:50 [INFO] [Rank 0] Weights loaded.
+2026-04-07 19:55:09 [INFO] [Rank 2] Finished. Latency: 79105 ms
+2026-04-07 19:55:09 [INFO] [Rank 1] Finished. Latency: 79105 ms
+2026-04-07 19:55:09 [INFO] [Rank 0] Finished. Latency: 79105 ms
+2026-04-07 19:55:09 [INFO] [Rank 3] Finished. Latency: 79114 ms
+2026-04-07 19:55:13 [INFO] Total latency:     79105 ms
+2026-04-07 19:55:13 [INFO] Peak 10GB memory:  3504 MB
+2026-04-07 19:55:13 [INFO] Avg  10GB memory:  2308 MB
+2026-04-07 19:55:13 [INFO] [82/110] Split [24, 8, 5, 3] | Batch: 8 | Microbatch: 2 | Microbatches: 4
+2026-04-07 19:55:13 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=8)
+2026-04-07 19:55:30 [INFO] [Rank 3] Loading weights...
+2026-04-07 19:55:34 [INFO] [Rank 2] Loading weights...
+2026-04-07 19:55:41 [INFO] [Rank 1] Loading weights...
+2026-04-07 19:55:42 [INFO] [Rank 3] Weights loaded.
+2026-04-07 19:55:45 [INFO] [Rank 2] Weights loaded.
+2026-04-07 19:55:53 [INFO] [Rank 1] Weights loaded.
+2026-04-07 19:56:17 [INFO] [Rank 0] Loading weights...
+2026-04-07 19:56:30 [INFO] [Rank 0] Weights loaded.
+2026-04-07 19:58:57 [INFO] [Rank 2] Finished. Latency: 146205 ms
+2026-04-07 19:58:57 [INFO] [Rank 1] Finished. Latency: 146205 ms
+2026-04-07 19:58:57 [INFO] [Rank 0] Finished. Latency: 146205 ms
+2026-04-07 19:58:57 [INFO] [Rank 3] Finished. Latency: 146213 ms
+2026-04-07 19:59:01 [INFO] Total latency:     146205 ms
+2026-04-07 19:59:01 [INFO] Peak 10GB memory:  2874 MB
+2026-04-07 19:59:01 [INFO] Avg  10GB memory:  2302 MB
+2026-04-07 19:59:01 [INFO] [83/110] Split [24, 8, 5, 3] | Batch: 16 | Microbatch: 8 | Microbatches: 2
+2026-04-07 19:59:01 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 19:59:18 [INFO] [Rank 3] Loading weights...
+2026-04-07 19:59:22 [INFO] [Rank 2] Loading weights...
+2026-04-07 19:59:28 [INFO] [Rank 1] Loading weights...
+2026-04-07 19:59:30 [INFO] [Rank 3] Weights loaded.
+2026-04-07 19:59:33 [INFO] [Rank 2] Weights loaded.
+2026-04-07 19:59:40 [INFO] [Rank 1] Weights loaded.
+2026-04-07 20:00:05 [INFO] [Rank 0] Loading weights...
+2026-04-07 20:00:19 [INFO] [Rank 0] Weights loaded.
+2026-04-07 20:01:51 [INFO] [Rank 2] Finished. Latency: 91750 ms
+2026-04-07 20:01:51 [INFO] [Rank 1] Finished. Latency: 91750 ms
+2026-04-07 20:01:51 [INFO] [Rank 0] Finished. Latency: 91750 ms
+2026-04-07 20:01:51 [INFO] [Rank 3] Finished. Latency: 91762 ms
+2026-04-07 20:01:55 [INFO] Total latency:     91750 ms
+2026-04-07 20:01:55 [INFO] Peak 10GB memory:  8830 MB
+2026-04-07 20:01:55 [INFO] Avg  10GB memory:  3487 MB
+2026-04-07 20:01:55 [INFO] [84/110] Split [24, 8, 5, 3] | Batch: 16 | Microbatch: 4 | Microbatches: 4
+2026-04-07 20:01:55 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 20:02:12 [INFO] [Rank 3] Loading weights...
+2026-04-07 20:02:16 [INFO] [Rank 2] Loading weights...
+2026-04-07 20:02:22 [INFO] [Rank 1] Loading weights...
+2026-04-07 20:02:24 [INFO] [Rank 3] Weights loaded.
+2026-04-07 20:02:27 [INFO] [Rank 2] Weights loaded.
+2026-04-07 20:02:34 [INFO] [Rank 1] Weights loaded.
+2026-04-07 20:02:59 [INFO] [Rank 0] Loading weights...
+2026-04-07 20:03:12 [INFO] [Rank 0] Weights loaded.
+2026-04-07 20:05:49 [INFO] [Rank 2] Finished. Latency: 156174 ms
+2026-04-07 20:05:49 [INFO] [Rank 0] Finished. Latency: 156174 ms
+2026-04-07 20:05:49 [INFO] [Rank 1] Finished. Latency: 156174 ms
+2026-04-07 20:05:49 [INFO] [Rank 3] Finished. Latency: 156183 ms
+2026-04-07 20:05:53 [INFO] Total latency:     156174 ms
+2026-04-07 20:05:53 [INFO] Peak 10GB memory:  4596 MB
+2026-04-07 20:05:53 [INFO] Avg  10GB memory:  2653 MB
+2026-04-07 20:05:53 [INFO] [85/110] Split [24, 8, 5, 3] | Batch: 16 | Microbatch: 2 | Microbatches: 8
+2026-04-07 20:05:53 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 20:06:10 [INFO] [Rank 3] Loading weights...
+2026-04-07 20:06:14 [INFO] [Rank 2] Loading weights...
+2026-04-07 20:06:21 [INFO] [Rank 1] Loading weights...
+2026-04-07 20:06:22 [INFO] [Rank 3] Weights loaded.
+2026-04-07 20:06:25 [INFO] [Rank 2] Weights loaded.
+2026-04-07 20:06:32 [INFO] [Rank 1] Weights loaded.
+2026-04-07 20:06:57 [INFO] [Rank 0] Loading weights...
+2026-04-07 20:07:11 [INFO] [Rank 0] Weights loaded.
+2026-04-07 20:12:01 [INFO] [Rank 2] Finished. Latency: 290067 ms
+2026-04-07 20:12:01 [INFO] [Rank 1] Finished. Latency: 290068 ms
+2026-04-07 20:12:01 [INFO] [Rank 0] Finished. Latency: 290068 ms
+2026-04-07 20:12:01 [INFO] [Rank 3] Finished. Latency: 290075 ms
+2026-04-07 20:12:05 [INFO] Total latency:     290068 ms
+2026-04-07 20:12:05 [INFO] Peak 10GB memory:  3074 MB
+2026-04-07 20:12:05 [INFO] Avg  10GB memory:  2527 MB
+2026-04-07 20:12:05 [INFO] [86/110] Split [24, 9, 4, 3] | Batch: 8 | Microbatch: 4 | Microbatches: 2
+2026-04-07 20:12:05 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=8)
+2026-04-07 20:12:23 [INFO] [Rank 3] Loading weights...
+2026-04-07 20:12:24 [INFO] [Rank 2] Loading weights...
+2026-04-07 20:12:35 [INFO] [Rank 3] Weights loaded.
+2026-04-07 20:12:36 [INFO] [Rank 1] Loading weights...
+2026-04-07 20:12:36 [INFO] [Rank 2] Weights loaded.
+2026-04-07 20:12:48 [INFO] [Rank 1] Weights loaded.
+2026-04-07 20:13:10 [INFO] [Rank 0] Loading weights...
+2026-04-07 20:13:25 [INFO] [Rank 0] Weights loaded.
+2026-04-07 20:14:43 [INFO] [Rank 2] Finished. Latency: 78152 ms
+2026-04-07 20:14:43 [INFO] [Rank 1] Finished. Latency: 78152 ms
+2026-04-07 20:14:43 [INFO] [Rank 0] Finished. Latency: 78152 ms
+2026-04-07 20:14:43 [INFO] [Rank 3] Finished. Latency: 78161 ms
+2026-04-07 20:14:47 [INFO] Total latency:     78152 ms
+2026-04-07 20:14:47 [INFO] Peak 10GB memory:  3504 MB
+2026-04-07 20:14:47 [INFO] Avg  10GB memory:  2304 MB
+2026-04-07 20:14:47 [INFO] [87/110] Split [24, 9, 4, 3] | Batch: 8 | Microbatch: 2 | Microbatches: 4
+2026-04-07 20:14:47 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=8)
+2026-04-07 20:15:04 [INFO] [Rank 3] Loading weights...
+2026-04-07 20:15:05 [INFO] [Rank 2] Loading weights...
+2026-04-07 20:15:16 [INFO] [Rank 3] Weights loaded.
+2026-04-07 20:15:17 [INFO] [Rank 1] Loading weights...
+2026-04-07 20:15:17 [INFO] [Rank 2] Weights loaded.
+2026-04-07 20:15:28 [INFO] [Rank 1] Weights loaded.
+2026-04-07 20:15:51 [INFO] [Rank 0] Loading weights...
+2026-04-07 20:16:05 [INFO] [Rank 0] Weights loaded.
+2026-04-07 20:18:27 [INFO] [Rank 2] Finished. Latency: 142658 ms
+2026-04-07 20:18:27 [INFO] [Rank 1] Finished. Latency: 142658 ms
+2026-04-07 20:18:27 [INFO] [Rank 0] Finished. Latency: 142658 ms
+2026-04-07 20:18:27 [INFO] [Rank 3] Finished. Latency: 142666 ms
+2026-04-07 20:18:31 [INFO] Total latency:     142658 ms
+2026-04-07 20:18:31 [INFO] Peak 10GB memory:  2874 MB
+2026-04-07 20:18:31 [INFO] Avg  10GB memory:  2297 MB
+2026-04-07 20:18:31 [INFO] [88/110] Split [24, 9, 4, 3] | Batch: 16 | Microbatch: 8 | Microbatches: 2
+2026-04-07 20:18:31 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 20:18:49 [INFO] [Rank 3] Loading weights...
+2026-04-07 20:18:50 [INFO] [Rank 2] Loading weights...
+2026-04-07 20:19:01 [INFO] [Rank 3] Weights loaded.
+2026-04-07 20:19:01 [INFO] [Rank 1] Loading weights...
+2026-04-07 20:19:02 [INFO] [Rank 2] Weights loaded.
+2026-04-07 20:19:13 [INFO] [Rank 1] Weights loaded.
+2026-04-07 20:19:35 [INFO] [Rank 0] Loading weights...
+2026-04-07 20:19:49 [INFO] [Rank 0] Weights loaded.
+2026-04-07 20:21:19 [INFO] [Rank 2] Finished. Latency: 89696 ms
+2026-04-07 20:21:19 [INFO] [Rank 1] Finished. Latency: 89696 ms
+2026-04-07 20:21:19 [INFO] [Rank 0] Finished. Latency: 89696 ms
+2026-04-07 20:21:19 [INFO] [Rank 3] Finished. Latency: 89709 ms
+2026-04-07 20:21:23 [INFO] Total latency:     89696 ms
+2026-04-07 20:21:23 [INFO] Peak 10GB memory:  8830 MB
+2026-04-07 20:21:23 [INFO] Avg  10GB memory:  3479 MB
+2026-04-07 20:21:23 [INFO] [89/110] Split [24, 9, 4, 3] | Batch: 16 | Microbatch: 4 | Microbatches: 4
+2026-04-07 20:21:23 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 20:21:41 [INFO] [Rank 3] Loading weights...
+2026-04-07 20:21:42 [INFO] [Rank 2] Loading weights...
+2026-04-07 20:21:52 [INFO] [Rank 3] Weights loaded.
+2026-04-07 20:21:53 [INFO] [Rank 2] Weights loaded.
+2026-04-07 20:21:53 [INFO] [Rank 1] Loading weights...
+2026-04-07 20:22:05 [INFO] [Rank 1] Weights loaded.
+2026-04-07 20:22:27 [INFO] [Rank 0] Loading weights...
+2026-04-07 20:22:41 [INFO] [Rank 0] Weights loaded.
+2026-04-07 20:25:14 [INFO] [Rank 2] Finished. Latency: 152982 ms
+2026-04-07 20:25:14 [INFO] [Rank 1] Finished. Latency: 152982 ms
+2026-04-07 20:25:14 [INFO] [Rank 0] Finished. Latency: 152982 ms
+2026-04-07 20:25:14 [INFO] [Rank 3] Finished. Latency: 152992 ms
+2026-04-07 20:25:18 [INFO] Total latency:     152982 ms
+2026-04-07 20:25:18 [INFO] Peak 10GB memory:  4596 MB
+2026-04-07 20:25:18 [INFO] Avg  10GB memory:  2656 MB
+2026-04-07 20:25:18 [INFO] [90/110] Split [24, 9, 4, 3] | Batch: 16 | Microbatch: 2 | Microbatches: 8
+2026-04-07 20:25:18 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 20:25:36 [INFO] [Rank 3] Loading weights...
+2026-04-07 20:25:37 [INFO] [Rank 2] Loading weights...
+2026-04-07 20:25:48 [INFO] [Rank 3] Weights loaded.
+2026-04-07 20:25:49 [INFO] [Rank 1] Loading weights...
+2026-04-07 20:25:49 [INFO] [Rank 2] Weights loaded.
+2026-04-07 20:26:00 [INFO] [Rank 1] Weights loaded.
+2026-04-07 20:26:23 [INFO] [Rank 0] Loading weights...
+2026-04-07 20:26:36 [INFO] [Rank 0] Weights loaded.
+2026-04-07 20:31:20 [INFO] [Rank 2] Finished. Latency: 283637 ms
+2026-04-07 20:31:20 [INFO] [Rank 0] Finished. Latency: 283637 ms
+2026-04-07 20:31:20 [INFO] [Rank 1] Finished. Latency: 283637 ms
+2026-04-07 20:31:20 [INFO] [Rank 3] Finished. Latency: 283645 ms
+2026-04-07 20:31:24 [INFO] Total latency:     283637 ms
+2026-04-07 20:31:24 [INFO] Peak 10GB memory:  3074 MB
+2026-04-07 20:31:24 [INFO] Avg  10GB memory:  2519 MB
+2026-04-07 20:31:24 [INFO] [91/110] Split [24, 9, 5, 2] | Batch: 8 | Microbatch: 4 | Microbatches: 2
+2026-04-07 20:31:24 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=8)
+2026-04-07 20:31:39 [INFO] [Rank 3] Loading weights...
+2026-04-07 20:31:45 [INFO] [Rank 2] Loading weights...
+2026-04-07 20:31:51 [INFO] [Rank 3] Weights loaded.
+2026-04-07 20:31:54 [INFO] [Rank 1] Loading weights...
+2026-04-07 20:31:57 [INFO] [Rank 2] Weights loaded.
+2026-04-07 20:32:06 [INFO] [Rank 1] Weights loaded.
+2026-04-07 20:32:28 [INFO] [Rank 0] Loading weights...
+2026-04-07 20:32:42 [INFO] [Rank 0] Weights loaded.
+2026-04-07 20:34:00 [INFO] [Rank 2] Finished. Latency: 77382 ms
+2026-04-07 20:34:00 [INFO] [Rank 1] Finished. Latency: 77382 ms
+2026-04-07 20:34:00 [INFO] [Rank 0] Finished. Latency: 77382 ms
+2026-04-07 20:34:00 [INFO] [Rank 3] Finished. Latency: 77389 ms
+2026-04-07 20:34:04 [INFO] Total latency:     77382 ms
+2026-04-07 20:34:04 [INFO] Peak 10GB memory:  2512 MB
+2026-04-07 20:34:04 [INFO] Avg  10GB memory:  1704 MB
+2026-04-07 20:34:04 [INFO] [92/110] Split [24, 9, 5, 2] | Batch: 8 | Microbatch: 2 | Microbatches: 4
+2026-04-07 20:34:04 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=8)
+2026-04-07 20:34:19 [INFO] [Rank 3] Loading weights...
+2026-04-07 20:34:25 [INFO] [Rank 2] Loading weights...
+2026-04-07 20:34:30 [INFO] [Rank 3] Weights loaded.
+2026-04-07 20:34:34 [INFO] [Rank 1] Loading weights...
+2026-04-07 20:34:36 [INFO] [Rank 2] Weights loaded.
+2026-04-07 20:34:46 [INFO] [Rank 1] Weights loaded.
+2026-04-07 20:35:08 [INFO] [Rank 0] Loading weights...
+2026-04-07 20:35:21 [INFO] [Rank 0] Weights loaded.
+2026-04-07 20:37:44 [INFO] [Rank 1] Finished. Latency: 142577 ms
+2026-04-07 20:37:44 [INFO] [Rank 2] Finished. Latency: 142577 ms
+2026-04-07 20:37:44 [INFO] [Rank 0] Finished. Latency: 142577 ms
+2026-04-07 20:37:44 [INFO] [Rank 3] Finished. Latency: 142583 ms
+2026-04-07 20:37:48 [INFO] Total latency:     142577 ms
+2026-04-07 20:37:48 [INFO] Peak 10GB memory:  2266 MB
+2026-04-07 20:37:48 [INFO] Avg  10GB memory:  1689 MB
+2026-04-07 20:37:48 [INFO] [93/110] Split [24, 9, 5, 2] | Batch: 16 | Microbatch: 8 | Microbatches: 2
+2026-04-07 20:37:48 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 20:38:03 [INFO] [Rank 3] Loading weights...
+2026-04-07 20:38:08 [INFO] [Rank 2] Loading weights...
+2026-04-07 20:38:14 [INFO] [Rank 3] Weights loaded.
+2026-04-07 20:38:18 [INFO] [Rank 1] Loading weights...
+2026-04-07 20:38:20 [INFO] [Rank 2] Weights loaded.
+2026-04-07 20:38:29 [INFO] [Rank 1] Weights loaded.
+2026-04-07 20:38:52 [INFO] [Rank 0] Loading weights...
+2026-04-07 20:39:05 [INFO] [Rank 0] Weights loaded.
+2026-04-07 20:40:35 [INFO] [Rank 1] Finished. Latency: 89698 ms
+2026-04-07 20:40:35 [INFO] [Rank 2] Finished. Latency: 89698 ms
+2026-04-07 20:40:35 [INFO] [Rank 0] Finished. Latency: 89698 ms
+2026-04-07 20:40:35 [INFO] [Rank 3] Finished. Latency: 89706 ms
+2026-04-07 20:40:39 [INFO] Total latency:     89698 ms
+2026-04-07 20:40:39 [INFO] Peak 10GB memory:  6218 MB
+2026-04-07 20:40:39 [INFO] Avg  10GB memory:  2535 MB
+2026-04-07 20:40:39 [INFO] [94/110] Split [24, 9, 5, 2] | Batch: 16 | Microbatch: 4 | Microbatches: 4
+2026-04-07 20:40:39 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 20:40:54 [INFO] [Rank 3] Loading weights...
+2026-04-07 20:41:00 [INFO] [Rank 2] Loading weights...
+2026-04-07 20:41:05 [INFO] [Rank 3] Weights loaded.
+2026-04-07 20:41:09 [INFO] [Rank 1] Loading weights...
+2026-04-07 20:41:11 [INFO] [Rank 2] Weights loaded.
+2026-04-07 20:41:20 [INFO] [Rank 1] Weights loaded.
+2026-04-07 20:41:43 [INFO] [Rank 0] Loading weights...
+2026-04-07 20:41:57 [INFO] [Rank 0] Weights loaded.
+2026-04-07 20:44:30 [INFO] [Rank 2] Finished. Latency: 153100 ms
+2026-04-07 20:44:30 [INFO] [Rank 1] Finished. Latency: 153100 ms
+2026-04-07 20:44:30 [INFO] [Rank 0] Finished. Latency: 153101 ms
+2026-04-07 20:44:30 [INFO] [Rank 3] Finished. Latency: 153106 ms
+2026-04-07 20:44:34 [INFO] Total latency:     153101 ms
+2026-04-07 20:44:34 [INFO] Peak 10GB memory:  3220 MB
+2026-04-07 20:44:34 [INFO] Avg  10GB memory:  1932 MB
+2026-04-07 20:44:34 [INFO] [95/110] Split [24, 9, 5, 2] | Batch: 16 | Microbatch: 2 | Microbatches: 8
+2026-04-07 20:44:34 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 20:44:50 [INFO] [Rank 3] Loading weights...
+2026-04-07 20:44:55 [INFO] [Rank 2] Loading weights...
+2026-04-07 20:45:01 [INFO] [Rank 3] Weights loaded.
+2026-04-07 20:45:04 [INFO] [Rank 1] Loading weights...
+2026-04-07 20:45:07 [INFO] [Rank 2] Weights loaded.
+2026-04-07 20:45:16 [INFO] [Rank 1] Weights loaded.
+2026-04-07 20:45:38 [INFO] [Rank 0] Loading weights...
+2026-04-07 20:45:52 [INFO] [Rank 0] Weights loaded.
+2026-04-07 20:50:35 [INFO] [Rank 2] Finished. Latency: 282392 ms
+2026-04-07 20:50:35 [INFO] [Rank 0] Finished. Latency: 282392 ms
+2026-04-07 20:50:35 [INFO] [Rank 1] Finished. Latency: 282392 ms
+2026-04-07 20:50:35 [INFO] [Rank 3] Finished. Latency: 282398 ms
+2026-04-07 20:50:39 [INFO] Total latency:     282392 ms
+2026-04-07 20:50:39 [INFO] Peak 10GB memory:  2266 MB
+2026-04-07 20:50:39 [INFO] Avg  10GB memory:  1849 MB
+2026-04-07 20:50:39 [INFO] [96/110] Split [24, 10, 3, 3] | Batch: 8 | Microbatch: 4 | Microbatches: 2
+2026-04-07 20:50:39 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=8)
+2026-04-07 20:50:55 [INFO] [Rank 2] Loading weights...
+2026-04-07 20:50:56 [INFO] [Rank 3] Loading weights...
+2026-04-07 20:51:06 [INFO] [Rank 2] Weights loaded.
+2026-04-07 20:51:07 [INFO] [Rank 3] Weights loaded.
+2026-04-07 20:51:11 [INFO] [Rank 1] Loading weights...
+2026-04-07 20:51:23 [INFO] [Rank 1] Weights loaded.
+2026-04-07 20:51:43 [INFO] [Rank 0] Loading weights...
+2026-04-07 20:51:56 [INFO] [Rank 0] Weights loaded.
+2026-04-07 20:53:12 [INFO] [Rank 2] Finished. Latency: 75558 ms
+2026-04-07 20:53:12 [INFO] [Rank 1] Finished. Latency: 75558 ms
+2026-04-07 20:53:12 [INFO] [Rank 0] Finished. Latency: 75558 ms
+2026-04-07 20:53:12 [INFO] [Rank 3] Finished. Latency: 75568 ms
+2026-04-07 20:53:16 [INFO] Total latency:     75558 ms
+2026-04-07 20:53:16 [INFO] Peak 10GB memory:  3504 MB
+2026-04-07 20:53:16 [INFO] Avg  10GB memory:  2313 MB
+2026-04-07 20:53:16 [INFO] [97/110] Split [24, 10, 3, 3] | Batch: 8 | Microbatch: 2 | Microbatches: 4
+2026-04-07 20:53:16 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=8)
+2026-04-07 20:53:32 [INFO] [Rank 2] Loading weights...
+2026-04-07 20:53:33 [INFO] [Rank 3] Loading weights...
+2026-04-07 20:53:44 [INFO] [Rank 2] Weights loaded.
+2026-04-07 20:53:45 [INFO] [Rank 3] Weights loaded.
+2026-04-07 20:53:48 [INFO] [Rank 1] Loading weights...
+2026-04-07 20:54:00 [INFO] [Rank 1] Weights loaded.
+2026-04-07 20:54:20 [INFO] [Rank 0] Loading weights...
+2026-04-07 20:54:34 [INFO] [Rank 0] Weights loaded.
+2026-04-07 20:56:53 [INFO] [Rank 2] Finished. Latency: 138891 ms
+2026-04-07 20:56:53 [INFO] [Rank 1] Finished. Latency: 138891 ms
+2026-04-07 20:56:53 [INFO] [Rank 0] Finished. Latency: 138891 ms
+2026-04-07 20:56:53 [INFO] [Rank 3] Finished. Latency: 138899 ms
+2026-04-07 20:56:57 [INFO] Total latency:     138891 ms
+2026-04-07 20:56:57 [INFO] Peak 10GB memory:  2874 MB
+2026-04-07 20:56:57 [INFO] Avg  10GB memory:  2298 MB
+2026-04-07 20:56:57 [INFO] [98/110] Split [24, 10, 3, 3] | Batch: 16 | Microbatch: 8 | Microbatches: 2
+2026-04-07 20:56:57 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 20:57:13 [INFO] [Rank 2] Loading weights...
+2026-04-07 20:57:14 [INFO] [Rank 3] Loading weights...
+2026-04-07 20:57:25 [INFO] [Rank 2] Weights loaded.
+2026-04-07 20:57:26 [INFO] [Rank 3] Weights loaded.
+2026-04-07 20:57:29 [INFO] [Rank 1] Loading weights...
+2026-04-07 20:57:41 [INFO] [Rank 1] Weights loaded.
+2026-04-07 20:58:01 [INFO] [Rank 0] Loading weights...
+2026-04-07 20:58:14 [INFO] [Rank 0] Weights loaded.
+2026-04-07 20:59:42 [INFO] [Rank 2] Finished. Latency: 87359 ms
+2026-04-07 20:59:42 [INFO] [Rank 1] Finished. Latency: 87359 ms
+2026-04-07 20:59:42 [INFO] [Rank 0] Finished. Latency: 87359 ms
+2026-04-07 20:59:42 [INFO] [Rank 3] Finished. Latency: 87372 ms
+2026-04-07 20:59:46 [INFO] Total latency:     87359 ms
+2026-04-07 20:59:46 [INFO] Peak 10GB memory:  8830 MB
+2026-04-07 20:59:46 [INFO] Avg  10GB memory:  3464 MB
+2026-04-07 20:59:46 [INFO] [99/110] Split [24, 10, 3, 3] | Batch: 16 | Microbatch: 4 | Microbatches: 4
+2026-04-07 20:59:46 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 21:00:02 [INFO] [Rank 2] Loading weights...
+2026-04-07 21:00:04 [INFO] [Rank 3] Loading weights...
+2026-04-07 21:00:13 [INFO] [Rank 2] Weights loaded.
+2026-04-07 21:00:15 [INFO] [Rank 3] Weights loaded.
+2026-04-07 21:00:18 [INFO] [Rank 1] Loading weights...
+2026-04-07 21:00:30 [INFO] [Rank 1] Weights loaded.
+2026-04-07 21:00:50 [INFO] [Rank 0] Loading weights...
+2026-04-07 21:01:04 [INFO] [Rank 0] Weights loaded.
+2026-04-07 21:03:33 [INFO] [Rank 1] Finished. Latency: 149425 ms
+2026-04-07 21:03:33 [INFO] [Rank 2] Finished. Latency: 149425 ms
+2026-04-07 21:03:33 [INFO] [Rank 0] Finished. Latency: 149425 ms
+2026-04-07 21:03:33 [INFO] [Rank 3] Finished. Latency: 149435 ms
+2026-04-07 21:03:37 [INFO] Total latency:     149425 ms
+2026-04-07 21:03:37 [INFO] Peak 10GB memory:  4596 MB
+2026-04-07 21:03:37 [INFO] Avg  10GB memory:  2647 MB
+2026-04-07 21:03:37 [INFO] [100/110] Split [24, 10, 3, 3] | Batch: 16 | Microbatch: 2 | Microbatches: 8
+2026-04-07 21:03:37 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 21:03:54 [INFO] [Rank 2] Loading weights...
+2026-04-07 21:03:55 [INFO] [Rank 3] Loading weights...
+2026-04-07 21:04:05 [INFO] [Rank 2] Weights loaded.
+2026-04-07 21:04:07 [INFO] [Rank 3] Weights loaded.
+2026-04-07 21:04:10 [INFO] [Rank 1] Loading weights...
+2026-04-07 21:04:22 [INFO] [Rank 1] Weights loaded.
+2026-04-07 21:04:42 [INFO] [Rank 0] Loading weights...
+2026-04-07 21:04:56 [INFO] [Rank 0] Weights loaded.
+2026-04-07 21:09:33 [INFO] [Rank 1] Finished. Latency: 276590 ms
+2026-04-07 21:09:33 [INFO] [Rank 2] Finished. Latency: 276589 ms
+2026-04-07 21:09:33 [INFO] [Rank 0] Finished. Latency: 276590 ms
+2026-04-07 21:09:33 [INFO] [Rank 3] Finished. Latency: 276598 ms
+2026-04-07 21:09:37 [INFO] Total latency:     276590 ms
+2026-04-07 21:09:37 [INFO] Peak 10GB memory:  3074 MB
+2026-04-07 21:09:37 [INFO] Avg  10GB memory:  2516 MB
+2026-04-07 21:09:37 [INFO] [101/110] Split [24, 10, 4, 2] | Batch: 8 | Microbatch: 4 | Microbatches: 2
+2026-04-07 21:09:37 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=8)
+2026-04-07 21:09:52 [INFO] [Rank 3] Loading weights...
+2026-04-07 21:09:55 [INFO] [Rank 2] Loading weights...
+2026-04-07 21:10:03 [INFO] [Rank 3] Weights loaded.
+2026-04-07 21:10:06 [INFO] [Rank 2] Weights loaded.
+2026-04-07 21:10:09 [INFO] [Rank 1] Loading weights...
+2026-04-07 21:10:21 [INFO] [Rank 1] Weights loaded.
+2026-04-07 21:10:41 [INFO] [Rank 0] Loading weights...
+2026-04-07 21:10:54 [INFO] [Rank 0] Weights loaded.
+2026-04-07 21:12:10 [INFO] [Rank 2] Finished. Latency: 75621 ms
+2026-04-07 21:12:10 [INFO] [Rank 1] Finished. Latency: 75621 ms
+2026-04-07 21:12:10 [INFO] [Rank 0] Finished. Latency: 75621 ms
+2026-04-07 21:12:10 [INFO] [Rank 3] Finished. Latency: 75628 ms
+2026-04-07 21:12:14 [INFO] Total latency:     75621 ms
+2026-04-07 21:12:14 [INFO] Peak 10GB memory:  2512 MB
+2026-04-07 21:12:14 [INFO] Avg  10GB memory:  1695 MB
+2026-04-07 21:12:14 [INFO] [102/110] Split [24, 10, 4, 2] | Batch: 8 | Microbatch: 2 | Microbatches: 4
+2026-04-07 21:12:14 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=8)
+2026-04-07 21:12:29 [INFO] [Rank 3] Loading weights...
+2026-04-07 21:12:32 [INFO] [Rank 2] Loading weights...
+2026-04-07 21:12:40 [INFO] [Rank 3] Weights loaded.
+2026-04-07 21:12:44 [INFO] [Rank 2] Weights loaded.
+2026-04-07 21:12:46 [INFO] [Rank 1] Loading weights...
+2026-04-07 21:12:58 [INFO] [Rank 1] Weights loaded.
+2026-04-07 21:13:18 [INFO] [Rank 0] Loading weights...
+2026-04-07 21:13:31 [INFO] [Rank 0] Weights loaded.
+2026-04-07 21:15:51 [INFO] [Rank 2] Finished. Latency: 139371 ms
+2026-04-07 21:15:51 [INFO] [Rank 1] Finished. Latency: 139371 ms
+2026-04-07 21:15:51 [INFO] [Rank 0] Finished. Latency: 139371 ms
+2026-04-07 21:15:51 [INFO] [Rank 3] Finished. Latency: 139376 ms
+2026-04-07 21:15:55 [INFO] Total latency:     139371 ms
+2026-04-07 21:15:55 [INFO] Peak 10GB memory:  2266 MB
+2026-04-07 21:15:55 [INFO] Avg  10GB memory:  1688 MB
+2026-04-07 21:15:55 [INFO] [103/110] Split [24, 10, 4, 2] | Batch: 16 | Microbatch: 8 | Microbatches: 2
+2026-04-07 21:15:55 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 21:16:10 [INFO] [Rank 3] Loading weights...
+2026-04-07 21:16:13 [INFO] [Rank 2] Loading weights...
+2026-04-07 21:16:21 [INFO] [Rank 3] Weights loaded.
+2026-04-07 21:16:25 [INFO] [Rank 2] Weights loaded.
+2026-04-07 21:16:27 [INFO] [Rank 1] Loading weights...
+2026-04-07 21:16:39 [INFO] [Rank 1] Weights loaded.
+2026-04-07 21:16:59 [INFO] [Rank 0] Loading weights...
+2026-04-07 21:17:13 [INFO] [Rank 0] Weights loaded.
+2026-04-07 21:18:40 [INFO] [Rank 2] Finished. Latency: 87640 ms
+2026-04-07 21:18:40 [INFO] [Rank 1] Finished. Latency: 87640 ms
+2026-04-07 21:18:40 [INFO] [Rank 0] Finished. Latency: 87640 ms
+2026-04-07 21:18:40 [INFO] [Rank 3] Finished. Latency: 87649 ms
+2026-04-07 21:18:44 [INFO] Total latency:     87640 ms
+2026-04-07 21:18:44 [INFO] Peak 10GB memory:  6218 MB
+2026-04-07 21:18:44 [INFO] Avg  10GB memory:  2517 MB
+2026-04-07 21:18:44 [INFO] [104/110] Split [24, 10, 4, 2] | Batch: 16 | Microbatch: 4 | Microbatches: 4
+2026-04-07 21:18:44 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 21:18:59 [INFO] [Rank 3] Loading weights...
+2026-04-07 21:19:03 [INFO] [Rank 2] Loading weights...
+2026-04-07 21:19:11 [INFO] [Rank 3] Weights loaded.
+2026-04-07 21:19:14 [INFO] [Rank 2] Weights loaded.
+2026-04-07 21:19:16 [INFO] [Rank 1] Loading weights...
+2026-04-07 21:19:29 [INFO] [Rank 1] Weights loaded.
+2026-04-07 21:19:48 [INFO] [Rank 0] Loading weights...
+2026-04-07 21:20:02 [INFO] [Rank 0] Weights loaded.
+2026-04-07 21:22:31 [INFO] [Rank 2] Finished. Latency: 149379 ms
+2026-04-07 21:22:31 [INFO] [Rank 1] Finished. Latency: 149379 ms
+2026-04-07 21:22:31 [INFO] [Rank 0] Finished. Latency: 149379 ms
+2026-04-07 21:22:31 [INFO] [Rank 3] Finished. Latency: 149386 ms
+2026-04-07 21:22:35 [INFO] Total latency:     149379 ms
+2026-04-07 21:22:35 [INFO] Peak 10GB memory:  3220 MB
+2026-04-07 21:22:35 [INFO] Avg  10GB memory:  1924 MB
+2026-04-07 21:22:35 [INFO] [105/110] Split [24, 10, 4, 2] | Batch: 16 | Microbatch: 2 | Microbatches: 8
+2026-04-07 21:22:35 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 21:22:51 [INFO] [Rank 3] Loading weights...
+2026-04-07 21:22:54 [INFO] [Rank 2] Loading weights...
+2026-04-07 21:23:02 [INFO] [Rank 3] Weights loaded.
+2026-04-07 21:23:05 [INFO] [Rank 2] Weights loaded.
+2026-04-07 21:23:08 [INFO] [Rank 1] Loading weights...
+2026-04-07 21:23:20 [INFO] [Rank 1] Weights loaded.
+2026-04-07 21:23:39 [INFO] [Rank 0] Loading weights...
+2026-04-07 21:23:53 [INFO] [Rank 0] Weights loaded.
+2026-04-07 21:28:30 [INFO] [Rank 1] Finished. Latency: 277364 ms
+2026-04-07 21:28:30 [INFO] [Rank 2] Finished. Latency: 277364 ms
+2026-04-07 21:28:30 [INFO] [Rank 0] Finished. Latency: 277364 ms
+2026-04-07 21:28:30 [INFO] [Rank 3] Finished. Latency: 277370 ms
+2026-04-07 21:28:34 [INFO] Total latency:     277364 ms
+2026-04-07 21:28:34 [INFO] Peak 10GB memory:  2266 MB
+2026-04-07 21:28:34 [INFO] Avg  10GB memory:  1848 MB
+2026-04-07 21:28:34 [INFO] [106/110] Split [24, 10, 5, 1] | Batch: 8 | Microbatch: 4 | Microbatches: 2
+2026-04-07 21:28:34 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=8)
+2026-04-07 21:28:48 [INFO] [Rank 3] Loading weights...
+2026-04-07 21:28:56 [INFO] [Rank 2] Loading weights...
+2026-04-07 21:28:59 [INFO] [Rank 3] Weights loaded.
+2026-04-07 21:29:07 [INFO] [Rank 1] Loading weights...
+2026-04-07 21:29:07 [INFO] [Rank 2] Weights loaded.
+2026-04-07 21:29:19 [INFO] [Rank 1] Weights loaded.
+2026-04-07 21:29:39 [INFO] [Rank 0] Loading weights...
+2026-04-07 21:29:52 [INFO] [Rank 0] Weights loaded.
+2026-04-07 21:31:08 [INFO] [Rank 2] Finished. Latency: 75784 ms
+2026-04-07 21:31:08 [INFO] [Rank 1] Finished. Latency: 75784 ms
+2026-04-07 21:31:08 [INFO] [Rank 0] Finished. Latency: 75784 ms
+2026-04-07 21:31:08 [INFO] [Rank 3] Finished. Latency: 75788 ms
+2026-04-07 21:31:12 [INFO] Total latency:     75784 ms
+2026-04-07 21:31:12 [INFO] Peak 10GB memory:  1658 MB
+2026-04-07 21:31:12 [INFO] Avg  10GB memory:  1082 MB
+2026-04-07 21:31:12 [INFO] [107/110] Split [24, 10, 5, 1] | Batch: 8 | Microbatch: 2 | Microbatches: 4
+2026-04-07 21:31:12 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=8)
+2026-04-07 21:31:25 [INFO] [Rank 3] Loading weights...
+2026-04-07 21:31:33 [INFO] [Rank 2] Loading weights...
+2026-04-07 21:31:37 [INFO] [Rank 3] Weights loaded.
+2026-04-07 21:31:44 [INFO] [Rank 1] Loading weights...
+2026-04-07 21:31:45 [INFO] [Rank 2] Weights loaded.
+2026-04-07 21:31:56 [INFO] [Rank 1] Weights loaded.
+2026-04-07 21:32:17 [INFO] [Rank 0] Loading weights...
+2026-04-07 21:32:31 [INFO] [Rank 0] Weights loaded.
+2026-04-07 21:34:50 [INFO] [Rank 2] Finished. Latency: 139505 ms
+2026-04-07 21:34:50 [INFO] [Rank 1] Finished. Latency: 139505 ms
+2026-04-07 21:34:50 [INFO] [Rank 0] Finished. Latency: 139505 ms
+2026-04-07 21:34:50 [INFO] [Rank 3] Finished. Latency: 139508 ms
+2026-04-07 21:34:54 [INFO] Total latency:     139505 ms
+2026-04-07 21:34:54 [INFO] Peak 10GB memory:  1658 MB
+2026-04-07 21:34:54 [INFO] Avg  10GB memory:  1079 MB
+2026-04-07 21:34:54 [INFO] [108/110] Split [24, 10, 5, 1] | Batch: 16 | Microbatch: 8 | Microbatches: 2
+2026-04-07 21:34:54 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 21:35:07 [INFO] [Rank 3] Loading weights...
+2026-04-07 21:35:15 [INFO] [Rank 2] Loading weights...
+2026-04-07 21:35:18 [INFO] [Rank 3] Weights loaded.
+2026-04-07 21:35:26 [INFO] [Rank 1] Loading weights...
+2026-04-07 21:35:26 [INFO] [Rank 2] Weights loaded.
+2026-04-07 21:35:38 [INFO] [Rank 1] Weights loaded.
+2026-04-07 21:35:58 [INFO] [Rank 0] Loading weights...
+2026-04-07 21:36:12 [INFO] [Rank 0] Weights loaded.
+2026-04-07 21:37:39 [INFO] [Rank 2] Finished. Latency: 87504 ms
+2026-04-07 21:37:39 [INFO] [Rank 1] Finished. Latency: 87503 ms
+2026-04-07 21:37:39 [INFO] [Rank 0] Finished. Latency: 87504 ms
+2026-04-07 21:37:39 [INFO] [Rank 3] Finished. Latency: 87508 ms
+2026-04-07 21:37:43 [INFO] Total latency:     87504 ms
+2026-04-07 21:37:43 [INFO] Peak 10GB memory:  3544 MB
+2026-04-07 21:37:43 [INFO] Avg  10GB memory:  1515 MB
+2026-04-07 21:37:43 [INFO] [109/110] Split [24, 10, 5, 1] | Batch: 16 | Microbatch: 4 | Microbatches: 4
+2026-04-07 21:37:43 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 21:37:56 [INFO] [Rank 3] Loading weights...
+2026-04-07 21:38:04 [INFO] [Rank 2] Loading weights...
+2026-04-07 21:38:08 [INFO] [Rank 3] Weights loaded.
+2026-04-07 21:38:15 [INFO] [Rank 2] Weights loaded.
+2026-04-07 21:38:16 [INFO] [Rank 1] Loading weights...
+2026-04-07 21:38:28 [INFO] [Rank 1] Weights loaded.
+2026-04-07 21:38:47 [INFO] [Rank 0] Loading weights...
+2026-04-07 21:39:01 [INFO] [Rank 0] Weights loaded.
+2026-04-07 21:41:31 [INFO] [Rank 2] Finished. Latency: 149481 ms
+2026-04-07 21:41:31 [INFO] [Rank 1] Finished. Latency: 149481 ms
+2026-04-07 21:41:31 [INFO] [Rank 0] Finished. Latency: 149481 ms
+2026-04-07 21:41:31 [INFO] [Rank 3] Finished. Latency: 149485 ms
+2026-04-07 21:41:35 [INFO] Total latency:     149481 ms
+2026-04-07 21:41:35 [INFO] Peak 10GB memory:  1904 MB
+2026-04-07 21:41:35 [INFO] Avg  10GB memory:  1203 MB
+2026-04-07 21:41:35 [INFO] [110/110] Split [24, 10, 5, 1] | Batch: 16 | Microbatch: 2 | Microbatches: 8
+2026-04-07 21:41:35 [INFO] Loading WikiText... (SEQ_LEN=64, BATCH=16)
+2026-04-07 21:41:47 [INFO] [Rank 3] Loading weights...
+2026-04-07 21:41:55 [INFO] [Rank 2] Loading weights...
+2026-04-07 21:41:59 [INFO] [Rank 3] Weights loaded.
+2026-04-07 21:42:07 [INFO] [Rank 1] Loading weights...
+2026-04-07 21:42:07 [INFO] [Rank 2] Weights loaded.
+2026-04-07 21:42:19 [INFO] [Rank 1] Weights loaded.
+2026-04-07 21:42:39 [INFO] [Rank 0] Loading weights...
+2026-04-07 21:42:53 [INFO] [Rank 0] Weights loaded.
+2026-04-07 21:47:30 [INFO] [Rank 1] Finished. Latency: 276974 ms
+2026-04-07 21:47:30 [INFO] [Rank 2] Finished. Latency: 276974 ms
+2026-04-07 21:47:30 [INFO] [Rank 0] Finished. Latency: 276975 ms
+2026-04-07 21:47:30 [INFO] [Rank 3] Finished. Latency: 276978 ms
+2026-04-07 21:47:34 [INFO] Total latency:     276975 ms
+2026-04-07 21:47:34 [INFO] Peak 10GB memory:  1658 MB
+2026-04-07 21:47:34 [INFO] Avg  10GB memory:  1157 MB
+2026-04-07 21:47:34 [INFO] --- Best by Latency ---
+2026-04-07 21:47:34 [INFO] Split: [24, 10, 3, 3] | Batch: 8 | MB: 4 | Latency: 75558 ms | Peak R2: 3190 MB | Peak R3: 3504 MB
+2026-04-07 21:47:34 [INFO] --- Most Memory Efficient (lowest peak 5GB at batch=64) ---
+2026-04-07 21:47:34 [INFO] 0 configurations skipped due to OOM
+2026-04-07 21:47:34 [INFO] Done.
+2026-04-07 21:47:34 [INFO] Benchmark results → mig_benchmark_results.csv
+2026-04-07 21:47:34 [INFO] Memory trace      → mig_memory_trace.csv
