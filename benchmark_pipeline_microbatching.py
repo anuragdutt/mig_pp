@@ -46,40 +46,39 @@ def setup_logging(log_file: str = LOG_FILE) -> None:
 log = logging.getLogger(__name__)
 
 # --- CONFIGURATION ---
-MODEL_NAME = "lmsys/vicuna-13b-v1.5"
-TOTAL_LAYERS = 40
-HIDDEN_SIZE = 5120
-HEADS = 40
+MODEL_NAME = "lmsys/vicuna-7b-v1.5"
+TOTAL_LAYERS = 32
+HIDDEN_SIZE = 4096
+HEADS = 32
 
 SEQ_LEN = 64
 MAX_NEW_TOKENS = 512
 
 BATCH_MB_PAIRS = [
-    # (32, 16),
-    # (32, 8),
-    # (32, 4),
-    # (32, 2),
-    # # batch 64
-    # (64, 32),
-    # (64, 16),
-    # (64, 8),
-    # (64, 4),
-    # (64, 2),
     (8, 4),
     (8, 2),
     (16, 8),
     (16, 4),
     (16, 2),
+    (32, 16),
+    (32, 8),
+    (32, 4),
+    (32, 2),
+    (64, 32),
+    (64, 16),
+    (64, 8),
+    (64, 4),
+    (64, 2),
 ]
 
 MIG_UUIDS = [
-    "MIG-98f93df6-d522-5c00-9923-4326839cef2e",  # Rank 0: 20GB (3g.20gb)
-    "MIG-153fcb3c-9412-5240-937b-67bc18179f24",  # Rank 1: 10GB (2g.10gb)
-    "MIG-222909dc-5318-5493-8680-34be7bab2cc6",  # Rank 2:  5GB (1g.5gb)
-    "MIG-1686f8c1-5536-5f2a-a26f-79b69db93f30",  # Rank 3:  5GB (1g.5gb)
+    "MIG-64fcca47-248b-5aa4-855f-84d6df67f3df",  # Rank 0: 20GB (3g.20gb)
+    "MIG-98a0dbc9-fa7e-57e2-9ba4-67ee78303330",  # Rank 1: 10GB (2g.10gb)
+    "MIG-b44f17b0-9750-5a38-b914-9bccf544a33c",  # Rank 2:  5GB (1g.5gb)
+    "MIG-1617776a-1bdc-5f7e-afb0-2da54538dbe6",  # Rank 3:  5GB (1g.5gb)
 ]
 
-LAYER_LIMITS = [22, 10, 5, 5]
+LAYER_LIMITS = [18, 8, 4, 4]
 
 # Dist message tag bases (avoid collisions)
 PREFILL_TAG_BASE = 1000
