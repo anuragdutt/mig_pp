@@ -14,12 +14,13 @@ import torch.nn as nn
 import pandas as pd
 from tqdm import tqdm
 
-from transformers import DynamicCache, LlamaConfig, AutoTokenizer
-from transformers.models.llama.modeling_llama import (
-    LlamaDecoderLayer,
-    LlamaRMSNorm,
-    LlamaRotaryEmbedding,
+from transformers import DynamicCache, AutoConfig, AutoTokenizer
+from transformers.models.mistral.modeling_mistral import (
+    MistralDecoderLayer,
+    MistralRMSNorm,
+    MistralRotaryEmbedding,
 )
+from safetensors.torch import load_file as safetensors_load
 from transformers.utils import hub
 from datasets import load_dataset
 
@@ -46,30 +47,29 @@ def setup_logging(log_file: str = LOG_FILE) -> None:
 log = logging.getLogger(__name__)
 
 # --- CONFIGURATION ---
-MODEL_NAME = "lmsys/vicuna-13b-v1.5"
-TOTAL_LAYERS = 40
-HIDDEN_SIZE = 5120
-HEADS = 40
+MODEL_NAME = "mistralai/Mistral-7B-Instruct-v0.3"
+TOTAL_LAYERS = 32
+HIDDEN_SIZE = 4096
+HEADS = 32
 
 SEQ_LEN = 64
 MAX_NEW_TOKENS = 512
 
 BATCH_MB_PAIRS = [
-    # (32, 16),
-    # (32, 8),
-    # (32, 4),
-    # (32, 2),
-    # # batch 64
-    # (64, 32),
-    # (64, 16),
-    # (64, 8),
-    # (64, 4),
-    # (64, 2),
-    (8, 4),
-    (8, 2),
+    (64, 32),
+    (64, 16),
+    (64, 8),
+    (64, 4),
+    (64, 2),
+    (32, 16),
+    (32, 8),
+    (32, 4),
+    (32, 2),
     (16, 8),
     (16, 4),
     (16, 2),
+    (8, 4),
+    (8, 2),
 ]
 
 MIG_UUIDS = [
@@ -79,7 +79,7 @@ MIG_UUIDS = [
     "MIG-1686f8c1-5536-5f2a-a26f-79b69db93f30",  # Rank 3:  5GB (1g.5gb)
 ]
 
-LAYER_LIMITS = [22, 10, 5, 5]
+LAYER_LIMITS = [18, 9, 5, 4]
 
 # Dist message tag bases (avoid collisions)
 PREFILL_TAG_BASE = 1000
@@ -134,22 +134,36 @@ def load_specific_weights(
 ) -> None:
     log.info(f"[Rank {rank}] Loading weights...")
 
+    use_safetensors = False
     try:
-        cached_index = hub.cached_file(MODEL_NAME, "pytorch_model.bin.index.json")
-        folder_path = os.path.dirname(cached_index)
-        with open(cached_index, "r") as f:
-            index_data = json.load(f)
-        weight_map = index_data["weight_map"]
-        shard_files = sorted(set(weight_map.values()))
+        cached_index = hub.cached_file(MODEL_NAME, "model.safetensors.index.json")
+        use_safetensors = True
     except Exception:
-        log.warning(f"[Rank {rank}] Weight map not found. Skipping.")
-        return
+        try:
+            cached_index = hub.cached_file(MODEL_NAME, "pytorch_model.bin.index.json")
+        except Exception:
+            log.warning(f"[Rank {rank}] Weight map not found. Skipping.")
+            return
+
+    folder_path = os.path.dirname(cached_index)
+    with open(cached_index, "r") as f:
+        index_data = json.load(f)
+    weight_map = index_data["weight_map"]
+    shard_files = sorted(set(weight_map.values()))
 
     layer_to_local: Dict[int, int] = {idx: i for i, idx in enumerate(my_layer_indices)}
 
     for shard_file in tqdm(shard_files, desc=f"Rank {rank} shards", leave=False):
         file_path = os.path.join(folder_path, shard_file)
-        state_dict: Dict[str, torch.Tensor] = torch.load(file_path, map_location="cpu")
+
+        if use_safetensors:
+            state_dict: Dict[str, torch.Tensor] = safetensors_load(
+                file_path, device="cpu"
+            )
+        else:
+            state_dict: Dict[str, torch.Tensor] = torch.load(
+                file_path, map_location="cpu"
+            )
 
         for key, value in state_dict.items():
             if rank == 0 and "embed_tokens" in key and "embed" in model_components:
@@ -313,7 +327,7 @@ def run_pipeline(
         mig_transport.register_hooks()
 
         # Getting model dimensions
-        config = LlamaConfig.from_pretrained(MODEL_NAME)
+        config = AutoConfig.from_pretrained(MODEL_NAME)
         # Using Scaled Dot-Product Attention (Flash attention)
         config._attn_implementation = "sdpa"
 
@@ -336,9 +350,7 @@ def run_pipeline(
         # Registering layers with Torch
         layers = nn.ModuleList()
         for idx in my_layer_indices:
-            layers.append(
-                LlamaDecoderLayer(config, layer_idx=idx).half().to(device)
-            )  # Empty physical layer
+            layers.append(MistralDecoderLayer(config, layer_idx=idx).half().to(device))
 
             # This is critical to do for 5gb instance
             torch.cuda.empty_cache()
@@ -347,10 +359,11 @@ def run_pipeline(
         # Into english sentences
         if rank == world_size - 1:
             model_components["norm"] = (
-                LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+                MistralRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
                 .to(device)
                 .half()
             )
+
             model_components["lm_head"] = (
                 nn.Linear(config.hidden_size, config.vocab_size, bias=False)
                 .to(device)
@@ -365,7 +378,7 @@ def run_pipeline(
         # RoPE (Rotary Position Embeddings)/
         # This single line creates the mathematical compass (the sine and cosine angles)
         # that will be passed into every single layer so the AI understands word order.
-        rotary_emb = LlamaRotaryEmbedding(config=config, device=device)
+        rotary_emb = MistralRotaryEmbedding(config=config, device=device)
         load_specific_weights(rank, layers, my_layer_indices, model_components)
 
         # Deep clean after weight loading
