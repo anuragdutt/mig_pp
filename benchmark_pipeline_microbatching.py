@@ -46,30 +46,29 @@ def setup_logging(log_file: str = LOG_FILE) -> None:
 log = logging.getLogger(__name__)
 
 # --- CONFIGURATION ---
-MODEL_NAME = "lmsys/vicuna-13b-v1.5"
-TOTAL_LAYERS = 40
-HIDDEN_SIZE = 5120
-HEADS = 40
+MODEL_NAME = "lmsys/vicuna-7b-v1.5"
+TOTAL_LAYERS = 32
+HIDDEN_SIZE = 4096
+HEADS = 32
 
 SEQ_LEN = 64
 MAX_NEW_TOKENS = 512
 
 BATCH_MB_PAIRS = [
-    # (32, 16),
-    # (32, 8),
-    # (32, 4),
-    # (32, 2),
-    # # batch 64
-    # (64, 32),
-    # (64, 16),
-    # (64, 8),
-    # (64, 4),
-    # (64, 2),
     (8, 4),
     (8, 2),
     (16, 8),
     (16, 4),
     (16, 2),
+    (32, 16),
+    (32, 8),
+    (32, 4),
+    (32, 2),
+    (64, 32),
+    (64, 16),
+    (64, 8),
+    (64, 4),
+    (64, 2),
 ]
 
 MIG_UUIDS = [
@@ -79,7 +78,8 @@ MIG_UUIDS = [
     "MIG-1686f8c1-5536-5f2a-a26f-79b69db93f30",  # Rank 3:  5GB (1g.5gb)
 ]
 
-LAYER_LIMITS = [22, 10, 5, 5]
+# 7B has 32 layers; limits sized for 20GB > 10GB > 5GB >= 5GB
+LAYER_LIMITS = [18, 9, 4, 4]
 
 # Dist message tag bases (avoid collisions)
 PREFILL_TAG_BASE = 1000

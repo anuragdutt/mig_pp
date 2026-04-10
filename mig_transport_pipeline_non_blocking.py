@@ -42,7 +42,7 @@ _TORCH_TO_NUMPY = {
 }
 
 
-def _compute_slot_size_mb(hidden_size=5120, max_mb_size=32, max_seq_len=64):
+def _compute_slot_size_mb(hidden_size=4096, max_mb_size=32, max_seq_len=64):
     """Largest tensor: prefill activation (mb_size × seq_len × hidden × 2 bytes)"""
     max_bytes = max_mb_size * max_seq_len * hidden_size * 2  # fp16
     mb = (max_bytes // (1024 * 1024)) + 1  # round up
