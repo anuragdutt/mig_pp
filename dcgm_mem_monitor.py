@@ -202,10 +202,10 @@ def save_csv(path="mig_memory.csv"):
                 "timestamp",
                 "label",
                 "gpu_mb",
-                "rank0_20gb_mb",
-                "rank1_10gb_mb",
-                "rank2_5gb_mb",
-                "rank3_5gb_mb",
+                "rank0_40gb_mb",
+                "rank1_20gb_mb",
+                "rank2_10gb_mb",
+                "rank3_10gb_mb",
             ]
         )
         w.writerows(_samples)

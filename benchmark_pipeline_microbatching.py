@@ -14,12 +14,13 @@ import torch.nn as nn
 import pandas as pd
 from tqdm import tqdm
 
-from transformers import DynamicCache, LlamaConfig, AutoTokenizer
-from transformers.models.llama.modeling_llama import (
-    LlamaDecoderLayer,
-    LlamaRMSNorm,
-    LlamaRotaryEmbedding,
+from transformers import DynamicCache, AutoConfig, AutoTokenizer
+from transformers.models.mistral.modeling_mistral import (
+    MistralDecoderLayer,
+    MistralRMSNorm,
+    MistralRotaryEmbedding,
 )
+from safetensors.torch import load_file as safetensors_load
 from transformers.utils import hub
 from datasets import load_dataset
 
@@ -46,40 +47,39 @@ def setup_logging(log_file: str = LOG_FILE) -> None:
 log = logging.getLogger(__name__)
 
 # --- CONFIGURATION ---
-MODEL_NAME = "lmsys/vicuna-13b-v1.5"
+MODEL_NAME = "mistralai/Mistral-Small-24B-Base-2501"
 TOTAL_LAYERS = 40
 HIDDEN_SIZE = 5120
-HEADS = 40
+HEADS = 32
 
 SEQ_LEN = 64
 MAX_NEW_TOKENS = 512
 
 BATCH_MB_PAIRS = [
-    # (32, 16),
-    # (32, 8),
-    # (32, 4),
-    # (32, 2),
-    # # batch 64
-    # (64, 32),
-    # (64, 16),
-    # (64, 8),
-    # (64, 4),
-    # (64, 2),
     (8, 4),
     (8, 2),
     (16, 8),
     (16, 4),
     (16, 2),
+    (32, 16),
+    (32, 8),
+    (32, 4),
+    (32, 2),
+    # (64, 32),
+    # (64, 16),
+    # (64, 8),
+    # (64, 4),
+    # (64, 2),
 ]
 
 MIG_UUIDS = [
-    "MIG-98f93df6-d522-5c00-9923-4326839cef2e",  # Rank 0: 20GB (3g.20gb)
-    "MIG-153fcb3c-9412-5240-937b-67bc18179f24",  # Rank 1: 10GB (2g.10gb)
-    "MIG-222909dc-5318-5493-8680-34be7bab2cc6",  # Rank 2:  5GB (1g.5gb)
-    "MIG-1686f8c1-5536-5f2a-a26f-79b69db93f30",  # Rank 3:  5GB (1g.5gb)
+    "MIG-64fcca47-248b-5aa4-855f-84d6df67f3df",  # Rank 0: 40GB (3g.40gb)
+    "MIG-98a0dbc9-fa7e-57e2-9ba4-67ee78303330",  # Rank 1: 20GB (2g.20gb)
+    "MIG-b44f17b0-9750-5a38-b914-9bccf544a33c",  # Rank 2: 10GB (1g.10gb)
+    "MIG-1617776a-1bdc-5f7e-afb0-2da54538dbe6",  # Rank 3: 10GB (1g.10gb)
 ]
 
-LAYER_LIMITS = [22, 10, 5, 5]
+LAYER_LIMITS = [30, 10, 4, 2]
 
 # Dist message tag bases (avoid collisions)
 PREFILL_TAG_BASE = 1000
@@ -117,7 +117,7 @@ def get_wiki_sample(batch_size: int) -> torch.Tensor:
         return inputs.input_ids.repeat(batch_size, 1)
     except Exception:
         log.warning("WikiText unavailable. Using random token IDs.")
-        return torch.randint(0, 32000, (batch_size, SEQ_LEN))
+        return torch.randint(0, 131072, (batch_size, SEQ_LEN))
 
 
 # ---------------------------------------------------------------------------
@@ -134,22 +134,32 @@ def load_specific_weights(
 ) -> None:
     log.info(f"[Rank {rank}] Loading weights...")
 
+    use_safetensors = False
     try:
-        cached_index = hub.cached_file(MODEL_NAME, "pytorch_model.bin.index.json")
-        folder_path = os.path.dirname(cached_index)
-        with open(cached_index, "r") as f:
-            index_data = json.load(f)
-        weight_map = index_data["weight_map"]
-        shard_files = sorted(set(weight_map.values()))
+        cached_index = hub.cached_file(MODEL_NAME, "model.safetensors.index.json")
+        use_safetensors = True
     except Exception:
-        log.warning(f"[Rank {rank}] Weight map not found. Skipping.")
-        return
+        try:
+            cached_index = hub.cached_file(MODEL_NAME, "pytorch_model.bin.index.json")
+        except Exception:
+            log.warning(f"[Rank {rank}] Weight map not found. Skipping.")
+            return
+
+    folder_path = os.path.dirname(cached_index)
+    with open(cached_index, "r") as f:
+        index_data = json.load(f)
+    weight_map = index_data["weight_map"]
+    shard_files = sorted(set(weight_map.values()))
 
     layer_to_local: Dict[int, int] = {idx: i for i, idx in enumerate(my_layer_indices)}
 
     for shard_file in tqdm(shard_files, desc=f"Rank {rank} shards", leave=False):
         file_path = os.path.join(folder_path, shard_file)
-        state_dict: Dict[str, torch.Tensor] = torch.load(file_path, map_location="cpu")
+        
+        if use_safetensors:
+            state_dict: Dict[str, torch.Tensor] = safetensors_load(file_path, device="cpu")
+        else:
+            state_dict: Dict[str, torch.Tensor] = torch.load(file_path, map_location="cpu")
 
         for key, value in state_dict.items():
             if rank == 0 and "embed_tokens" in key and "embed" in model_components:
@@ -313,7 +323,7 @@ def run_pipeline(
         mig_transport.register_hooks()
 
         # Getting model dimensions
-        config = LlamaConfig.from_pretrained(MODEL_NAME)
+        config = AutoConfig.from_pretrained(MODEL_NAME)
         # Using Scaled Dot-Product Attention (Flash attention)
         config._attn_implementation = "sdpa"
 
@@ -337,7 +347,7 @@ def run_pipeline(
         layers = nn.ModuleList()
         for idx in my_layer_indices:
             layers.append(
-                LlamaDecoderLayer(config, layer_idx=idx).half().to(device)
+                MistralDecoderLayer(config, layer_idx=idx).half().to(device)
             )  # Empty physical layer
 
             # This is critical to do for 5gb instance
@@ -347,7 +357,7 @@ def run_pipeline(
         # Into english sentences
         if rank == world_size - 1:
             model_components["norm"] = (
-                LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+                MistralRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
                 .to(device)
                 .half()
             )
@@ -365,7 +375,7 @@ def run_pipeline(
         # RoPE (Rotary Position Embeddings)/
         # This single line creates the mathematical compass (the sine and cosine angles)
         # that will be passed into every single layer so the AI understands word order.
-        rotary_emb = LlamaRotaryEmbedding(config=config, device=device)
+        rotary_emb = MistralRotaryEmbedding(config=config, device=device)
         load_specific_weights(rank, layers, my_layer_indices, model_components)
 
         # Deep clean after weight loading
@@ -607,7 +617,7 @@ def generate_layer_splits():
                 # Enforce that bigger MIG instances always get more layers than smaller ones.
                 # 20GB (l0) > 10GB (l1) > 5GB (l2) >= 5GB (l3).
                 # The last two are both 5GB so they're allowed to be equal.
-                if 1 <= l3 <= LAYER_LIMITS[3] and l0 > l1 > l2 >= l3:
+                if 0 <= l3 <= LAYER_LIMITS[3] and l0 > l1 > l2 >= l3:
                     valid_splits.append([l0, l1, l2, l3])
     return valid_splits
 
@@ -718,14 +728,14 @@ def main():
                     "microbatch_size": mb_size,
                     "num_microbatches": batch_size // mb_size,
                     "max_new_tokens": MAX_NEW_TOKENS,
-                    "peak_rank0_20gb_mb": peak_per_rank[0],
-                    "peak_rank1_10gb_mb": peak_per_rank[1],
-                    "peak_rank2_5gb_mb": peak_per_rank[2],
-                    "peak_rank3_5gb_mb": peak_per_rank[3],
-                    "avg_rank0_20gb_mb": round(avg_per_rank[0]),
-                    "avg_rank1_10gb_mb": round(avg_per_rank[1]),
-                    "avg_rank2_5gb_mb": round(avg_per_rank[2]),
-                    "avg_rank3_5gb_mb": round(avg_per_rank[3]),
+                    "peak_rank0_40gb_mb": peak_per_rank[0],
+                    "peak_rank1_20gb_mb": peak_per_rank[1],
+                    "peak_rank2_10gb_mb": peak_per_rank[2],
+                    "peak_rank3_10gb_mb": peak_per_rank[3],
+                    "avg_rank0_40gb_mb": round(avg_per_rank[0]),
+                    "avg_rank1_20gb_mb": round(avg_per_rank[1]),
+                    "avg_rank2_10gb_mb": round(avg_per_rank[2]),
+                    "avg_rank3_10gb_mb": round(avg_per_rank[3]),
                     "total_latency_ms": None,
                     "status": None,
                 }
@@ -784,8 +794,8 @@ def main():
             f"Split: {best_lat['split']} | Batch: {best_lat['batch_size']} "
             f"| MB: {best_lat['microbatch_size']} "
             f"| Latency: {best_lat['total_latency_ms']:.0f} ms "
-            f"| Peak R2: {best_lat['peak_rank2_5gb_mb']} MB "
-            f"| Peak R3: {best_lat['peak_rank3_5gb_mb']} MB"
+            f"| Peak R2: {best_lat['peak_rank2_10gb_mb']} MB "
+            f"| Peak R3: {best_lat['peak_rank3_10gb_mb']} MB"
         )
 
         log.info("--- Most Memory Efficient (lowest peak 5GB at batch=64) ---")
@@ -793,13 +803,13 @@ def main():
         b64 = successful[successful["batch_size"] == 64]
 
         if not b64.empty:
-            best_mem = b64.loc[b64["peak_rank2_5gb_mb"].idxmin()]
+            best_mem = b64.loc[b64["peak_rank2_10gb_mb"].idxmin()]
 
             log.info(
                 f"Split: {best_mem['split']} | MB: {best_mem['microbatch_size']} "
                 f"| Latency: {best_mem['total_latency_ms']:.0f} ms "
-                f"| Peak R2: {best_mem['peak_rank2_5gb_mb']} MB "
-                f"| Peak R3: {best_mem['peak_rank3_5gb_mb']} MB"
+                f"| Peak R2: {best_mem['peak_rank2_10gb_mb']} MB "
+                f"| Peak R3: {best_mem['peak_rank3_10gb_mb']} MB"
             )
 
         oom_count = len(df[df["status"].str.startswith("OOM", na=False)])
