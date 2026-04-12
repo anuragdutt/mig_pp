@@ -25,6 +25,7 @@ from datasets import load_dataset
 
 import mig_transport_pipeline_non_blocking as mig_transport
 import dcgm_mem_monitor as monitor
+from safetensors.torch import load_file as safetensors_load_file
 
 # ---------------------------------------------------------------------------
 # LOGGING SETUP
@@ -46,30 +47,29 @@ def setup_logging(log_file: str = LOG_FILE) -> None:
 log = logging.getLogger(__name__)
 
 # --- CONFIGURATION ---
-MODEL_NAME = "lmsys/vicuna-13b-v1.5"
-TOTAL_LAYERS = 40
-HIDDEN_SIZE = 5120
-HEADS = 40
+MODEL_NAME = "/home/anurag_dutt/llama-2-7b-hf"
+TOTAL_LAYERS = 32
+HIDDEN_SIZE = 4096
+HEADS = 32
 
 SEQ_LEN = 64
 MAX_NEW_TOKENS = 512
 
 BATCH_MB_PAIRS = [
-    # (32, 16),
-    # (32, 8),
-    # (32, 4),
-    # (32, 2),
-    # # batch 64
-    # (64, 32),
-    # (64, 16),
-    # (64, 8),
-    # (64, 4),
-    # (64, 2),
     (8, 4),
     (8, 2),
     (16, 8),
     (16, 4),
     (16, 2),
+    (32, 16),
+    (32, 8),
+    (32, 4),
+    (32, 2),
+    (64, 32),
+    (64, 16),
+    (64, 8),
+    (64, 4),
+    (64, 2),
 ]
 
 MIG_UUIDS = [
@@ -79,7 +79,7 @@ MIG_UUIDS = [
     "MIG-1686f8c1-5536-5f2a-a26f-79b69db93f30",  # Rank 3:  5GB (1g.5gb)
 ]
 
-LAYER_LIMITS = [22, 10, 5, 5]
+LAYER_LIMITS = [18, 9, 5, 4]
 
 # Dist message tag bases (avoid collisions)
 PREFILL_TAG_BASE = 1000
@@ -135,12 +135,14 @@ def load_specific_weights(
     log.info(f"[Rank {rank}] Loading weights...")
 
     try:
-        cached_index = hub.cached_file(MODEL_NAME, "pytorch_model.bin.index.json")
-        folder_path = os.path.dirname(cached_index)
-        with open(cached_index, "r") as f:
+        index_path = os.path.join(MODEL_NAME, "model.safetensors.index.json")
+        if not os.path.exists(index_path):
+            index_path = os.path.join(MODEL_NAME, "pytorch_model.bin.index.json")
+        with open(index_path, "r") as f:
             index_data = json.load(f)
         weight_map = index_data["weight_map"]
         shard_files = sorted(set(weight_map.values()))
+        folder_path = MODEL_NAME
     except Exception:
         log.warning(f"[Rank {rank}] Weight map not found. Skipping.")
         return
@@ -149,7 +151,15 @@ def load_specific_weights(
 
     for shard_file in tqdm(shard_files, desc=f"Rank {rank} shards", leave=False):
         file_path = os.path.join(folder_path, shard_file)
-        state_dict: Dict[str, torch.Tensor] = torch.load(file_path, map_location="cpu")
+
+        if file_path.endswith(".safetensors"):
+            state_dict: Dict[str, torch.Tensor] = safetensors_load_file(
+                file_path, device="cpu"
+            )
+        else:
+            state_dict: Dict[str, torch.Tensor] = torch.load(
+                file_path, map_location="cpu"
+            )
 
         for key, value in state_dict.items():
             if rank == 0 and "embed_tokens" in key and "embed" in model_components:
