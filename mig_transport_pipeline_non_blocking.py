@@ -322,27 +322,45 @@ class MIGPipelineTransport:
         GPU → CPU → SHM for float16 (via pinned staging).
         Other dtypes copied safely CPU-contiguous → bytes.
         """
+        # Calculates the exact total memory footprint of the tensor in bytes 
+        # by multiplying the total number of elements (numel()) by the size of a single element 
+        # (element_size(), e.g., 2 bytes for float16, 4 bytes for float32).
         nbytes = tensor.numel() * tensor.element_size()
+
         if nbytes > self.slot_size:
             raise ValueError(
                 f"Tensor {nbytes} bytes exceeds slot size {self.slot_size} bytes. "
                 f"Increase buffer_size_mb."
             )
-
+        
         if tensor.dtype == torch.float16:
-            # For float16 we have pinned_staging (fast cart)
-            # Loading into fast cart
+            # For float16 we have pinned_staging (fast path)
+
+            # Total number of elements
             numel = tensor.numel()
+
+            # Retrieves a pre-allocated, pinned (page-locked) CPU tensor reserved for this specific slot. 
+            # Pinned CPU memory allows the GPU DMA controller to copy data directly over PCIe 
+            # without involving the OS page table.
             staging = self.pinned_staging[slot]
+
+            # PCIE crossing
+            # Flattens the input tensor into 1D (tensor.view(-1)) 
+            # and asynchronously initiates an in-place copy (copy_) into the pinned staging buffer. 
+            # The GPU starts sending data over the PCIe bus in the background without blocking execution yet.
             staging[:numel].copy_(tensor.view(-1), non_blocking=True)
 
-            # Stop right there. Freeze.
-            # Do not execute another line of Python code
-            # until the GPU confirms it has 100% finished all of its pending tasks
+            # Forces the CPU to halt and wait until the GPU finishes the non_blocking=True copy. 
+            # Without this step, Python would attempt to read the host buffer before the PCIe transfer completes, 
+            # causing silent data corruption.
             torch.cuda.synchronize()
 
-            # Writing into memory from the fast cart
+            # Flatten the typed data into a generic, raw byte representation without allocating new memory
             raw = staging[:numel].numpy().view(np.uint8)
+
+            # Copies the raw byte array directly into the pre-mapped Shared Memory (my_np_slots),
+            # making the tensor data accessible to other processes.
+            # MEMCPY_BW path
             self.my_np_slots[slot][:nbytes] = raw[:nbytes]
         else:
             # Slow path move from GPU to CPU
@@ -365,6 +383,7 @@ class MIGPipelineTransport:
 
         # copy() so numpy buffer doesn’t alias SHM as tensor lives beyond scope
         src_tensor = torch.from_numpy(peer_data.copy()).reshape(tensor.shape)
+        # PCIE crossing
         tensor.copy_(src_tensor.to(tensor.device))
 
 
