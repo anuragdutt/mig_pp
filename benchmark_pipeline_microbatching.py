@@ -1,6 +1,7 @@
 import os
 import gc
 import json
+import time
 import queue
 import logging
 import traceback
@@ -46,10 +47,13 @@ def setup_logging(log_file: str = LOG_FILE) -> None:
 log = logging.getLogger(__name__)
 
 # --- CONFIGURATION ---
-MODEL_NAME = "lmsys/vicuna-13b-v1.5"
-TOTAL_LAYERS = 40
-HIDDEN_SIZE = 5120
-HEADS = 40
+# Vicuna-7B on a single 40GB A100 split into 3 MIG slices (20/10/10).
+# fp16 weights ~13.5GB total, so even the 10GB slices have headroom for
+# KV cache + activations at these sequence lengths.
+MODEL_NAME = "lmsys/vicuna-7b-v1.5"
+TOTAL_LAYERS = 32
+HIDDEN_SIZE = 4096
+HEADS = 32
 
 SEQ_LEN = 64
 MAX_NEW_TOKENS = 512
@@ -72,14 +76,44 @@ BATCH_MB_PAIRS = [
     (16, 2),
 ]
 
+# --- MIG TOPOLOGY ---
+# Single source of truth for the slice layout. Everything downstream
+# (world_size, CSV column names, per-rank memory reporting) is derived from
+# this list, so switching topologies means editing only this block.
+#
+# !!! REPLACE THESE UUIDs !!! They are per-card. After creating the MIG
+# instances on a new box, run `nvidia-smi -L` and paste the new ones here,
+# in the same order as SLICE_GB.
 MIG_UUIDS = [
-    "MIG-98f93df6-d522-5c00-9923-4326839cef2e",  # Rank 0: 20GB (3g.20gb)
-    "MIG-153fcb3c-9412-5240-937b-67bc18179f24",  # Rank 1: 10GB (2g.10gb)
-    "MIG-222909dc-5318-5493-8680-34be7bab2cc6",  # Rank 2:  5GB (1g.5gb)
-    "MIG-1686f8c1-5536-5f2a-a26f-79b69db93f30",  # Rank 3:  5GB (1g.5gb)
+    "MIG-REPLACE-ME-SLICE0-20GB",  # Rank 0: 20GB (3g.20gb)
+    "MIG-REPLACE-ME-SLICE1-10GB",  # Rank 1: 10GB (2g.10gb)
+    "MIG-REPLACE-ME-SLICE2-10GB",  # Rank 2: 10GB (2g.10gb)
 ]
 
-LAYER_LIMITS = [22, 10, 5, 5]
+# Slice capacity in GB, parallel to MIG_UUIDS. Drives CSV column naming.
+SLICE_GB = [20, 10, 10]
+
+WORLD_SIZE = len(MIG_UUIDS)
+
+# Max layers each slice can hold. Roughly proportional to slice VRAM after
+# subtracting KV cache + activation headroom.
+#
+# Vicuna-7B: 32 layers, ~0.42GB/layer fp16 (4096 hidden).
+#   20GB slice: also holds the embedding table (~0.26GB) -> generous cap
+#   10GB slice: ~0.42GB/layer, leave ~4GB for KV cache + activations
+# Caps are upper bounds for the search, not targets — the enumerator still
+# has to make them sum to TOTAL_LAYERS.
+LAYER_LIMITS = [22, 14, 14]
+
+# Ordering constraint on splits. The two 10GB slices are identical, so
+# permuting layers between them produces duplicate configurations with
+# identical performance. Requiring l1 >= l2 breaks that symmetry and halves
+# the search space. l0 > l1 keeps the biggest slice doing the most work,
+# which is where the useful configurations live.
+#
+# Set to False to search the full space including "inverted" splits (small
+# slice doing more work than a big one) — slower, and mostly OOMs.
+ENFORCE_SLICE_ORDERING = True
 
 # Dist message tag bases (avoid collisions)
 PREFILL_TAG_BASE = 1000
@@ -128,6 +162,7 @@ def get_wiki_sample(batch_size: int) -> torch.Tensor:
 # COMPLETE
 def load_specific_weights(
     rank: int,
+    world_size: int,
     my_layers: nn.ModuleList,
     my_layer_indices: List[int],
     model_components: Dict[str, nn.Module],
@@ -156,7 +191,11 @@ def load_specific_weights(
                 model_components["embed"].weight.data.copy_(value)
                 continue
 
-            if rank == 3:
+            # Final norm + lm_head live on the LAST rank, whatever that is.
+            # (This was hardcoded to `rank == 3`, which silently loaded
+            # nothing once world_size changed — no error, just garbage
+            # output from an untrained lm_head.)
+            if rank == world_size - 1:
                 if "norm.weight" in key and "norm" in model_components:
                     model_components["norm"].weight.data.copy_(value)
                     continue
@@ -309,8 +348,24 @@ def run_pipeline(
         device = torch.device("cuda:0")
         torch.cuda.set_device(device)
 
-        # Patch dist send/recv to go through SHM+ACK transport
-        mig_transport.register_hooks()
+        # Transport logging -> logs/transport_<stamp>.log (shared by all ranks;
+        # every line carries its rank, so grep 'rank2' to separate them).
+        _tlog_path = mig_transport.setup_transport_logging()
+        log.info(f"[Rank {rank}] transport log -> {_tlog_path}")
+
+        # Patch dist send/recv to go through SHM+ACK transport.
+        # Size the SHM/pinned slots to THIS run's mb_size rather than the
+        # global worst case — every slot costs mb_size*SEQ_LEN*hidden*2 bytes
+        # in both SHM and pinned RAM, on every rank. Slot count only needs to
+        # cover the microbatches in flight, plus headroom for the batched
+        # ACK drain.
+        _num_mb = input_ids_seed.shape[0] // mb_size
+        mig_transport.register_hooks(
+            mb_size=mb_size,
+            seq_len=SEQ_LEN,
+            hidden_size=HIDDEN_SIZE,
+            num_slots=_num_mb + 8,
+        )
 
         # Getting model dimensions
         config = LlamaConfig.from_pretrained(MODEL_NAME)
@@ -366,7 +421,9 @@ def run_pipeline(
         # This single line creates the mathematical compass (the sine and cosine angles)
         # that will be passed into every single layer so the AI understands word order.
         rotary_emb = LlamaRotaryEmbedding(config=config, device=device)
-        load_specific_weights(rank, layers, my_layer_indices, model_components)
+        load_specific_weights(
+            rank, world_size, layers, my_layer_indices, model_components
+        )
 
         # Deep clean after weight loading
         gc.collect()
@@ -481,7 +538,19 @@ def run_pipeline(
                     h = dist.isend(current_hidden.clone(), dst=rank + 1, tag=tag)
                     send_handles.append(h)
 
-            # Drain sends (and ACKs if your transport uses ACK on wait())
+                    # Publish the PREVIOUS microbatch now: its D2H copy has
+                    # had this microbatch's compute to run underneath, so
+                    # flush() should find the event already complete and not
+                    # block. Keeps the downstream rank fed one microbatch
+                    # behind us instead of idling until our loop ends.
+                    if len(send_handles) > 1:
+                        send_handles[-2].flush()
+
+            # Publish the last microbatch (nothing after it to hide behind).
+            if send_handles:
+                send_handles[-1].flush()
+
+            # Drain ACKs and reclaim slots.
             for h in send_handles:
                 h.wait()
 
@@ -554,6 +623,13 @@ def run_pipeline(
                         h = dist.isend(current_hidden.clone(), dst=rank + 1, tag=tag)
                         send_handles.append(h)
 
+                        # Publish previous microbatch (see prefill loop).
+                        if len(send_handles) > 1:
+                            send_handles[-2].flush()
+
+                if send_handles:
+                    send_handles[-1].flush()
+
                 for h in send_handles:
                     h.wait()
 
@@ -571,6 +647,12 @@ def run_pipeline(
 
         total_latency_ms = start_event.elapsed_time(end_event)
         log.info(f"[Rank {rank}] Finished. Latency: {total_latency_ms:.0f} ms")
+
+        # Per-rank transport verdict: did the async copies actually overlap?
+        # Grep the log for T28 to get one VERDICT line per rank.
+        mig_transport.log_summary(
+            label=f"split={split_config} mb={mb_size} latency={total_latency_ms:.0f}ms"
+        )
 
         if rank == 0:
             result_queue.put(("latency", total_latency_ms))
@@ -599,16 +681,33 @@ def run_pipeline(
 
 
 def generate_layer_splits():
+    """
+    Enumerate every way to distribute TOTAL_LAYERS across the MIG slices,
+    subject to per-slice capacity (LAYER_LIMITS) and the symmetry-breaking
+    ordering constraint.
+
+    Topology: 20GB / 10GB / 10GB. The two 10GB slices are interchangeable,
+    so [16, 9, 7] and [16, 7, 9] would benchmark identically — requiring
+    l1 >= l2 keeps only one of each such pair.
+    """
     valid_splits = []
+
     for l0 in range(1, LAYER_LIMITS[0] + 1):
         for l1 in range(1, LAYER_LIMITS[1] + 1):
-            for l2 in range(1, LAYER_LIMITS[2] + 1):
-                l3 = TOTAL_LAYERS - (l0 + l1 + l2)
-                # Enforce that bigger MIG instances always get more layers than smaller ones.
-                # 20GB (l0) > 10GB (l1) > 5GB (l2) >= 5GB (l3).
-                # The last two are both 5GB so they're allowed to be equal.
-                if 1 <= l3 <= LAYER_LIMITS[3] and l0 > l1 > l2 >= l3:
-                    valid_splits.append([l0, l1, l2, l3])
+            # Last slice takes whatever remains — no need to enumerate it.
+            l2 = TOTAL_LAYERS - (l0 + l1)
+
+            if not (1 <= l2 <= LAYER_LIMITS[2]):
+                continue
+
+            if ENFORCE_SLICE_ORDERING:
+                # 20GB gets the most; the two identical 10GB slices are
+                # ordered only to break the duplicate-permutation symmetry.
+                if not (l0 > l1 >= l2):
+                    continue
+
+            valid_splits.append([l0, l1, l2])
+
     return valid_splits
 
 
@@ -619,6 +718,12 @@ def generate_layer_splits():
 
 def main():
     setup_logging()
+
+    # One shared timestamp for this whole sweep, inherited by every spawned
+    # rank via the environment, so all ranks write into the same
+    # logs/transport_<stamp>.log instead of four separate files.
+    os.environ.setdefault("MIG_LOG_STAMP", time.strftime("%Y%m%d_%H%M%S"))
+    log.info(f"Transport log stamp: {os.environ['MIG_LOG_STAMP']}")
 
     log.info("Setting up DCGM monitor group...")
     monitor.setup_dcgm_group()
@@ -653,12 +758,12 @@ def main():
             procs: list[mp.Process] = []
 
             try:
-                for rank in range(4):
+                for rank in range(WORLD_SIZE):
                     p = mp.Process(
                         target=run_pipeline,
                         args=(
                             rank,
-                            4,
+                            WORLD_SIZE,
                             split,
                             q,
                             MIG_UUIDS[rank],
@@ -686,13 +791,13 @@ def main():
 
                 monitor.stop()
 
-                # Sample row: (timestamp, label, gpu_mb, gi0_mb, gi1_mb, gi2_mb, gi3_mb)
-                # gi2_mb / gi3_mb are the two 5GB slices (Ranks 2 and 3).
+                # Sample row: (timestamp, label, gpu_mb, gi0_mb, gi1_mb, ...)
+                # One gi<N>_mb column per MIG slice, in MIG_UUIDS order.
                 run_samples = list(monitor._samples)
                 # print("rum samples", run_samples)
                 peak_per_rank = [
                     max((row[3 + r] for row in run_samples), default=0)
-                    for r in range(4)
+                    for r in range(WORLD_SIZE)
                 ]
                 avg_per_rank = [
                     (
@@ -700,7 +805,7 @@ def main():
                         if run_samples
                         else 0
                     )
-                    for r in range(4)
+                    for r in range(WORLD_SIZE)
                 ]
 
                 exit_codes = [p.exitcode for p in procs]
@@ -718,14 +823,16 @@ def main():
                     "microbatch_size": mb_size,
                     "num_microbatches": batch_size // mb_size,
                     "max_new_tokens": MAX_NEW_TOKENS,
-                    "peak_rank0_20gb_mb": peak_per_rank[0],
-                    "peak_rank1_10gb_mb": peak_per_rank[1],
-                    "peak_rank2_5gb_mb": peak_per_rank[2],
-                    "peak_rank3_5gb_mb": peak_per_rank[3],
-                    "avg_rank0_20gb_mb": round(avg_per_rank[0]),
-                    "avg_rank1_10gb_mb": round(avg_per_rank[1]),
-                    "avg_rank2_5gb_mb": round(avg_per_rank[2]),
-                    "avg_rank3_5gb_mb": round(avg_per_rank[3]),
+                    # Per-slice memory columns, generated from SLICE_GB so
+                    # they stay correct when the topology changes.
+                    **{
+                        f"peak_rank{r}_{SLICE_GB[r]}gb_mb": peak_per_rank[r]
+                        for r in range(WORLD_SIZE)
+                    },
+                    **{
+                        f"avg_rank{r}_{SLICE_GB[r]}gb_mb": round(avg_per_rank[r])
+                        for r in range(WORLD_SIZE)
+                    },
                     "total_latency_ms": None,
                     "status": None,
                 }
@@ -777,29 +884,45 @@ def main():
 
     successful = df[df["status"] == "ok"]
     if not successful.empty:
+        # Column names follow the SLICE_GB topology, so build them here
+        # rather than hardcoding rank2/rank3.
+        peak_cols = [
+            f"peak_rank{r}_{SLICE_GB[r]}gb_mb" for r in range(WORLD_SIZE)
+        ]
+
+        def _peaks(row):
+            return " | ".join(
+                f"R{r}({SLICE_GB[r]}GB): {row[peak_cols[r]]} MB"
+                for r in range(WORLD_SIZE)
+            )
+
         log.info("--- Best by Latency ---")
         best_lat = successful.loc[successful["total_latency_ms"].idxmin()]
-
         log.info(
             f"Split: {best_lat['split']} | Batch: {best_lat['batch_size']} "
             f"| MB: {best_lat['microbatch_size']} "
             f"| Latency: {best_lat['total_latency_ms']:.0f} ms "
-            f"| Peak R2: {best_lat['peak_rank2_5gb_mb']} MB "
-            f"| Peak R3: {best_lat['peak_rank3_5gb_mb']} MB"
+            f"| {_peaks(best_lat)}"
         )
 
-        log.info("--- Most Memory Efficient (lowest peak 5GB at batch=64) ---")
+        # Most memory efficient on the tightest slice, at the largest batch
+        # that actually produced results.
+        tightest = min(range(WORLD_SIZE), key=lambda r: SLICE_GB[r])
+        tightest_col = peak_cols[tightest]
 
-        b64 = successful[successful["batch_size"] == 64]
+        largest_batch = successful["batch_size"].max()
+        biggest = successful[successful["batch_size"] == largest_batch]
 
-        if not b64.empty:
-            best_mem = b64.loc[b64["peak_rank2_5gb_mb"].idxmin()]
-
+        if not biggest.empty:
+            log.info(
+                f"--- Most Memory Efficient (lowest peak on the "
+                f"{SLICE_GB[tightest]}GB slice at batch={largest_batch}) ---"
+            )
+            best_mem = biggest.loc[biggest[tightest_col].idxmin()]
             log.info(
                 f"Split: {best_mem['split']} | MB: {best_mem['microbatch_size']} "
                 f"| Latency: {best_mem['total_latency_ms']:.0f} ms "
-                f"| Peak R2: {best_mem['peak_rank2_5gb_mb']} MB "
-                f"| Peak R3: {best_mem['peak_rank3_5gb_mb']} MB"
+                f"| {_peaks(best_mem)}"
             )
 
         oom_count = len(df[df["status"].str.startswith("OOM", na=False)])
