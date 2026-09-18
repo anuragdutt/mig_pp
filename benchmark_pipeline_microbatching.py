@@ -58,6 +58,11 @@ HEADS = 32
 SEQ_LEN = 64
 MAX_NEW_TOKENS = 512
 
+# Hard cap on how many (split, batch, microbatch) configurations to run.
+# Set to None for the full sweep. Kept low while validating on a fresh box
+# so a broken setup costs minutes instead of hours of GPU time.
+MAX_RUNS = 10
+
 BATCH_MB_PAIRS = [
     # (32, 16),
     # (32, 8),
@@ -735,147 +740,162 @@ def main():
     except RuntimeError:
         pass
 
-    total_runs = len(selected_splits) * len(BATCH_MB_PAIRS)
+    # Flatten the sweep into an explicit list so MAX_RUNS can cap it cleanly.
+    run_plan = [
+        (split, batch_size, mb_size)
+        for split in selected_splits
+        for batch_size, mb_size in BATCH_MB_PAIRS
+    ]
+    full_sweep_size = len(run_plan)
+
+    if MAX_RUNS is not None and full_sweep_size > MAX_RUNS:
+        run_plan = run_plan[:MAX_RUNS]
+        log.warning(
+            f"MAX_RUNS={MAX_RUNS} is capping this sweep: running {len(run_plan)} "
+            f"of {full_sweep_size} configurations. Set MAX_RUNS=None for the "
+            f"full sweep."
+        )
+
+    total_runs = len(run_plan)
     results = []
     current_run = 1
 
-    for split in selected_splits:
-        for batch_size, mb_size in BATCH_MB_PAIRS:
-            log.info(
-                f"[{current_run}/{total_runs}] Split {split} | "
-                f"Batch: {batch_size} | Microbatch: {mb_size} | "
-                f"Microbatches: {batch_size // mb_size}"
-            )
+    for split, batch_size, mb_size in run_plan:
+        log.info(
+            f"[{current_run}/{total_runs}] Split {split} | "
+            f"Batch: {batch_size} | Microbatch: {mb_size} | "
+            f"Microbatches: {batch_size // mb_size}"
+        )
 
-            input_ids_seed = get_wiki_sample(batch_size)
+        input_ids_seed = get_wiki_sample(batch_size)
 
-            label = f"s{'_'.join(map(str, split))}_b{batch_size}_mb{mb_size}"
-            monitor.set_label(label)
-            monitor._samples.clear()
-            monitor.start()
+        label = f"s{'_'.join(map(str, split))}_b{batch_size}_mb{mb_size}"
+        monitor.set_label(label)
+        monitor._samples.clear()
+        monitor.start()
 
-            q = mp.Queue()
-            procs: list[mp.Process] = []
+        q = mp.Queue()
+        procs: list[mp.Process] = []
 
-            try:
-                for rank in range(WORLD_SIZE):
-                    p = mp.Process(
-                        target=run_pipeline,
-                        args=(
-                            rank,
-                            WORLD_SIZE,
-                            split,
-                            q,
-                            MIG_UUIDS[rank],
-                            input_ids_seed,
-                            mb_size,
-                        ),
-                    )
-                    p.start()
-                    procs.append(p)
+        try:
+            for rank in range(WORLD_SIZE):
+                p = mp.Process(
+                    target=run_pipeline,
+                    args=(
+                        rank,
+                        WORLD_SIZE,
+                        split,
+                        q,
+                        MIG_UUIDS[rank],
+                        input_ids_seed,
+                        mb_size,
+                    ),
+                )
+                p.start()
+                procs.append(p)
 
-                JOIN_TIMEOUT_S = 1200
-                for p in procs:
-                    p.join(timeout=JOIN_TIMEOUT_S)
-
-                hung = [p for p in procs if p.is_alive()]
-                if hung:
-                    log.error(
-                        "Hang detected: ranks still alive after timeout: "
-                        + ", ".join(str(procs.index(p)) for p in hung)
-                    )
-                    for p in hung:
-                        p.terminate()
-                    for p in hung:
-                        p.join(timeout=10)
-
-                monitor.stop()
-
-                # Sample row: (timestamp, label, gpu_mb, gi0_mb, gi1_mb, ...)
-                # One gi<N>_mb column per MIG slice, in MIG_UUIDS order.
-                run_samples = list(monitor._samples)
-                # print("rum samples", run_samples)
-                peak_per_rank = [
-                    max((row[3 + r] for row in run_samples), default=0)
-                    for r in range(WORLD_SIZE)
-                ]
-                avg_per_rank = [
-                    (
-                        (sum(row[3 + r] for row in run_samples) / len(run_samples))
-                        if run_samples
-                        else 0
-                    )
-                    for r in range(WORLD_SIZE)
-                ]
-
-                exit_codes = [p.exitcode for p in procs]
-                queue_items = {}
-                try:
-                    while True:
-                        key, val = q.get(timeout=2.0)
-                        queue_items[key] = val
-                except queue.Empty:
-                    pass
-
-                base_row = {
-                    "split": str(split),
-                    "batch_size": batch_size,
-                    "microbatch_size": mb_size,
-                    "num_microbatches": batch_size // mb_size,
-                    "max_new_tokens": MAX_NEW_TOKENS,
-                    # Per-slice memory columns, generated from SLICE_GB so
-                    # they stay correct when the topology changes.
-                    **{
-                        f"peak_rank{r}_{SLICE_GB[r]}gb_mb": peak_per_rank[r]
-                        for r in range(WORLD_SIZE)
-                    },
-                    **{
-                        f"avg_rank{r}_{SLICE_GB[r]}gb_mb": round(avg_per_rank[r])
-                        for r in range(WORLD_SIZE)
-                    },
-                    "total_latency_ms": None,
-                    "status": None,
-                }
-
-                if hung:
-                    base_row["status"] = "hang"
-
-                elif "oom" in queue_items:
-                    oom_rank = queue_items["oom"]
-                    log.warning(f"OOM on Rank {oom_rank} — skipping.")
-                    base_row["status"] = f"OOM_rank{oom_rank}"
-
-                elif any((code is not None) and (code != 0) for code in exit_codes):
-                    log.error(f"Crashed. Exit codes: {exit_codes}")
-                    base_row["status"] = "crash"
-
-                elif "latency" in queue_items:
-                    latency = queue_items["latency"]
-                    log.info(f"Total latency:     {latency:.0f} ms")
-                    log.info(f"Peak 5GB memory:   {peak_per_rank[3]} MB")
-                    log.info(f"Avg  5GB memory:   {avg_per_rank[3]:.0f} MB")
-                    base_row["total_latency_ms"] = latency
-                    base_row["status"] = "ok"
-
-                else:
-                    log.warning("Timeout — no results received.")
-                    base_row["status"] = "timeout"
-
-                results.append(base_row)
-
-            finally:
-                try:
-                    monitor.stop()
-                except Exception:
-                    pass
-                q.close()
-                q.join_thread()
-
+            JOIN_TIMEOUT_S = 1200
             for p in procs:
-                if p.is_alive():
-                    p.terminate()
+                p.join(timeout=JOIN_TIMEOUT_S)
 
-            current_run += 1
+            hung = [p for p in procs if p.is_alive()]
+            if hung:
+                log.error(
+                    "Hang detected: ranks still alive after timeout: "
+                    + ", ".join(str(procs.index(p)) for p in hung)
+                )
+                for p in hung:
+                    p.terminate()
+                for p in hung:
+                    p.join(timeout=10)
+
+            monitor.stop()
+
+            # Sample row: (timestamp, label, gpu_mb, gi0_mb, gi1_mb, ...)
+            # One gi<N>_mb column per MIG slice, in MIG_UUIDS order.
+            run_samples = list(monitor._samples)
+            # print("rum samples", run_samples)
+            peak_per_rank = [
+                max((row[3 + r] for row in run_samples), default=0)
+                for r in range(WORLD_SIZE)
+            ]
+            avg_per_rank = [
+                (
+                    (sum(row[3 + r] for row in run_samples) / len(run_samples))
+                    if run_samples
+                    else 0
+                )
+                for r in range(WORLD_SIZE)
+            ]
+
+            exit_codes = [p.exitcode for p in procs]
+            queue_items = {}
+            try:
+                while True:
+                    key, val = q.get(timeout=2.0)
+                    queue_items[key] = val
+            except queue.Empty:
+                pass
+
+            base_row = {
+                "split": str(split),
+                "batch_size": batch_size,
+                "microbatch_size": mb_size,
+                "num_microbatches": batch_size // mb_size,
+                "max_new_tokens": MAX_NEW_TOKENS,
+                # Per-slice memory columns, generated from SLICE_GB so
+                # they stay correct when the topology changes.
+                **{
+                    f"peak_rank{r}_{SLICE_GB[r]}gb_mb": peak_per_rank[r]
+                    for r in range(WORLD_SIZE)
+                },
+                **{
+                    f"avg_rank{r}_{SLICE_GB[r]}gb_mb": round(avg_per_rank[r])
+                    for r in range(WORLD_SIZE)
+                },
+                "total_latency_ms": None,
+                "status": None,
+            }
+
+            if hung:
+                base_row["status"] = "hang"
+
+            elif "oom" in queue_items:
+                oom_rank = queue_items["oom"]
+                log.warning(f"OOM on Rank {oom_rank} — skipping.")
+                base_row["status"] = f"OOM_rank{oom_rank}"
+
+            elif any((code is not None) and (code != 0) for code in exit_codes):
+                log.error(f"Crashed. Exit codes: {exit_codes}")
+                base_row["status"] = "crash"
+
+            elif "latency" in queue_items:
+                latency = queue_items["latency"]
+                log.info(f"Total latency:     {latency:.0f} ms")
+                log.info(f"Peak 5GB memory:   {peak_per_rank[3]} MB")
+                log.info(f"Avg  5GB memory:   {avg_per_rank[3]:.0f} MB")
+                base_row["total_latency_ms"] = latency
+                base_row["status"] = "ok"
+
+            else:
+                log.warning("Timeout — no results received.")
+                base_row["status"] = "timeout"
+
+            results.append(base_row)
+
+        finally:
+            try:
+                monitor.stop()
+            except Exception:
+                pass
+            q.close()
+            q.join_thread()
+
+        for p in procs:
+            if p.is_alive():
+                p.terminate()
+
+        current_run += 1
 
     df = pd.DataFrame(results)
     df.to_csv("mig_benchmark_results.csv", index=False)
