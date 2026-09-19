@@ -57,21 +57,25 @@ HIDDEN_SIZE = 4096
 HEADS = 32
 
 SEQ_LEN = 64
-MAX_NEW_TOKENS = 4
+MAX_NEW_TOKENS = 1
 
 # Hard cap on how many (split, batch, microbatch) configurations to run.
 # Set to None for the full sweep. Kept low while validating on a fresh box
 # so a broken setup costs minutes instead of hours of GPU time.
 MAX_RUNS = 1
 
+# --- nsys single-pass trace config ---
+# One run, one prefill + one decode (MAX_NEW_TOKENS=1) = 2 forward passes.
+# n=3 microbatches matches the advisor's formula n = num_mig_instances,
+# so the trace shows three microbatches in flight across the three ranks.
+#
+# Restore the full sweep by uncommenting the other pairs and raising
+# MAX_RUNS / MAX_NEW_TOKENS above.
 BATCH_MB_PAIRS = [
-    # --- nsys profiling config: one run, n=1, 4 decode steps ---
-    (8, 8),     # n=1 microbatch
-    # (8, 4),
-    # (8, 2),
-    # (16, 8),
-    # (16, 4),
-    # (16, 2),
+    (24, 8),    # n=3 — advisor's formula: n = num_mig_instances
+    # (24, 24), # n=1 — no microbatching
+    # (24, 12), # n=2
+    # (24, 6),  # n=4
 ]
 
 MIG_UUIDS = [
@@ -457,7 +461,7 @@ def run_pipeline(
                         decode_recv_handles[mb_idx].wait()
                         current_hidden = decode_recv_bufs[mb_idx]
 
-                    position_embeddings = rotary_emb(current_hidden, position_ids)
+                    position_embeddings = rotary_embedding(current_hidden, position_ids)
 
                     current_hidden = forward_through_layers(
                         layers,

@@ -1,32 +1,20 @@
-from logging import log
-import torch
-from datasets import load_dataset
-from transformers import DynamicCache, LlamaConfig, AutoTokenizer
 import os
 import gc
 import json
-import time
-import queue
 import logging
-import traceback
-import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List
 
-from helpers import get_wiki_sample
 import torch
-import torch.distributed as dist
-import torch.multiprocessing as mp
 import torch.nn as nn
-import pandas as pd
+from datasets import load_dataset
 from tqdm import tqdm
-
-from transformers import DynamicCache, LlamaConfig, AutoTokenizer
-from transformers.models.llama.modeling_llama import (
-    LlamaDecoderLayer,
-    LlamaRMSNorm,
-    LlamaRotaryEmbedding,
-)
+from transformers import AutoTokenizer
 from transformers.utils import hub
+
+# Module logger. NOTE: this was previously `from logging import log`, which
+# bound the stdlib logging.log() FUNCTION — so every log.info()/log.warning()
+# call below would have raised AttributeError.
+log = logging.getLogger(__name__)
 
 
 def get_wiki_sample(batch_size: int, seq_len: int, model_name: str) -> torch.Tensor:
