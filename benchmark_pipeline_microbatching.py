@@ -57,29 +57,21 @@ HIDDEN_SIZE = 4096
 HEADS = 32
 
 SEQ_LEN = 64
-MAX_NEW_TOKENS = 512
+MAX_NEW_TOKENS = 4
 
 # Hard cap on how many (split, batch, microbatch) configurations to run.
 # Set to None for the full sweep. Kept low while validating on a fresh box
 # so a broken setup costs minutes instead of hours of GPU time.
-MAX_RUNS = 10
+MAX_RUNS = 1
 
 BATCH_MB_PAIRS = [
-    # (32, 16),
-    # (32, 8),
-    # (32, 4),
-    # (32, 2),
-    # # batch 64
-    # (64, 32),
-    # (64, 16),
-    # (64, 8),
-    # (64, 4),
-    # (64, 2),
-    (8, 4),
-    (8, 2),
-    (16, 8),
-    (16, 4),
-    (16, 2),
+    # --- nsys profiling config: one run, n=1, 4 decode steps ---
+    (8, 8),     # n=1 microbatch
+    # (8, 4),
+    # (8, 2),
+    # (16, 8),
+    # (16, 4),
+    # (16, 2),
 ]
 
 MIG_UUIDS = [
