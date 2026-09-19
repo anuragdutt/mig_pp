@@ -60,21 +60,22 @@ NOTE ON EFF_ACT:
 
 EDIT THIS:
 """
-A100_BW    = 1555e9               # HBM2 bytes/s, full A100 40GB (spec sheet)
+
+A100_BW = 1555e9  # HBM2 bytes/s, full A100 40GB (spec sheet)
 
 # Slice mode only: which slice you are calibrating, and what the model currently
 # ASSUMES its bandwidth fraction is. Slice mode measures the real fraction and
 # tells you whether this assumption holds.
-MIG_UUID           = "MIG-98f93df6-d522-5c00-9923-4326839cef2e"  # 3g.20gb slice
-SLICE_LABEL        = "3g.20gb"
-SLICE_FRAC_ASSUMED = 3 / 7        # what pulp_layer_placement.py assumes today
+MIG_UUID = "MIG-98f93df6-d522-5c00-9923-4326839cef2e"  # 3g.20gb slice
+SLICE_LABEL = "3g.20gb"
+SLICE_FRAC_ASSUMED = 3 / 7  # what pulp_layer_placement.py assumes today
 
-MODEL_NAME = "lmsys/vicuna-7b-v1.5"   # must match your pipeline
+MODEL_NAME = "lmsys/vicuna-7b-v1.5"  # must match your pipeline
 
 # workload shape -- must match benchmark_pipeline_microbatching.py
-SEQ_LEN        = 64
+SEQ_LEN = 64
 MAX_NEW_TOKENS = 512
-MAX_SEQ        = SEQ_LEN + MAX_NEW_TOKENS
+MAX_SEQ = SEQ_LEN + MAX_NEW_TOKENS
 
 # context lengths at which to sample EFF_ACT
 EFF_ACT_CTXS = [64, 128, 192, 320, 448, 576]
@@ -99,7 +100,7 @@ from transformers.models.llama.modeling_llama import (
 )
 
 HIDDEN, INTER, VOCAB = 4096, 11008, 32000
-WARMUP  = 20
+WARMUP = 20
 REPEATS = 200
 
 # Normalization basis for every efficiency constant. Full mode runs on the whole
@@ -113,20 +114,21 @@ PEAK_BW = A100_BW
 # SHARED HELPERS
 # ---------------------------------------------------------------------------
 
+
 def act_bytes_per_token(ctx: int) -> int:
     """Activation + KV traffic per token per layer (bytes), flash-attn aware.
 
     Must stay identical to act_bytes_per_token in pulp_layer_placement.py.
     """
     B = 2  # FP16
-    qkv    = (HIDDEN + 3*HIDDEN) * B
-    flash  = (HIDDEN + 2*ctx*HIDDEN + HIDDEN) * B   # K,V full ctx read
-    oproj  = (HIDDEN + HIDDEN) * B
-    gate   = (HIDDEN + INTER) * B
-    up     = (HIDDEN + INTER) * B
-    swiglu = (2*INTER + INTER) * B
-    down   = (INTER + HIDDEN) * B
-    misc   = (6*HIDDEN) * B
+    qkv = (HIDDEN + 3 * HIDDEN) * B
+    flash = (HIDDEN + 2 * ctx * HIDDEN + HIDDEN) * B  # K,V full ctx read
+    oproj = (HIDDEN + HIDDEN) * B
+    gate = (HIDDEN + INTER) * B
+    up = (HIDDEN + INTER) * B
+    swiglu = (2 * INTER + INTER) * B
+    down = (INTER + HIDDEN) * B
+    misc = (6 * HIDDEN) * B
     return qkv + flash + oproj + gate + up + swiglu + down + misc
 
 
@@ -137,7 +139,7 @@ def sync_time() -> float:
 
 def _build_layer(device):
     config = LlamaConfig.from_pretrained(MODEL_NAME)
-    config._attn_implementation = "sdpa"   # flash attention, same as pipeline
+    config._attn_implementation = "sdpa"  # flash attention, same as pipeline
     layer = LlamaDecoderLayer(config, layer_idx=0).half().to(device)
     layer.eval()
     rotary = LlamaRotaryEmbedding(config=config, device=device)
@@ -152,9 +154,9 @@ def _build_layer(device):
 # ---------------------------------------------------------------------------
 def calculate_EFF_WEIGHT() -> float:
     device = torch.device("cuda:0")
-    WEIGHT_BYTES = (4*HIDDEN*HIDDEN + 3*HIDDEN*INTER) * 2   # one layer, FP16
+    WEIGHT_BYTES = (4 * HIDDEN * HIDDEN + 3 * HIDDEN * INTER) * 2  # one layer, FP16
 
-    n_elements = WEIGHT_BYTES // 2   # float16 = 2 bytes
+    n_elements = WEIGHT_BYTES // 2  # float16 = 2 bytes
     tensor = torch.randn(n_elements, dtype=torch.float16, device=device)
 
     for _ in range(WARMUP):
@@ -166,8 +168,8 @@ def calculate_EFF_WEIGHT() -> float:
         _ = tensor.sum()
     t1 = sync_time()
 
-    elapsed_s   = (t1 - t0) / REPEATS
-    achieved_bw = WEIGHT_BYTES / elapsed_s          # bytes/s
+    elapsed_s = (t1 - t0) / REPEATS
+    achieved_bw = WEIGHT_BYTES / elapsed_s  # bytes/s
     return achieved_bw / PEAK_BW
 
 
@@ -183,7 +185,7 @@ def calculate_EFF_WEIGHT() -> float:
 def calculate_EFF_ACT_curve(eff_weight: float, launch_ms_per_layer: float):
     device = torch.device("cuda:0")
     layer, rotary, _ = _build_layer(device)
-    WEIGHT_BYTES = (4*HIDDEN*HIDDEN + 3*HIDDEN*INTER) * 2
+    WEIGHT_BYTES = (4 * HIDDEN * HIDDEN + 3 * HIDDEN * INTER) * 2
 
     weight_s = WEIGHT_BYTES / (PEAK_BW * eff_weight)
     launch_s = launch_ms_per_layer / 1000.0
@@ -200,8 +202,8 @@ def calculate_EFF_ACT_curve(eff_weight: float, launch_ms_per_layer: float):
 
         # one new token on top of that context
         hidden = torch.randn(1, 1, HIDDEN, dtype=torch.float16, device=device)
-        pos    = torch.tensor([[ctx]], dtype=torch.long, device=device)
-        emb    = rotary(hidden, pos)
+        pos = torch.tensor([[ctx]], dtype=torch.long, device=device)
+        emb = rotary(hidden, pos)
 
         with torch.no_grad():
             for _ in range(WARMUP):
@@ -235,8 +237,9 @@ def weighted_EFF_ACT(curve) -> float:
     is representative of where the time is really spent.
     """
     import bisect
-    ctxs  = [c for c, _, _, _ in curve]
-    effs  = [e for _, e, _, _ in curve]
+
+    ctxs = [c for c, _, _, _ in curve]
+    effs = [e for _, e, _, _ in curve]
 
     num = 0.0
     den = 0.0
@@ -268,7 +271,7 @@ def calculate_LAUNCH_US() -> float:
         _ = tiny + 0
     t1 = sync_time()
 
-    return (t1 - t0) / (REPEATS * 10) * 1e6   # -> microseconds
+    return (t1 - t0) / (REPEATS * 10) * 1e6  # -> microseconds
 
 
 # ---------------------------------------------------------------------------
@@ -291,8 +294,8 @@ def calculate_KERNELS_PER_LAYER() -> float:
         layer(prefill, position_embeddings=pref_emb, past_key_values=cache)
 
     hidden = torch.randn(1, 1, HIDDEN, dtype=torch.float16, device=device)
-    pos    = torch.tensor([[SEQ_LEN]], dtype=torch.long, device=device)
-    emb    = rotary(hidden, pos)
+    pos = torch.tensor([[SEQ_LEN]], dtype=torch.long, device=device)
+    emb = rotary(hidden, pos)
 
     with torch.no_grad():
         _ = layer(hidden, position_embeddings=emb, past_key_values=cache)
@@ -319,15 +322,15 @@ def calculate_KERNELS_PER_LAYER() -> float:
 #            src_tensor.to(device)        heap -> GPU         [PCIE_BW_UNPINNED]
 # ---------------------------------------------------------------------------
 def _transport_payload_bytes(mb=TRANSPORT_MB, tokens=1):
-    return mb * tokens * HIDDEN * 2   # FP16 hidden state
+    return mb * tokens * HIDDEN * 2  # FP16 hidden state
 
 
 def calculate_PCIE_BW_PINNED() -> float:
     device = torch.device("cuda:0")
     nbytes = _transport_payload_bytes()
-    numel  = nbytes // 2
+    numel = nbytes // 2
 
-    gpu_t   = torch.randn(numel, dtype=torch.float16, device=device)
+    gpu_t = torch.randn(numel, dtype=torch.float16, device=device)
     staging = torch.zeros(numel, dtype=torch.float16).pin_memory()
 
     for _ in range(WARMUP):
@@ -347,10 +350,10 @@ def calculate_PCIE_BW_UNPINNED() -> float:
     """Pageable host->device, exactly as line 387 does it (heap numpy -> GPU)."""
     device = torch.device("cuda:0")
     nbytes = _transport_payload_bytes()
-    numel  = nbytes // 2
+    numel = nbytes // 2
 
-    heap = torch.from_numpy(np.zeros(numel, dtype=np.float16))   # NOT pinned
-    dst  = torch.zeros(numel, dtype=torch.float16, device=device)
+    heap = torch.from_numpy(np.zeros(numel, dtype=np.float16))  # NOT pinned
+    dst = torch.zeros(numel, dtype=torch.float16, device=device)
 
     for _ in range(WARMUP):
         dst.copy_(heap.to(device))
@@ -369,7 +372,7 @@ def calculate_MEMCPY_BW() -> float:
     from multiprocessing.shared_memory import SharedMemory
 
     nbytes = _transport_payload_bytes()
-    numel  = nbytes // 2
+    numel = nbytes // 2
 
     shm_name = "mig_measure_memcpy_probe"
     try:
@@ -422,9 +425,9 @@ def calculate_HANDOFF_FIXED_US(pcie_pinned: float, memcpy_bw: float) -> float:
 
     device = torch.device("cuda:0")
     nbytes = _transport_payload_bytes()
-    numel  = nbytes // 2
+    numel = nbytes // 2
 
-    gpu_t   = torch.randn(numel, dtype=torch.float16, device=device)
+    gpu_t = torch.randn(numel, dtype=torch.float16, device=device)
     staging = torch.zeros(numel, dtype=torch.float16).pin_memory()
 
     shm_name = "mig_measure_handoff_probe"
@@ -547,7 +550,7 @@ def measure_tok_roundtrip_distributed(batch_size=32, port=29800):
 def calculate_slice_bandwidth() -> float:
     """Achieved bandwidth (bytes/s) on whatever device is visible."""
     device = torch.device("cuda:0")
-    WEIGHT_BYTES = (4*HIDDEN*HIDDEN + 3*HIDDEN*INTER) * 2
+    WEIGHT_BYTES = (4 * HIDDEN * HIDDEN + 3 * HIDDEN * INTER) * 2
 
     n_elements = WEIGHT_BYTES // 2
     tensor = torch.randn(n_elements, dtype=torch.float16, device=device)
@@ -568,13 +571,12 @@ def run_slice_mode(full_achieved_bw=None):
     torch.cuda.set_device(0)
     print(f"Running on: {torch.cuda.get_device_name(0)}")
     print(f"Slice label: {SLICE_LABEL}")
-    print(f"Full-GPU spec bandwidth: {A100_BW/1e9:.1f} GB/s")
+    print(f"Full-GPU spec bandwidth: {A100_BW / 1e9:.1f} GB/s")
     print()
 
-    print("Measuring achieved bandwidth on this slice "
-          "(same probe as full mode)...")
+    print("Measuring achieved bandwidth on this slice (same probe as full mode)...")
     achieved = calculate_slice_bandwidth()
-    print(f"  achieved = {achieved/1e9:.1f} GB/s")
+    print(f"  achieved = {achieved / 1e9:.1f} GB/s")
     print()
 
     frac_vs_spec = achieved / A100_BW
@@ -599,7 +601,7 @@ def run_slice_mode(full_achieved_bw=None):
     print()
     # The two candidate scaling laws this distinguishes.
     print("Candidate laws for reference:")
-    print(f"  GPC count      3/7 = {3/7:.4f}   (compute-slice proportional)")
+    print(f"  GPC count      3/7 = {3 / 7:.4f}   (compute-slice proportional)")
     print(f"  HBM stacks     1/2 = {0.5:.4f}   (2 of 4 stacks on a 40GB A100)")
     print()
     print("Paste the measured fraction into SLICE_FRAC in pulp_layer_placement.py")
@@ -613,7 +615,7 @@ def run_slice_mode(full_achieved_bw=None):
 def run_full_mode():
     torch.cuda.set_device(0)
     print(f"Running on: {torch.cuda.get_device_name(0)}")
-    print(f"Normalizing by FULL-GPU peak: {PEAK_BW/1e9:.1f} GB/s")
+    print(f"Normalizing by FULL-GPU peak: {PEAK_BW / 1e9:.1f} GB/s")
     print("All efficiencies below are fractions of the WHOLE GPU's bandwidth,")
     print("so they are hardware properties independent of MIG partitioning.")
     print()
@@ -621,8 +623,8 @@ def run_full_mode():
     print("[1/8] EFF_WEIGHT (large contiguous weight reads)...")
     eff_weight = calculate_EFF_WEIGHT()
     achieved_full = eff_weight * PEAK_BW
-    print(f"      EFF_WEIGHT = {eff_weight:.3f}  ({eff_weight*100:.1f}% of peak)")
-    print(f"      achieved   = {achieved_full/1e9:.1f} GB/s")
+    print(f"      EFF_WEIGHT = {eff_weight:.3f}  ({eff_weight * 100:.1f}% of peak)")
+    print(f"      achieved   = {achieved_full / 1e9:.1f} GB/s")
     print(f"      -> pass --full-achieved {achieved_full:.6e} to slice mode")
     print()
 
@@ -642,31 +644,31 @@ def run_full_mode():
     curve = calculate_EFF_ACT_curve(eff_weight, launch_ms_per_layer)
     print(f"      {'ctx':>6} {'EFF_ACT':>9} {'measured_ms':>12} {'act_only_ms':>12}")
     for ctx, eff, meas, act in curve:
-        print(f"      {ctx:6d} {eff:9.3f} {meas*1e3:12.3f} {act*1e3:12.3f}")
+        print(f"      {ctx:6d} {eff:9.3f} {meas * 1e3:12.3f} {act * 1e3:12.3f}")
     eff_act_w = weighted_EFF_ACT(curve)
     print(f"      traffic-weighted scalar EFF_ACT = {eff_act_w:.3f}")
     print()
 
     print("[5/8] PCIE_BW_PINNED (pinned GPU->host DMA)...")
     pcie_pinned = calculate_PCIE_BW_PINNED()
-    print(f"      PCIE_BW_PINNED   = {pcie_pinned/1e9:.1f} GB/s")
+    print(f"      PCIE_BW_PINNED   = {pcie_pinned / 1e9:.1f} GB/s")
     print()
 
     print("[6/8] PCIE_BW_UNPINNED (pageable host->GPU, bounce-buffered)...")
     pcie_unpinned = calculate_PCIE_BW_UNPINNED()
-    print(f"      PCIE_BW_UNPINNED = {pcie_unpinned/1e9:.1f} GB/s")
+    print(f"      PCIE_BW_UNPINNED = {pcie_unpinned / 1e9:.1f} GB/s")
     print()
 
     print("[7/8] MEMCPY_BW (pinned->SHM write, SHM->heap read)...")
     memcpy_bw, bw_w, bw_r = calculate_MEMCPY_BW()
-    print(f"      write pinned->SHM = {bw_w/1e9:.1f} GB/s")
-    print(f"      read  SHM->heap   = {bw_r/1e9:.1f} GB/s")
-    print(f"      MEMCPY_BW (harmonic mean) = {memcpy_bw/1e9:.1f} GB/s")
+    print(f"      write pinned->SHM = {bw_w / 1e9:.1f} GB/s")
+    print(f"      read  SHM->heap   = {bw_r / 1e9:.1f} GB/s")
+    print(f"      MEMCPY_BW (harmonic mean) = {memcpy_bw / 1e9:.1f} GB/s")
     print()
 
     print("[8/8] HANDOFF_FIXED_US (cuda.sync drain + handshake residual)...")
     handoff_us = calculate_HANDOFF_FIXED_US(pcie_pinned, memcpy_bw)
-    tok_local  = calculate_TOK_ROUNDTRIP_US_local()
+    tok_local = calculate_TOK_ROUNDTRIP_US_local()
     print(f"      HANDOFF_FIXED_US = {handoff_us:.1f} us")
     print(f"      TOK_ROUNDTRIP_US (local lower bound) = {tok_local:.1f} us")
     print("      NOTE: run measure_tok_roundtrip_distributed() on the cluster")
@@ -676,7 +678,9 @@ def run_full_mode():
     print("=" * 62)
     print("Paste these into pulp_layer_placement.py:")
     print(f"  EFF_WEIGHT        = {eff_weight:.3f}")
-    print(f"  EFF_ACT           = {eff_act_w:.3f}   # traffic-weighted; see curve above")
+    print(
+        f"  EFF_ACT           = {eff_act_w:.3f}   # traffic-weighted; see curve above"
+    )
     print(f"  LAUNCH_US         = {launch_us:.1f}")
     print(f"  KERNELS_PER_LAYER = {kernels:.0f}")
     print(f"  PCIE_BW_PINNED    = {pcie_pinned:.3e}")
@@ -694,19 +698,30 @@ def run_full_mode():
 
 def main():
     import argparse
+
     ap = argparse.ArgumentParser(
-        description="Measure the empirical constants for pulp_layer_placement.py")
-    ap.add_argument("--mode", choices=["full", "slice"], default="full",
-                    help="full: hardware properties on the whole GPU (default). "
-                         "slice: calibrate one MIG slice's bandwidth fraction.")
-    ap.add_argument("--full-achieved", type=float, default=None,
-                    help="slice mode: achieved bandwidth (bytes/s) from the "
-                         "full-mode run, so workload efficiency cancels.")
+        description="Measure the empirical constants for pulp_layer_placement.py"
+    )
+    ap.add_argument(
+        "--mode",
+        choices=["full", "slice"],
+        default="full",
+        help="full: hardware properties on the whole GPU (default). "
+        "slice: calibrate one MIG slice's bandwidth fraction.",
+    )
+    ap.add_argument(
+        "--full-achieved",
+        type=float,
+        default=None,
+        help="slice mode: achieved bandwidth (bytes/s) from the "
+        "full-mode run, so workload efficiency cancels.",
+    )
     args = ap.parse_args()
 
     if args.mode == "full":
-        if "CUDA_VISIBLE_DEVICES" in os.environ and \
-                os.environ["CUDA_VISIBLE_DEVICES"].startswith("MIG-"):
+        if "CUDA_VISIBLE_DEVICES" in os.environ and os.environ[
+            "CUDA_VISIBLE_DEVICES"
+        ].startswith("MIG-"):
             print("WARNING: CUDA_VISIBLE_DEVICES points at a MIG slice, but full")
             print("         mode expects the whole GPU. Efficiencies will be")
             print("         normalized by A100_BW and come out ~slice_frac too low.")

@@ -8,6 +8,7 @@ Run from the mig_pp root directory (same place you run the benchmark):
 
 EDIT THESE:
 """
+
 import os
 import datetime
 import torch
@@ -23,20 +24,21 @@ from torch.autograd import DeviceType
 
 # ---- EDIT THESE ----
 MIG_UUIDS = [
-    "MIG-98f93df6-d522-5c00-9923-4326839cef2e",   # rank 0 — 20gb
-    "MIG-153fcb3c-9412-5240-937b-67bc18179f24",   # rank 1 — 10gb
-    "MIG-222909dc-5318-5493-8680-34be7bab2cc6",   # rank 2 — 10gb
+    "MIG-98f93df6-d522-5c00-9923-4326839cef2e",  # rank 0 — 20gb
+    "MIG-153fcb3c-9412-5240-937b-67bc18179f24",  # rank 1 — 10gb
+    "MIG-222909dc-5318-5493-8680-34be7bab2cc6",  # rank 2 — 10gb
 ]
-SPLIT       = [16, 8, 8]    # any valid split, doesn't matter for counting
-MODEL_NAME  = "lmsys/vicuna-7b-v1.5"
+SPLIT = [16, 8, 8]  # any valid split, doesn't matter for counting
+MODEL_NAME = "lmsys/vicuna-7b-v1.5"
 MASTER_PORT = 29700
 HIDDEN_SIZE = 4096
-SEQ_LEN     = 64
-MB_SIZE     = 4             # microbatch size -- count at your typical value
+SEQ_LEN = 64
+MB_SIZE = 4  # microbatch size -- count at your typical value
 # --------------------
 
 # import forward_through_layers from your harness
 import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from benchmark_pipeline_microbatching import forward_through_layers
 
@@ -47,7 +49,9 @@ def worker(rank: int, world_size: int, result_queue: mp.Queue):
     os.environ["MASTER_PORT"] = str(MASTER_PORT)
 
     dist.init_process_group(
-        backend="gloo", rank=rank, world_size=world_size,
+        backend="gloo",
+        rank=rank,
+        world_size=world_size,
         timeout=datetime.timedelta(minutes=5),
     )
 
@@ -58,25 +62,28 @@ def worker(rank: int, world_size: int, result_queue: mp.Queue):
     config._attn_implementation = "sdpa"
 
     start_layer = sum(SPLIT[:rank])
-    my_indices  = list(range(start_layer, start_layer + SPLIT[rank]))
+    my_indices = list(range(start_layer, start_layer + SPLIT[rank]))
 
     # build layers (random weights -- we only care about kernel count, not values)
-    layers = nn.ModuleList([
-        LlamaDecoderLayer(config, layer_idx=i).half().to(device)
-        for i in my_indices
-    ])
+    layers = nn.ModuleList(
+        [LlamaDecoderLayer(config, layer_idx=i).half().to(device) for i in my_indices]
+    )
     layers.eval()
 
     rotary_emb = LlamaRotaryEmbedding(config=config, device=device)
 
     # build a realistic decode input: 1 new token, KV cache pre-filled
     hidden = torch.randn(MB_SIZE, 1, HIDDEN_SIZE, dtype=torch.float16, device=device)
-    position_ids = torch.tensor([[SEQ_LEN]], dtype=torch.long, device=device).expand(MB_SIZE, -1)
+    position_ids = torch.tensor([[SEQ_LEN]], dtype=torch.long, device=device).expand(
+        MB_SIZE, -1
+    )
     position_embeddings = rotary_emb(hidden, position_ids)
     cache = DynamicCache()
 
     # pre-fill KV cache so decode sees a real context
-    prefill = torch.randn(MB_SIZE, SEQ_LEN, HIDDEN_SIZE, dtype=torch.float16, device=device)
+    prefill = torch.randn(
+        MB_SIZE, SEQ_LEN, HIDDEN_SIZE, dtype=torch.float16, device=device
+    )
     pref_pos = torch.arange(SEQ_LEN, device=device).unsqueeze(0)
     pref_emb = rotary_emb(prefill, pref_pos)
     with torch.no_grad():
@@ -105,16 +112,22 @@ def worker(rank: int, world_size: int, result_queue: mp.Queue):
     # count unique CUDA kernel events
     cuda_events = [e for e in prof.key_averages() if e.device_type == DeviceType.CUDA]
     total_kernels = len(cuda_events)
-    per_layer     = total_kernels / SPLIT[rank]
+    per_layer = total_kernels / SPLIT[rank]
 
-    result_queue.put({
-        "rank":          rank,
-        "layers":        SPLIT[rank],
-        "total_kernels": total_kernels,
-        "per_layer":     round(per_layer, 1),
-        "top_kernels":   [(e.key, e.cuda_time_total) for e in
-                          sorted(cuda_events, key=lambda e: e.cuda_time_total, reverse=True)[:5]],
-    })
+    result_queue.put(
+        {
+            "rank": rank,
+            "layers": SPLIT[rank],
+            "total_kernels": total_kernels,
+            "per_layer": round(per_layer, 1),
+            "top_kernels": [
+                (e.key, e.cuda_time_total)
+                for e in sorted(
+                    cuda_events, key=lambda e: e.cuda_time_total, reverse=True
+                )[:5]
+            ],
+        }
+    )
 
     dist.destroy_process_group()
 
@@ -152,7 +165,7 @@ def main():
         print(f"  kernels per layer              : {r['per_layer']}")
         print(f"  top 5 kernels by CUDA time:")
         for name, t_us in r["top_kernels"]:
-            print(f"    {t_us/1000:8.2f} ms   {name}")
+            print(f"    {t_us / 1000:8.2f} ms   {name}")
 
     if results:
         avg_per_layer = sum(r["per_layer"] for r in results) / len(results)

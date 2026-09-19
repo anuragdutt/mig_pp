@@ -13,7 +13,7 @@ import os
 import pandas as pd
 
 # ============================================================
-CSV_PATH        = "../../oracle/40gb/20_10_10/vicuna_7B.csv"
+CSV_PATH = "../../oracle/40gb/20_10_10/vicuna_7B.csv"
 PULP_MODULE_DIR = "."
 OUT_PATH = "comparison_results.csv"
 # ============================================================
@@ -28,11 +28,11 @@ cols = list(valid.columns)
 valid.columns = ["layers_20gb", "layers_10gb_b", "layers_10gb_c"] + cols[3:]
 
 results = []
-cache = {}   # avoid re-solving same batch_size twice
+cache = {}  # avoid re-solving same batch_size twice
 
 for _, row in valid.iterrows():
-    bs  = int(row["batch_size"])
-    mb  = int(row["microbatch_size"])
+    bs = int(row["batch_size"])
+    mb = int(row["microbatch_size"])
     nmb = int(row["num_microbatches"])
 
     if bs not in cache:
@@ -44,17 +44,19 @@ for _, row in valid.iterrows():
     meas_ms = row["total_latency_ms"]
     err_pct = (pred_ms - meas_ms) / meas_ms * 100
 
-    results.append({
-        "batch_size":       bs,
-        "microbatch_size":  mb,
-        "num_microbatches": nmb,
-        "pulp_split":       f"{counts[0]}/{counts[1]}/{counts[2]}",
-        "mem_limits":       f"{limits[0]}/{limits[1]}/{limits[2]}",
-        "data_split":       f"{int(row['layers_20gb'])}/{int(row['layers_10gb_b'])}/{int(row['layers_10gb_c'])}",
-        "predicted_ms":     round(pred_ms, 1),
-        "measured_ms":      round(meas_ms, 1),
-        "error_pct":        round(err_pct, 1),
-    })
+    results.append(
+        {
+            "batch_size": bs,
+            "microbatch_size": mb,
+            "num_microbatches": nmb,
+            "pulp_split": f"{counts[0]}/{counts[1]}/{counts[2]}",
+            "mem_limits": f"{limits[0]}/{limits[1]}/{limits[2]}",
+            "data_split": f"{int(row['layers_20gb'])}/{int(row['layers_10gb_b'])}/{int(row['layers_10gb_c'])}",
+            "predicted_ms": round(pred_ms, 1),
+            "measured_ms": round(meas_ms, 1),
+            "error_pct": round(err_pct, 1),
+        }
+    )
 
 out = pd.DataFrame(results)
 os.makedirs(os.path.dirname(os.path.abspath(OUT_PATH)), exist_ok=True)

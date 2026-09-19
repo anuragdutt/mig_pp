@@ -6,8 +6,9 @@ import queue
 import logging
 import traceback
 import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
+from helpers import get_wiki_sample, load_specific_weights
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -22,9 +23,9 @@ from transformers.models.llama.modeling_llama import (
     LlamaRotaryEmbedding,
 )
 from transformers.utils import hub
-from datasets import load_dataset
 
-import mig_transport_pipeline_non_blocking as mig_transport
+
+import mig_transport_pipeline as mig_transport
 import dcgm_mem_monitor as monitor
 
 # ---------------------------------------------------------------------------
@@ -81,33 +82,18 @@ BATCH_MB_PAIRS = [
     (16, 2),
 ]
 
-# --- MIG TOPOLOGY ---
-# Single source of truth for the slice layout. Everything downstream
-# (world_size, CSV column names, per-rank memory reporting) is derived from
-# this list, so switching topologies means editing only this block.
-#
-# !!! REPLACE THESE UUIDs !!! They are per-card. After creating the MIG
-# instances on a new box, run `nvidia-smi -L` and paste the new ones here,
-# in the same order as SLICE_GB.
 MIG_UUIDS = [
-    "MIG-REPLACE-ME-SLICE0-20GB",  # Rank 0: 20GB (3g.20gb)
-    "MIG-REPLACE-ME-SLICE1-10GB",  # Rank 1: 10GB (2g.10gb)
-    "MIG-REPLACE-ME-SLICE2-10GB",  # Rank 2: 10GB (2g.10gb)
+    "MIG-cbf6f13f-88d6-550a-95b3-259a93afe90f",  # Rank 0: 20GB (3g.20gb)
+    "MIG-3551cc21-290c-58ef-936e-50bc04135d53",  # Rank 1: 10GB (2g.10gb)
+    "MIG-1e5ad904-ba2b-5830-9639-2ded2002e3a7",  # Rank 2: 10GB (2g.10gb)
 ]
 
-# Slice capacity in GB, parallel to MIG_UUIDS. Drives CSV column naming.
 SLICE_GB = [20, 10, 10]
 
 WORLD_SIZE = len(MIG_UUIDS)
 
 # Max layers each slice can hold. Roughly proportional to slice VRAM after
 # subtracting KV cache + activation headroom.
-#
-# Vicuna-7B: 32 layers, ~0.42GB/layer fp16 (4096 hidden).
-#   20GB slice: also holds the embedding table (~0.26GB) -> generous cap
-#   10GB slice: ~0.42GB/layer, leave ~4GB for KV cache + activations
-# Caps are upper bounds for the search, not targets — the enumerator still
-# has to make them sum to TOTAL_LAYERS.
 LAYER_LIMITS = [22, 14, 14]
 
 # Ordering constraint on splits. The two 10GB slices are identical, so
@@ -124,129 +110,6 @@ ENFORCE_SLICE_ORDERING = True
 PREFILL_TAG_BASE = 1000
 DECODE_TAG_BASE = 2000
 TOKENS_TAG_BASE = 9000
-
-# ---------------------------------------------------------------------------
-# DATA LOADING
-# ---------------------------------------------------------------------------
-
-
-# COMPLETE
-def get_wiki_sample(batch_size: int) -> torch.Tensor:
-    log.info(f"Loading WikiText... (SEQ_LEN={SEQ_LEN}, BATCH={batch_size})")
-    try:
-        dataset = load_dataset(
-            "wikitext", "wikitext-2-raw-v1", split="test", streaming=True
-        )
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-        tokenizer.pad_token = tokenizer.eos_token
-
-        text_sample = ""
-        for item in dataset:
-            if len(item["text"]) > 100:
-                text_sample = item["text"]
-                break
-
-        inputs = tokenizer(
-            text_sample,
-            return_tensors="pt",
-            max_length=SEQ_LEN,
-            padding="max_length",
-            truncation=True,
-        )
-        return inputs.input_ids.repeat(batch_size, 1)
-    except Exception:
-        log.warning("WikiText unavailable. Using random token IDs.")
-        return torch.randint(0, 32000, (batch_size, SEQ_LEN))
-
-
-# ---------------------------------------------------------------------------
-# WEIGHT LOADING
-# ---------------------------------------------------------------------------
-
-
-# COMPLETE
-def load_specific_weights(
-    rank: int,
-    world_size: int,
-    my_layers: nn.ModuleList,
-    my_layer_indices: List[int],
-    model_components: Dict[str, nn.Module],
-) -> None:
-    log.info(f"[Rank {rank}] Loading weights...")
-
-    try:
-        cached_index = hub.cached_file(MODEL_NAME, "pytorch_model.bin.index.json")
-        folder_path = os.path.dirname(cached_index)
-        with open(cached_index, "r") as f:
-            index_data = json.load(f)
-        weight_map = index_data["weight_map"]
-        shard_files = sorted(set(weight_map.values()))
-    except Exception:
-        log.warning(f"[Rank {rank}] Weight map not found. Skipping.")
-        return
-
-    layer_to_local: Dict[int, int] = {idx: i for i, idx in enumerate(my_layer_indices)}
-
-    for shard_file in tqdm(shard_files, desc=f"Rank {rank} shards", leave=False):
-        file_path = os.path.join(folder_path, shard_file)
-        state_dict: Dict[str, torch.Tensor] = torch.load(file_path, map_location="cpu")
-
-        for key, value in state_dict.items():
-            if rank == 0 and "embed_tokens" in key and "embed" in model_components:
-                model_components["embed"].weight.data.copy_(value)
-                continue
-
-            # Final norm + lm_head live on the LAST rank, whatever that is.
-            # (This was hardcoded to `rank == 3`, which silently loaded
-            # nothing once world_size changed — no error, just garbage
-            # output from an untrained lm_head.)
-            if rank == world_size - 1:
-                if "norm.weight" in key and "norm" in model_components:
-                    model_components["norm"].weight.data.copy_(value)
-                    continue
-                if "lm_head.weight" in key and "lm_head" in model_components:
-                    model_components["lm_head"].weight.data.copy_(value)
-                    continue
-
-            if "layers." in key:
-                parts = key.split(".")
-                try:
-                    layer_idx = int(parts[2])
-                except ValueError:
-                    continue
-
-                local_idx = layer_to_local.get(layer_idx)
-                if local_idx is None:
-                    continue
-
-                module = my_layers[local_idx]
-                local_key = ".".join(parts[3:])
-
-                try:
-                    sub_mod = module
-                    sub_parts = local_key.split(".")
-                    for sp in sub_parts[:-1]:
-                        sub_mod = getattr(sub_mod, sp)
-                    getattr(sub_mod, sub_parts[-1]).data.copy_(value)
-                except AttributeError:
-                    pass
-
-        del state_dict
-        gc.collect()
-        torch.cuda.empty_cache()
-
-    log.info(f"[Rank {rank}] Weights loaded.")
-
-
-# ---------------------------------------------------------------------------
-# FORWARD PASS HELPER
-# ---------------------------------------------------------------------------
-
-
-import torch
-import torch.nn as nn
-from typing import Optional, Tuple
-from transformers import DynamicCache
 
 
 # This function was manually implemented to bypass a tensor shape mismatch
@@ -275,7 +138,6 @@ def forward_through_layers(
 
     # Loop through every single layer assigned to this specific GPU
     for layer in layers:
-
         # 1. SAVE THE RESIDUAL (Skip Connection)
         # We keep an untouched copy of the data. If the complex math in this layer
         # degrades the signal, the network can fall back on this original copy.
@@ -422,12 +284,11 @@ def run_pipeline(
             m.eval()
         layers.eval()
 
-        # RoPE (Rotary Position Embeddings)/
-        # This single line creates the mathematical compass (the sine and cosine angles)
-        # that will be passed into every single layer so the AI understands word order.
-        rotary_emb = LlamaRotaryEmbedding(config=config, device=device)
+        # RoPE (Rotary Position Embeddings)
+        rotary_embedding = LlamaRotaryEmbedding(config=config, device=device)
+
         load_specific_weights(
-            rank, world_size, layers, my_layer_indices, model_components
+            rank, world_size, MODEL_NAME, layers, my_layer_indices, model_components
         )
 
         # Deep clean after weight loading
@@ -489,13 +350,8 @@ def run_pipeline(
         start_event.record()
 
         with torch.no_grad():
-            # =========================================================
-            # PREFILL — pipelined across microbatches
-            # =========================================================
-
             # Rank > 0: post *all* irecvs up front (max overlap)
             if rank > 0:
-
                 prefill_recv_handles = [
                     dist.irecv(
                         prefill_recv_bufs[i],
@@ -524,7 +380,7 @@ def run_pipeline(
                 position_ids = torch.arange(
                     0, seq_length, dtype=torch.long, device=device
                 ).unsqueeze(0)
-                position_embeddings = rotary_emb(current_hidden, position_ids)
+                position_embeddings = rotary_embedding(current_hidden, position_ids)
 
                 current_hidden = forward_through_layers(
                     layers,
@@ -664,6 +520,11 @@ def run_pipeline(
 
         dist.destroy_process_group()
 
+        # Release SHM segments. Without this each run leaves NUM_SLOTS
+        # segments per rank in /dev/shm; over a long sweep they accumulate
+        # until allocation fails.
+        mig_transport.cleanup()
+
     except torch.cuda.OutOfMemoryError:
         log.error(f"[Rank {rank}] OOM")
         result_queue.put(("oom", rank))
@@ -671,11 +532,19 @@ def run_pipeline(
             dist.destroy_process_group()
         except Exception:
             pass
+        try:
+            mig_transport.cleanup()
+        except Exception:
+            pass
 
     except Exception:
         log.error(f"[Rank {rank}] Unexpected exception:\n{traceback.format_exc()}")
         try:
             dist.destroy_process_group()
+        except Exception:
+            pass
+        try:
+            mig_transport.cleanup()
         except Exception:
             pass
 
@@ -731,7 +600,9 @@ def main():
     log.info(f"Transport log stamp: {os.environ['MIG_LOG_STAMP']}")
 
     log.info("Setting up DCGM monitor group...")
-    monitor.setup_dcgm_group()
+    # Pass the topology so the monitor can map DCGM entities to the right
+    # ranks by MIG UUID, rather than a hardcoded entity->rank table.
+    monitor.setup_dcgm_group(mig_uuids=MIG_UUIDS, slice_gb=SLICE_GB)
 
     selected_splits = generate_layer_splits()
 
@@ -767,11 +638,11 @@ def main():
             f"Microbatches: {batch_size // mb_size}"
         )
 
-        input_ids_seed = get_wiki_sample(batch_size)
+        input_ids_seed = get_wiki_sample(batch_size, SEQ_LEN, MODEL_NAME)
 
         label = f"s{'_'.join(map(str, split))}_b{batch_size}_mb{mb_size}"
         monitor.set_label(label)
-        monitor._samples.clear()
+        monitor.clear()
         monitor.start()
 
         q = mp.Queue()
@@ -872,8 +743,18 @@ def main():
             elif "latency" in queue_items:
                 latency = queue_items["latency"]
                 log.info(f"Total latency:     {latency:.0f} ms")
-                log.info(f"Peak 5GB memory:   {peak_per_rank[3]} MB")
-                log.info(f"Avg  5GB memory:   {avg_per_rank[3]:.0f} MB")
+                # Report the tightest slice — that's the one at risk of OOM.
+                # (Was hardcoded to index 3, which IndexErrors on any
+                # topology with fewer than 4 slices.)
+                _tight = min(range(WORLD_SIZE), key=lambda r: SLICE_GB[r])
+                log.info(
+                    f"Peak {SLICE_GB[_tight]}GB memory (rank {_tight}): "
+                    f"{peak_per_rank[_tight]} MB"
+                )
+                log.info(
+                    f"Avg  {SLICE_GB[_tight]}GB memory (rank {_tight}): "
+                    f"{avg_per_rank[_tight]:.0f} MB"
+                )
                 base_row["total_latency_ms"] = latency
                 base_row["status"] = "ok"
 
@@ -906,9 +787,7 @@ def main():
     if not successful.empty:
         # Column names follow the SLICE_GB topology, so build them here
         # rather than hardcoding rank2/rank3.
-        peak_cols = [
-            f"peak_rank{r}_{SLICE_GB[r]}gb_mb" for r in range(WORLD_SIZE)
-        ]
+        peak_cols = [f"peak_rank{r}_{SLICE_GB[r]}gb_mb" for r in range(WORLD_SIZE)]
 
         def _peaks(row):
             return " | ".join(

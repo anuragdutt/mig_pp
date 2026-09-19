@@ -3,7 +3,7 @@ from pathlib import Path
 import pulp
 
 # caps in bytes (GiB)
-C = [5*(1024**3), 10*(1024**3), 15*(1024**3)]
+C = [5 * (1024**3), 10 * (1024**3), 15 * (1024**3)]
 
 # change this if you want to pin embed+lmhead into stage0
 E_stage0 = 0
@@ -30,7 +30,13 @@ m = [mi for _, mi in layers]
 prob = pulp.LpProblem("pp_split_poc", pulp.LpMinimize)
 
 # x[i][s] binaries
-x = [[pulp.LpVariable(f"x_{i}_{s}", lowBound=0, upBound=1, cat="Binary") for s in range(3)] for i in range(L)]
+x = [
+    [
+        pulp.LpVariable(f"x_{i}_{s}", lowBound=0, upBound=1, cat="Binary")
+        for s in range(3)
+    ]
+    for i in range(L)
+]
 U = pulp.LpVariable("U", lowBound=0, cat="Continuous")
 
 # each layer assigned once
@@ -38,9 +44,9 @@ for i in range(L):
     prob += pulp.lpSum(x[i][s] for s in range(3)) == 1
 
 # contiguity
-for i in range(L-1):
-    prob += x[i][0] >= x[i+1][0]   # stage 0 prefix
-    prob += x[i][2] <= x[i+1][2]   # stage 2 suffix
+for i in range(L - 1):
+    prob += x[i][0] >= x[i + 1][0]  # stage 0 prefix
+    prob += x[i][2] <= x[i + 1][2]  # stage 2 suffix
 
 # non-empty stages
 for s in range(3):
@@ -72,14 +78,16 @@ for i in range(L):
 
 # boundary indices in layer space
 # stage0: 0..k-1, stage1: k..m-1, stage2: m..L-1
-k = next((i for i,s in enumerate(stage_of) if s != 0), L)
-m_idx = next((i for i,s in enumerate(stage_of) if s == 2), L)
+k = next((i for i, s in enumerate(stage_of) if s != 0), L)
+m_idx = next((i for i, s in enumerate(stage_of) if s == 2), L)
 
 print("Status:", pulp.LpStatus[prob.status])
 print("U (max utilization):", pulp.value(U))
 print("Split boundaries: k =", k, " m =", m_idx)
 print("Stage layer counts:", stage_of.count(0), stage_of.count(1), stage_of.count(2))
-print("Stage mem (GiB):",
-      float(pulp.value(mem0))/1024**3,
-      float(pulp.value(mem1))/1024**3,
-      float(pulp.value(mem2))/1024**3)
+print(
+    "Stage mem (GiB):",
+    float(pulp.value(mem0)) / 1024**3,
+    float(pulp.value(mem1)) / 1024**3,
+    float(pulp.value(mem2)) / 1024**3,
+)
