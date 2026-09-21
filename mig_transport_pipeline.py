@@ -49,6 +49,7 @@ import torch.distributed as dist
 #   T28   VERDICT: no async sends on this rank
 #   T29   VERDICT: overlap working
 #   T30   VERDICT: D2H not hidden — async misuse OR saturated GPU  (warn)
+#   T32   decode step boundary marker (emitted by the benchmark, not here)
 #
 # Quick triage after a run:
 #   grep -E 'T29|T30' logs/transport_*.log     # the verdict, one per rank

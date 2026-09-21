@@ -283,8 +283,18 @@ def run_pipeline(
         # RoPE (Rotary Position Embeddings)
         rotary_embedding = LlamaRotaryEmbedding(config=config, device=device)
 
+        # Weight loading reads every shard from disk and copies tensor by
+        # tensor; on a cold page cache it dominates process startup and is the
+        # reason a naive nsys capture is mostly this phase. Timed so the log
+        # says so outright instead of leaving it to be inferred.
+        _wl_t0 = time.perf_counter()
         load_specific_weights(
             rank, world_size, MODEL_NAME, layers, my_layer_indices, model_components
+        )
+        _wl_s = time.perf_counter() - _wl_t0
+        log.info(
+            f"[B01][Rank {rank}] weight load: {_wl_s:.1f}s "
+            f"({len(my_layer_indices)} layers)"
         )
 
         # Deep clean after weight loading
@@ -360,6 +370,34 @@ def run_pipeline(
             torch.cuda.Event(enable_timing=True) for _ in range(MAX_NEW_TOKENS)
         ]
 
+        # Per-microbatch COMPUTE timing (the layer stack only — no transport).
+        # Nothing else measures this directly: the ACK wait [T11] reflects the
+        # downstream rank's compute, but only indirectly and only as seen from
+        # the sender. Measuring it here makes that inference checkable.
+        #
+        # One pair per (step, microbatch), flattened. Index: step_idx * n + mb.
+        # Pre-allocated for the same reason as the per-step events, and read
+        # back only after the final synchronize — calling elapsed_time() inside
+        # the loop would force a sync and distort what it measures.
+        _n_compute = (MAX_NEW_TOKENS + 1) * num_microbatches  # +1 for prefill
+        compute_start_events = [
+            torch.cuda.Event(enable_timing=True) for _ in range(_n_compute)
+        ]
+        compute_end_events = [
+            torch.cuda.Event(enable_timing=True) for _ in range(_n_compute)
+        ]
+
+        # Prefill/decode phase split. total_latency_ms covers both, but they
+        # are different regimes — prefill moves MB-scale activations and is
+        # compute-bound in mb_size; decode moves KB and is bound by weight
+        # streaming, which depends on microbatch COUNT and not size.
+        prefill_end_event = torch.cuda.Event(enable_timing=True)
+
+        # Barrier idle. Each barrier is a rendezvous, so a rank that arrives
+        # early sits there. That idle time is pipeline imbalance and is
+        # otherwise invisible — it is where a fast rank's time actually goes.
+        barrier_wait_s = {"post_prefill": 0.0, "final": 0.0}
+
         start_event.record()
 
         with torch.no_grad():
@@ -395,6 +433,8 @@ def run_pipeline(
                 ).unsqueeze(0)
                 position_embeddings = rotary_embedding(current_hidden, position_ids)
 
+                _ci = mb_idx  # prefill occupies slots [0, num_microbatches)
+                compute_start_events[_ci].record()
                 current_hidden = forward_through_layers(
                     layers,
                     current_hidden,
@@ -402,6 +442,7 @@ def run_pipeline(
                     prefill_mask,
                     past_key_values_list[mb_idx],
                 )
+                compute_end_events[_ci].record()
 
                 if rank == world_size - 1:
                     normed = model_components["norm"](current_hidden)
@@ -435,13 +476,33 @@ def run_pipeline(
             elif rank == 0:
                 dist.recv(next_tokens, src=world_size - 1, tag=tok_tag)
 
+            # Close prefill before the barrier so the phase split measures
+            # prefill work, not prefill + waiting for the other ranks.
+            prefill_end_event.record()
+
+            _bt0 = time.perf_counter()
             dist.barrier()
+            barrier_wait_s["post_prefill"] = time.perf_counter() - _bt0
 
             # =========================================================
             # DECODE — pipelined across microbatches
             # =========================================================
             for step in range(1, MAX_NEW_TOKENS + 1):
                 step_start_events[step - 1].record()
+
+                # Step boundary marker. The transport log interleaves all
+                # ranks and encodes the step inside the message tag
+                # (DECODE_TAG_BASE + step*10_000 + mb_idx), so segmenting it
+                # by step otherwise means doing tag arithmetic. This makes
+                # each step greppable directly.
+                _tlog_step = logging.getLogger("mig_transport")
+                _tlog_step.info(
+                    "[T32][rank%d] ===== DECODE STEP %d/%d (n=%d) =====",
+                    rank,
+                    step,
+                    MAX_NEW_TOKENS,
+                    num_microbatches,
+                )
 
                 position_ids = (
                     torch.tensor(
@@ -482,6 +543,8 @@ def run_pipeline(
 
                     position_embeddings = rotary_embedding(current_hidden, position_ids)
 
+                    _ci = step * num_microbatches + mb_idx
+                    compute_start_events[_ci].record()
                     current_hidden = forward_through_layers(
                         layers,
                         current_hidden,
@@ -489,6 +552,7 @@ def run_pipeline(
                         None,
                         past_key_values_list[mb_idx],
                     )
+                    compute_end_events[_ci].record()
 
                     if rank == world_size - 1:
                         normed = model_components["norm"](current_hidden)
@@ -523,7 +587,10 @@ def run_pipeline(
                 # the step and hide the serialization.
                 step_end_events[step - 1].record()
 
+        _bt0 = time.perf_counter()
         dist.barrier()
+        barrier_wait_s["final"] = time.perf_counter() - _bt0
+
         end_event.record()
         torch.cuda.synchronize()
 
@@ -541,10 +608,52 @@ def run_pipeline(
             _last = step_latencies_ms[-1]
             _drift = ((_last / _first) - 1.0) * 100.0 if _first > 0 else 0.0
             log.info(
-                f"[Rank {rank}] Decode step latency: first={_first:.2f}ms "
+                f"[B02][Rank {rank}] decode step latency: first={_first:.2f}ms "
                 f"last={_last:.2f}ms drift={_drift:+.1f}% "
                 f"mean={sum(step_latencies_ms) / len(step_latencies_ms):.2f}ms"
             )
+
+        # Phase split: prefill vs decode.
+        prefill_ms = start_event.elapsed_time(prefill_end_event)
+        decode_ms = total_latency_ms - prefill_ms
+        log.info(
+            f"[B03][Rank {rank}] phase split: prefill={prefill_ms:.1f}ms "
+            f"({prefill_ms / total_latency_ms * 100:.1f}%) "
+            f"decode={decode_ms:.1f}ms "
+            f"({decode_ms / total_latency_ms * 100:.1f}%)"
+        )
+
+        # Per-microbatch compute (layer stack only, no transport). Compare
+        # against the downstream rank's [T11] ACK wait: if they match, the ACK
+        # wait really is downstream compute rather than a transport cost.
+        compute_ms = [
+            compute_start_events[i].elapsed_time(compute_end_events[i])
+            for i in range(_n_compute)
+        ]
+        _pre_compute = compute_ms[:num_microbatches]
+        _dec_compute = compute_ms[num_microbatches:]
+        if _pre_compute:
+            log.info(
+                f"[B04][Rank {rank}] prefill compute/mb: "
+                f"mean={sum(_pre_compute) / len(_pre_compute):.2f}ms "
+                f"total={sum(_pre_compute):.1f}ms over {len(_pre_compute)} mb"
+            )
+        if _dec_compute:
+            _sorted = sorted(_dec_compute)
+            log.info(
+                f"[B05][Rank {rank}] decode compute/mb: "
+                f"mean={sum(_dec_compute) / len(_dec_compute):.2f}ms "
+                f"median={_sorted[len(_sorted) // 2]:.2f}ms "
+                f"first={_dec_compute[0]:.2f}ms last={_dec_compute[-1]:.2f}ms "
+                f"total={sum(_dec_compute) / 1000:.1f}s over {len(_dec_compute)} mb"
+            )
+
+        # Barrier idle — where a fast rank's time actually goes.
+        log.info(
+            f"[B06][Rank {rank}] barrier idle: "
+            f"post_prefill={barrier_wait_s['post_prefill'] * 1000:.1f}ms "
+            f"final={barrier_wait_s['final'] * 1000:.1f}ms"
+        )
 
         # Per-rank transport verdict: did the async copies actually overlap?
         # Grep the log for T28 to get one VERDICT line per rank.
@@ -559,6 +668,24 @@ def run_pipeline(
         # bottleneck rank is the one that sets the step time), so rank0 alone
         # would not show where the drift comes from.
         result_queue.put((f"step_latencies_rank{rank}", step_latencies_ms))
+        result_queue.put(
+            (
+                f"phase_rank{rank}",
+                {
+                    "prefill_ms": prefill_ms,
+                    "decode_ms": decode_ms,
+                    "weight_load_s": _wl_s,
+                    "barrier_post_prefill_ms": barrier_wait_s["post_prefill"] * 1000,
+                    "barrier_final_ms": barrier_wait_s["final"] * 1000,
+                    "decode_compute_mean_ms": (
+                        sum(_dec_compute) / len(_dec_compute) if _dec_compute else 0.0
+                    ),
+                    "prefill_compute_mean_ms": (
+                        sum(_pre_compute) / len(_pre_compute) if _pre_compute else 0.0
+                    ),
+                },
+            )
+        )
 
         dist.destroy_process_group()
 
@@ -790,6 +917,48 @@ def main():
                 },
                 "total_latency_ms": None,
                 "status": None,
+                # Phase/compute breakdown from the bottleneck-visible ranks.
+                # Per-rank so an imbalanced split is visible in the summary
+                # table rather than only in the transport log.
+                **{
+                    f"prefill_ms_rank{r}": queue_items.get(f"phase_rank{r}", {}).get(
+                        "prefill_ms"
+                    )
+                    for r in range(WORLD_SIZE)
+                },
+                **{
+                    f"decode_ms_rank{r}": queue_items.get(f"phase_rank{r}", {}).get(
+                        "decode_ms"
+                    )
+                    for r in range(WORLD_SIZE)
+                },
+                **{
+                    f"decode_compute_mean_ms_rank{r}": queue_items.get(
+                        f"phase_rank{r}", {}
+                    ).get("decode_compute_mean_ms")
+                    for r in range(WORLD_SIZE)
+                },
+                **{
+                    f"barrier_idle_ms_rank{r}": (
+                        queue_items.get(f"phase_rank{r}", {}).get(
+                            "barrier_post_prefill_ms", 0.0
+                        )
+                        or 0.0
+                    )
+                    + (
+                        queue_items.get(f"phase_rank{r}", {}).get(
+                            "barrier_final_ms", 0.0
+                        )
+                        or 0.0
+                    )
+                    for r in range(WORLD_SIZE)
+                },
+                **{
+                    f"weight_load_s_rank{r}": queue_items.get(
+                        f"phase_rank{r}", {}
+                    ).get("weight_load_s")
+                    for r in range(WORLD_SIZE)
+                },
             }
 
             if hung:
