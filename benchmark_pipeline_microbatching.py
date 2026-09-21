@@ -57,12 +57,12 @@ HIDDEN_SIZE = 4096
 HEADS = 32
 
 SEQ_LEN = 64
-MAX_NEW_TOKENS = 1
+MAX_NEW_TOKENS = 512
 
 # Hard cap on how many (split, batch, microbatch) configurations to run.
 # Set to None for the full sweep. Kept low while validating on a fresh box
 # so a broken setup costs minutes instead of hours of GPU time.
-MAX_RUNS = 1
+MAX_RUNS = 10
 
 # --- nsys single-pass trace config ---
 # One run, one prefill + one decode (MAX_NEW_TOKENS=1) = 2 forward passes.
