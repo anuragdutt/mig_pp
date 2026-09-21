@@ -27,6 +27,7 @@ from transformers.utils import hub
 
 import mig_transport_pipeline as mig_transport
 import dcgm_mem_monitor as monitor
+from token_exchange import TokenExchange
 
 # ---------------------------------------------------------------------------
 # LOGGING SETUP
@@ -315,6 +316,17 @@ def run_pipeline(
         # waiting to hold the final predicted words for all batch_size amt of sentences.
         next_tokens = torch.zeros((batch_size, 1), dtype=torch.long, device=device)
 
+        # next_tokens is on the GPU but the process group is gloo, which is
+        # CPU-only: it passes tensor.data_ptr() to writev(2), and a device
+        # pointer there is EFAULT ("writev ...: Bad address"), killing the
+        # rank and taking the others with it. Activations avoid this because
+        # dist.isend is intercepted by the SHM engine and staged D2H;
+        # patched_send/patched_recv deliberately bypass that for this small
+        # control tensor, so the staging belongs here. TokenExchange owns one
+        # pinned host buffer for the whole run and times every copy.
+        # Verified by probe_gloo_send.py (T1-T7, 512-exchange decode loop).
+        tok_exchange = TokenExchange(next_tokens)
+
         # Standard prefill mask code
         prefill_mask = torch.full(
             (1, 1, seq_length, seq_length),
@@ -472,9 +484,9 @@ def run_pipeline(
             # Share next_tokens rank2 → rank0 (tagged)
             tok_tag = TOKENS_TAG_BASE + 0
             if rank == world_size - 1:
-                dist.send(next_tokens, dst=0, tag=tok_tag)
+                tok_exchange.send(dst=0, tag=tok_tag)
             elif rank == 0:
-                dist.recv(next_tokens, src=world_size - 1, tag=tok_tag)
+                tok_exchange.recv(src=world_size - 1, tag=tok_tag)
 
             # Close prefill before the barrier so the phase split measures
             # prefill work, not prefill + waiting for the other ranks.
@@ -577,9 +589,9 @@ def run_pipeline(
                 if step < MAX_NEW_TOKENS:
                     tok_tag = TOKENS_TAG_BASE + step
                     if rank == world_size - 1:
-                        dist.send(next_tokens, dst=0, tag=tok_tag)
+                        tok_exchange.send(dst=0, tag=tok_tag)
                     elif rank == 0:
-                        dist.recv(next_tokens, src=world_size - 1, tag=tok_tag)
+                        tok_exchange.recv(src=world_size - 1, tag=tok_tag)
 
                 # Close the step AFTER the token exchange: that exchange is
                 # part of the step's critical path (rank0 cannot start the
@@ -654,6 +666,13 @@ def run_pipeline(
             f"post_prefill={barrier_wait_s['post_prefill'] * 1000:.1f}ms "
             f"final={barrier_wait_s['final'] * 1000:.1f}ms"
         )
+
+        # next_tokens staging cost — the price of routing the token exchange
+        # around gloo's CPU-only transport. Reported on its own line rather
+        # than folded into the step, so it stays checkable: measured at
+        # ~0.04ms per exchange against ~745ms ACK waits, i.e. noise. If this
+        # ever stops being noise, it will be visible here first.
+        log.info(f"[B07][Rank {rank}] next_tokens staging: {tok_exchange.summary()}")
 
         # Per-rank transport verdict: did the async copies actually overlap?
         # Grep the log for T28 to get one VERDICT line per rank.
