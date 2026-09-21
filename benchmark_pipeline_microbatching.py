@@ -343,6 +343,23 @@ def run_pipeline(
         # Beginning of prefill loop
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)
+
+        # Per-decode-step timing. The KV cache grows from seq_length to
+        # seq_length + MAX_NEW_TOKENS over the run, so attention reads more
+        # cache every step and per-step cost drifts upward — measured at
+        # +10% on ACK wait and +43% on rank1 D2H block over 512 steps.
+        # A single total_latency_ms averages that drift away, so record each
+        # step separately and let the analysis see the curve.
+        #
+        # Events are pre-allocated: creating them inside the loop would add
+        # allocation to the very thing being measured.
+        step_start_events = [
+            torch.cuda.Event(enable_timing=True) for _ in range(MAX_NEW_TOKENS)
+        ]
+        step_end_events = [
+            torch.cuda.Event(enable_timing=True) for _ in range(MAX_NEW_TOKENS)
+        ]
+
         start_event.record()
 
         with torch.no_grad():
@@ -424,6 +441,8 @@ def run_pipeline(
             # DECODE — pipelined across microbatches
             # =========================================================
             for step in range(1, MAX_NEW_TOKENS + 1):
+                step_start_events[step - 1].record()
+
                 position_ids = (
                     torch.tensor(
                         [[seq_length + step - 1]], dtype=torch.long, device=device
@@ -498,12 +517,34 @@ def run_pipeline(
                     elif rank == 0:
                         dist.recv(next_tokens, src=world_size - 1, tag=tok_tag)
 
+                # Close the step AFTER the token exchange: that exchange is
+                # part of the step's critical path (rank0 cannot start the
+                # next step until it lands), so excluding it would understate
+                # the step and hide the serialization.
+                step_end_events[step - 1].record()
+
         dist.barrier()
         end_event.record()
         torch.cuda.synchronize()
 
         total_latency_ms = start_event.elapsed_time(end_event)
         log.info(f"[Rank {rank}] Finished. Latency: {total_latency_ms:.0f} ms")
+
+        # Read back per-step times. Safe here: the torch.cuda.synchronize()
+        # above guarantees every recorded event has completed.
+        step_latencies_ms = [
+            step_start_events[i].elapsed_time(step_end_events[i])
+            for i in range(MAX_NEW_TOKENS)
+        ]
+        if step_latencies_ms:
+            _first = step_latencies_ms[0]
+            _last = step_latencies_ms[-1]
+            _drift = ((_last / _first) - 1.0) * 100.0 if _first > 0 else 0.0
+            log.info(
+                f"[Rank {rank}] Decode step latency: first={_first:.2f}ms "
+                f"last={_last:.2f}ms drift={_drift:+.1f}% "
+                f"mean={sum(step_latencies_ms) / len(step_latencies_ms):.2f}ms"
+            )
 
         # Per-rank transport verdict: did the async copies actually overlap?
         # Grep the log for T28 to get one VERDICT line per rank.
@@ -513,6 +554,11 @@ def run_pipeline(
 
         if rank == 0:
             result_queue.put(("latency", total_latency_ms))
+
+        # Every rank reports its own curve — the stages are asymmetric (the
+        # bottleneck rank is the one that sets the step time), so rank0 alone
+        # would not show where the drift comes from.
+        result_queue.put((f"step_latencies_rank{rank}", step_latencies_ms))
 
         dist.destroy_process_group()
 
@@ -625,6 +671,10 @@ def main():
 
     total_runs = len(run_plan)
     results = []
+    # Per-decode-step latencies, one row per (config, rank, step). Kept out of
+    # the main results CSV because it is MAX_NEW_TOKENS * WORLD_SIZE rows per
+    # configuration — the summary table stays readable, the curve lives here.
+    step_latency_rows = []
     current_run = 1
 
     for split, batch_size, mb_size in run_plan:
@@ -704,6 +754,24 @@ def main():
             except queue.Empty:
                 pass
 
+            # Harvest per-step curves before branching on run outcome, so a
+            # partial run still yields whatever steps completed.
+            for _r in range(WORLD_SIZE):
+                for _step_idx, _ms in enumerate(
+                    queue_items.get(f"step_latencies_rank{_r}", []), start=1
+                ):
+                    step_latency_rows.append(
+                        {
+                            "split": str(split),
+                            "batch_size": batch_size,
+                            "microbatch_size": mb_size,
+                            "num_microbatches": batch_size // mb_size,
+                            "rank": _r,
+                            "step": _step_idx,
+                            "step_latency_ms": _ms,
+                        }
+                    )
+
             base_row = {
                 "split": str(split),
                 "batch_size": batch_size,
@@ -777,6 +845,15 @@ def main():
     df = pd.DataFrame(results)
     df.to_csv("mig_benchmark_results.csv", index=False)
 
+    # Per-step decode curves. One row per (config, rank, step) — the KV cache
+    # grows over a run, so step cost drifts and a single mean hides it.
+    if step_latency_rows:
+        step_df = pd.DataFrame(step_latency_rows)
+        step_df.to_csv("mig_step_latencies.csv", index=False)
+        log.info(
+            f"Wrote {len(step_latency_rows)} per-step rows -> mig_step_latencies.csv"
+        )
+
     monitor.save_csv("mig_memory_trace.csv")
 
     successful = df[df["status"] == "ok"]
@@ -825,6 +902,7 @@ def main():
 
     log.info("Done.")
     log.info("Benchmark results → mig_benchmark_results.csv")
+    log.info("Per-step decode   → mig_step_latencies.csv")
     log.info("Memory trace      → mig_memory_trace.csv")
 
 

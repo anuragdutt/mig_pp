@@ -33,8 +33,8 @@ import torch.distributed as dist
 #   T14   recv wait: H2D queued                                 (debug)
 #   T15   recv wait: H2D event landed
 #   T16   recv wait: ACK sent                                   (debug)
-#   T17   blocking send() path used (next_tokens exchange)
-#   T18   blocking recv() path used (next_tokens exchange)
+#   T17   (retired) blocking send() — next_tokens now goes direct to gloo
+#   T18   (retired) blocking recv() — next_tokens now goes direct to gloo
 #   T19   send slot pool had to spin                            (warn)
 #   T19b  send slot pool deadlocked after 10s                   (error)
 #   T20   non-fp16 BLOCKING fallback on send                    (debug)
@@ -43,12 +43,12 @@ import torch.distributed as dist
 #   T22   ===== summary header =====
 #   T23   summary: D2H flush block mean/total
 #   T24   summary: H2D recv block mean/total
-#   T25   summary: handshake wait mean
-#   T26   summary: ACK wait mean
+#   T25   summary: handshake wait mean      (= upstream compute, not transport)
+#   T26   summary: ACK wait mean            (= downstream compute, not transport)
 #   T27   summary: slot pool spins
 #   T28   VERDICT: no async sends on this rank
 #   T29   VERDICT: overlap working
-#   T30   VERDICT: poor overlap                                 (warn)
+#   T30   VERDICT: D2H not hidden — async misuse OR saturated GPU  (warn)
 #
 # Quick triage after a run:
 #   grep -E 'T29|T30' logs/transport_*.log     # the verdict, one per rank
@@ -87,6 +87,13 @@ NUM_SLOTS = 48
 
 # ACK tag is tag + ACK_TAG_OFFSET so it never collides with normal handshakes
 ACK_TAG_OFFSET = 10_000_000
+
+# Control-message tag window (TOKENS_TAG_BASE .. +999 in the benchmark).
+# Currently unused: ALL blocking sends go direct to gloo, so no tag test is
+# needed. Retained for a future blocking SHM path — see the commented
+# _is_control_tag() near patched_send.
+CONTROL_TAG_MIN = 9_000
+CONTROL_TAG_MAX = 9_999
 
 # Map torch dtype -> numpy dtype without forcing tensor.cpu()
 _TORCH_TO_NUMPY = {
@@ -324,64 +331,77 @@ class MIGPipelineTransport:
             f"increase NUM_SLOTS or reduce pipeline depth."
         )
 
-    def send(self, tensor, dst, group=None, tag: int = 0):
-        """
-        Blocking send:
-          - write SHM
-          - send handshake(slot)
-          - wait ACK
-        """
-        _t0 = time.perf_counter()
-        slot = self._get_free_slot()
-        self._write_tensor_to_slot(tensor, slot)
-
-        # Handshake is shared using original pytorch backend ie gloo
-        handshake = torch.tensor([slot], dtype=torch.int32, device="cpu")
-        _ORIGINAL_SEND(handshake, dst=dst, group=group, tag=tag)
-
-        # ACK ensures receiver finished reading this SHM slot
-        ack = torch.empty((1,), dtype=torch.int32, device="cpu")
-        _ORIGINAL_RECV(ack, src=dst, group=group, tag=tag + ACK_TAG_OFFSET)
-
-        self.slot_free[slot] = True
-        _tlog.info(
-            "[T17][rank%d] BLOCKING send slot=%d tag=%d -> rank%d: %s in %s "
-            "(sync path — used for next_tokens exchange, not activations)",
-            self.rank,
-            slot,
-            tag,
-            dst,
-            str(tuple(tensor.shape)),
-            _fmt_ms(time.perf_counter() - _t0),
-        )
-
-    def recv(self, tensor, src, group=None, tag: int = 0):
-        """
-        Blocking recv:
-          - recv handshake(slot)
-          - read SHM into tensor
-          - send ACK
-        """
-        _t0 = time.perf_counter()
-        handshake = torch.tensor([0], dtype=torch.int32, device="cpu")
-        _ORIGINAL_RECV(handshake, src=src, group=group, tag=tag)
-        slot = int(handshake.item())
-
-        self._read_tensor_from_slot(tensor, src, slot)
-
-        ack = torch.tensor([slot], dtype=torch.int32, device="cpu")
-        _ORIGINAL_SEND(ack, dst=src, group=group, tag=tag + ACK_TAG_OFFSET)
-        _tlog.info(
-            "[T18][rank%d] BLOCKING recv slot=%d tag=%d <- rank%d: %s in %s "
-            "(sync path)",
-            self.rank,
-            slot,
-            tag,
-            src,
-            str(tuple(tensor.shape)),
-            _fmt_ms(time.perf_counter() - _t0),
-        )
-
+    # ------------------------------------------------------------------
+    # DEAD CODE as of the control-tag split (see _is_control_tag below).
+    #
+    # send()/recv() are the fully-synchronous SHM path: allocate slot,
+    # write GPU->pinned->SHM, handshake, block on ACK. They existed only
+    # for the next_tokens exchange, which now goes straight to gloo --
+    # that machinery cost ~23ms per exchange ([T17]) to move ~32 bytes,
+    # once per decode step, on the critical path.
+    #
+    # Activations never used this path; they use isend()/irecv().
+    # Kept commented rather than deleted: the [T17]/[T18] log tags and the
+    # measured costs above are referenced in the transport analysis.
+    # ------------------------------------------------------------------
+    # def send(self, tensor, dst, group=None, tag: int = 0):
+    #     """
+    #     Blocking send:
+    #       - write SHM
+    #       - send handshake(slot)
+    #       - wait ACK
+    #     """
+    #     _t0 = time.perf_counter()
+    #     slot = self._get_free_slot()
+    #     self._write_tensor_to_slot(tensor, slot)
+    #
+    #     # Handshake is shared using original pytorch backend ie gloo
+    #     handshake = torch.tensor([slot], dtype=torch.int32, device="cpu")
+    #     _ORIGINAL_SEND(handshake, dst=dst, group=group, tag=tag)
+    #
+    #     # ACK ensures receiver finished reading this SHM slot
+    #     ack = torch.empty((1,), dtype=torch.int32, device="cpu")
+    #     _ORIGINAL_RECV(ack, src=dst, group=group, tag=tag + ACK_TAG_OFFSET)
+    #
+    #     self.slot_free[slot] = True
+    #     _tlog.info(
+    #         "[T17][rank%d] BLOCKING send slot=%d tag=%d -> rank%d: %s in %s "
+    #         "(sync path — used for next_tokens exchange, not activations)",
+    #         self.rank,
+    #         slot,
+    #         tag,
+    #         dst,
+    #         str(tuple(tensor.shape)),
+    #         _fmt_ms(time.perf_counter() - _t0),
+    #     )
+    #
+    # def recv(self, tensor, src, group=None, tag: int = 0):
+    #     """
+    #     Blocking recv:
+    #       - recv handshake(slot)
+    #       - read SHM into tensor
+    #       - send ACK
+    #     """
+    #     _t0 = time.perf_counter()
+    #     handshake = torch.tensor([0], dtype=torch.int32, device="cpu")
+    #     _ORIGINAL_RECV(handshake, src=src, group=group, tag=tag)
+    #     slot = int(handshake.item())
+    #
+    #     self._read_tensor_from_slot(tensor, src, slot)
+    #
+    #     ack = torch.tensor([slot], dtype=torch.int32, device="cpu")
+    #     _ORIGINAL_SEND(ack, dst=src, group=group, tag=tag + ACK_TAG_OFFSET)
+    #     _tlog.info(
+    #         "[T18][rank%d] BLOCKING recv slot=%d tag=%d <- rank%d: %s in %s "
+    #         "(sync path)",
+    #         self.rank,
+    #         slot,
+    #         tag,
+    #         src,
+    #         str(tuple(tensor.shape)),
+    #         _fmt_ms(time.perf_counter() - _t0),
+    #     )
+    #
     def isend(self, tensor, dst, group=None, tag: int = 0) -> AsyncHandleSend:
         """
         Non-blocking send:
@@ -670,7 +690,11 @@ class MIGPipelineTransport:
             stats["handshake_count"],
         )
         _tlog.info(
-            "[T26][rank%d] ACK wait:        mean=%.2fms over %d sends",
+            "[T26][rank%d] ACK wait:        mean=%.2fms over %d sends "
+            "(NOT network time — the receiver ACKs only after its H2D lands, "
+            "and it processes microbatches serially, so this is mostly the "
+            "DOWNSTREAM RANK'S COMPUTE seen from here. Large = that rank is "
+            "the pipeline bottleneck, not a transport problem.)",
             self.rank,
             stats["ack_wait_mean_ms"],
             stats["ack_count"],
@@ -693,10 +717,14 @@ class MIGPipelineTransport:
             )
         else:
             _tlog.warning(
-                "[T30][rank%d] VERDICT: POOR OVERLAP — blocked %.2fms/send on "
-                "D2H. Copy is not hiding under compute; check that isend() "
-                "queue time (T05) is ~0 and that flush() is called one "
-                "microbatch behind.",
+                "[T30][rank%d] VERDICT: D2H NOT HIDDEN — blocked %.2fms/send. "
+                "Two different causes, check which: (a) the async path is "
+                "misused — isend() queue time (T05) is not ~0, or flush() is "
+                "not called one microbatch behind; or (b) the path is fine but "
+                "this rank's GPU is saturated, so the copy stream is not "
+                "serviced promptly. (b) is expected on a middle rank that both "
+                "sends and receives on a small MIG slice, and is not a "
+                "transport bug — compare against T05 to tell them apart.",
                 self.rank,
                 stats["flush_block_mean_ms"],
             )
@@ -838,15 +866,31 @@ def register_hooks(mb_size=32, seq_len=64, hidden_size=5120, num_slots=None):
     print(f"[MIG-Pipe] Hooks registered for Rank {rank} (ACK + tags)", flush=True)
 
 
+# Unused while patched_send/patched_recv are unconditionally gloo. Kept for
+# the day a blocking SHM send is needed again: branch on this rather than a
+# >= threshold, because decode tags are DECODE_TAG_BASE + step*10_000 + mb_idx
+# and run from 12000 past 5,000,000 — an open-ended compare against
+# TOKENS_TAG_BASE would swallow every activation.
+#
+# def _is_control_tag(tag: int) -> bool:
+#     return CONTROL_TAG_MIN <= tag <= CONTROL_TAG_MAX
+
+
 def patched_send(tensor, dst, group=None, tag=0):
-    if _MIG_PIPE_ENGINE is not None:
-        return _MIG_PIPE_ENGINE.send(tensor, dst, group=group, tag=tag)
+    """
+    Blocking send. Always plain gloo now.
+
+    The only blocking send in the harness is the next_tokens exchange, which
+    moves a (batch, 1) int tensor and must NOT pay for the SHM slot machinery.
+    Activations go through patched_isend instead. The engine's own blocking
+    send() is commented out above; if a caller ever needs a blocking SHM send,
+    restore it and branch on _is_control_tag(tag) here.
+    """
     return _ORIGINAL_SEND(tensor, dst, group=group, tag=tag)
 
 
 def patched_recv(tensor, src=None, group=None, tag=0):
-    if _MIG_PIPE_ENGINE is not None:
-        return _MIG_PIPE_ENGINE.recv(tensor, src, group=group, tag=tag)
+    """Blocking recv. Always plain gloo — see patched_send."""
     return _ORIGINAL_RECV(tensor, src, group=group, tag=tag)
 
 

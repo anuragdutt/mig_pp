@@ -150,8 +150,12 @@ class AsyncHandleSend:
         self._engine.slot_free[self._slot_idx] = True
         self._waited = True
 
+        # This duration is mostly the DOWNSTREAM rank's compute: it ACKs only
+        # after its H2D lands, and it works through microbatches one at a
+        # time. Reading it as network latency is wrong — see [T26].
         _tlog.info(
-            "[T11][rank%d] wait slot=%d tag=%d: ACK(%d) received in %s, slot freed",
+            "[T11][rank%d] wait slot=%d tag=%d: ACK(%d) received in %s "
+            "(mostly downstream compute, not network), slot freed",
             rank,
             self._slot_idx,
             self._tag,
