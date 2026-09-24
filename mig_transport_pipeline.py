@@ -44,7 +44,7 @@ import torch.distributed as dist
 #   T23   summary: D2H flush block mean/total
 #   T24   summary: H2D recv block mean/total
 #   T25   summary: handshake wait mean      (= upstream compute, not transport)
-#   T26   summary: ACK wait mean            (= downstream compute, not transport)
+#   T26   summary: ACK wait mean            (remaining wait at drain)
 #   T27   summary: slot pool spins
 #   T28   VERDICT: no async sends on this rank
 #   T29   VERDICT: overlap working
@@ -410,8 +410,10 @@ class MIGPipelineTransport:
           - No torch.cuda.synchronize() here — the default (compute) stream
             is free to keep running the next microbatch's forward pass while
             this copy happens in the background.
-          - handle.wait() (called later, after other work) drains the copy,
-            flushes to SHM, sends the handshake, and waits the ACK.
+          - handle.flush() publishes the copy to SHM and sends the handshake
+            after posting an ACK receive, allowing downstream computation.
+          - handle.wait() flushes if needed, then waits for ACK completion
+            before reclaiming the slot.
         """
         slot = self._get_free_slot()
         _t0 = time.perf_counter()
@@ -642,7 +644,8 @@ class MIGPipelineTransport:
           h2d_block    — mean time blocked waiting for H2D copies on receive.
           handshake    — mean time waiting for upstream. Large here is normal
                          and just means this rank is faster than its upstream.
-          ack_wait     — mean time waiting for downstream ACKs.
+          ack_wait     — mean remaining ACK wait at drain time; receives
+                         are posted during flush and may already be done.
         """
 
         def _mean(total, count):
@@ -692,10 +695,8 @@ class MIGPipelineTransport:
         )
         _tlog.info(
             "[T26][rank%d] ACK wait:        mean=%.2fms over %d sends "
-            "(NOT network time — the receiver ACKs only after its H2D lands, "
-            "and it processes microbatches serially, so this is mostly the "
-            "DOWNSTREAM RANK'S COMPUTE seen from here. Large = that rank is "
-            "the pipeline bottleneck, not a transport problem.)",
+            "(remaining wait at drain; receives start during flush and "
+            "ACK only after downstream H2D completes)",
             self.rank,
             stats["ack_wait_mean_ms"],
             stats["ack_count"],

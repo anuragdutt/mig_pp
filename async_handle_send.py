@@ -2,7 +2,7 @@ import time
 import torch
 from mig_transport_pipeline import (
     _ORIGINAL_SEND,
-    _ORIGINAL_RECV,
+    _ORIGINAL_IRECV,
     ACK_TAG_OFFSET,
     _tlog,
     _fmt_ms,
@@ -24,6 +24,9 @@ class AsyncHandleSend:
         self._numel = numel
         self._flushed = False
         self._waited = False
+        # Keep both the receive buffer and request alive until ACK completion.
+        self._ack_buffer = torch.empty((1,), dtype=torch.int32, device="cpu")
+        self._ack_handle = None
 
     def flush(self):
         """
@@ -31,7 +34,9 @@ class AsyncHandleSend:
 
         Waits for THIS slot's D2H copy (queued on copy_stream at isend()
         time) to land, memcpys pinned staging into SHM, then sends the
-        handshake so the receiver can start reading.
+        handshake so the receiver can start reading. Post the ACK receive
+        before the handshake so the receiver can finish its ACK send and
+        start computing while this rank processes later microbatches.
 
         Split out from wait() so the caller can publish microbatch k
         immediately after computing it, while still deferring the ACK wait
@@ -86,6 +91,17 @@ class AsyncHandleSend:
             _fmt_ms(time.perf_counter() - _t0),
         )
 
+        # The receiver sends a blocking ACK before starting computation.
+        # Listen now so that send does not have to wait for our final drain.
+        # Posting the receive does not make the slot reusable; wait() does.
+        if self._ack_handle is None:
+            self._ack_handle = _ORIGINAL_IRECV(
+                self._ack_buffer,
+                src=self._dst,
+                group=self._group,
+                tag=self._tag + ACK_TAG_OFFSET,
+            )
+
         # Handshake AFTER the data is actually in SHM — sending it earlier
         # would let the receiver race ahead and read a stale/garbage slot.
         handshake = torch.tensor([self._slot_idx], dtype=torch.int32, device="cpu")
@@ -137,29 +153,29 @@ class AsyncHandleSend:
         )
         _t0 = time.perf_counter()
 
-        ack = torch.empty((1,), dtype=torch.int32, device="cpu")
-        _ORIGINAL_RECV(
-            ack,
-            src=self._dst,
-            group=self._group,
-            tag=self._tag + ACK_TAG_OFFSET,
-        )
+        self._ack_handle.wait()
         _ack_wait = time.perf_counter() - _t0
+        ack_slot = int(self._ack_buffer.item())
+        if ack_slot != self._slot_idx:
+            raise RuntimeError(
+                f"ACK slot mismatch for tag={self._tag}: "
+                f"expected {self._slot_idx}, got {ack_slot}"
+            )
 
         # Now safe to reuse slot
         self._engine.slot_free[self._slot_idx] = True
         self._waited = True
 
-        # This duration is mostly the DOWNSTREAM rank's compute: it ACKs only
-        # after its H2D lands, and it works through microbatches one at a
-        # time. Reading it as network latency is wrong — see [T26].
+        # Measure only the ACK wait remaining at drain time. The receive has
+        # been active since flush(), so its completion may already overlap
+        # our later microbatches. This is not a downstream compute timer.
         _tlog.info(
             "[T11][rank%d] wait slot=%d tag=%d: ACK(%d) received in %s "
-            "(mostly downstream compute, not network), slot freed",
+            "(remaining wait at drain), slot freed",
             rank,
             self._slot_idx,
             self._tag,
-            int(ack.item()),
+            ack_slot,
             _fmt_ms(_ack_wait),
         )
 

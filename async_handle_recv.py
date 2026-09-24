@@ -90,7 +90,9 @@ class AsyncHandleRecv:
         self._engine.stat_h2d_block_s += _h2d_wait
         self._engine.stat_h2d_count += 1
 
-        # Send ACK back so sender can reuse slot
+        # ACK only after H2D completes, so the sender can safely reuse SHM.
+        # Its ACK receive was posted before publishing the handshake; this
+        # blocking send therefore does not depend on its final ACK drain.
         ack = torch.tensor([slot], dtype=torch.int32, device="cpu")
         _ORIGINAL_SEND(
             ack,
