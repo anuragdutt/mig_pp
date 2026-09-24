@@ -604,6 +604,14 @@ def run_pipeline(
         barrier_wait_s["final"] = time.perf_counter() - _bt0
 
         end_event.record()
+        # REQUIRED, not removable, and deliberately full-device. Every
+        # elapsed_time() call below reads CUDA events recorded across the
+        # default stream AND the transport engine's copy_stream; querying an
+        # event that has not completed raises or returns garbage. This is the
+        # one place a whole-device drain is the correct tool.
+        #
+        # Costs nothing measurable: it runs once, after the final barrier,
+        # outside the timed region. Not in the decode loop.
         torch.cuda.synchronize()
 
         total_latency_ms = start_event.elapsed_time(end_event)

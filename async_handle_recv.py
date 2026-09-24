@@ -78,6 +78,15 @@ class AsyncHandleRecv:
         )
 
         _t0 = time.perf_counter()
+        # REQUIRED, not removable. The ACK below tells the sender its SHM
+        # slot is reusable; ACKing before the H2D lands would let the sender
+        # overwrite the slot mid-copy — corrupt activations, no error. This
+        # is rule 2 of the handshake ("acknowledge only after reading").
+        #
+        # Event sync on ONE slot, never torch.cuda.synchronize(): a
+        # full-device drain would also wait on this rank's own outbound
+        # copy_stream, serializing the receive against sends that are
+        # deliberately in flight.
         evt.synchronize()
         _h2d_wait = time.perf_counter() - _t0
         _tlog.info(

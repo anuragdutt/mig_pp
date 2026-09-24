@@ -456,33 +456,6 @@ class MIGPipelineTransport:
             dist_handle, handshake, tensor, src, self, tag=tag, group=group
         )
 
-    def _write_tensor_to_slot(self, tensor: torch.Tensor, slot: int):
-        """
-        Blocking GPU -> CPU -> SHM path, used only by the synchronous
-        send()/recv() (blocking API). Kept as the old, simple, correct
-        (if slow) reference path — isend()/irecv() use the async path below
-        instead and never call this.
-        """
-        nbytes = tensor.numel() * tensor.element_size()
-
-        if nbytes > self.slot_size:
-            raise ValueError(
-                f"Tensor {nbytes} bytes exceeds slot size {self.slot_size} bytes. "
-                f"Increase buffer_size_mb."
-            )
-
-        if tensor.dtype == torch.float16:
-            numel = tensor.numel()
-            staging = self.pinned_staging[slot]
-            staging[:numel].copy_(tensor.view(-1), non_blocking=True)
-            torch.cuda.synchronize()
-            raw = staging[:numel].numpy().view(np.uint8)
-            self.my_np_slots[slot][:nbytes] = raw[:nbytes]
-        else:
-            cpu_tensor = tensor.detach().cpu().contiguous()
-            raw = cpu_tensor.numpy().reshape(-1).view(np.uint8)
-            self.my_np_slots[slot][:nbytes] = raw[:nbytes]
-
     def _queue_copy_to_staging(self, tensor: torch.Tensor, slot: int) -> int:
         """
         Queue the D2H copy on self.copy_stream and return immediately —

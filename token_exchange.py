@@ -59,7 +59,19 @@ class TokenExchange:
         """Copy the device tensor to the pinned host buffer, then send that."""
         _t0 = time.perf_counter()
         self.host_buffer.copy_(self.device_tensor)
-        torch.cuda.synchronize()
+        # REQUIRED, not removable. dist.send hands host_buffer.data_ptr() to
+        # writev(2) immediately; without this the D2H copy may still be in
+        # flight and gloo transmits a half-written buffer — wrong tokens, no
+        # error. The copy targets pinned memory, so it is genuinely async.
+        #
+        # Scoped to the current stream rather than torch.cuda.synchronize():
+        # a full-device drain would also wait on the transport engine's
+        # copy_stream (mig_transport_pipeline.py:196), stalling activation
+        # D2H copies that this rank deliberately left in flight — and
+        # perturbing the very overlap the [T2x] numbers are measuring.
+        # Correctness is identical: the benchmark never enters a stream
+        # context, so this copy is always on the default stream.
+        torch.cuda.current_stream().synchronize()
         self.stats["d2h_s"] += time.perf_counter() - _t0
         self.stats["n"] += 1
         dist.send(self.host_buffer, dst=dst, tag=tag)
@@ -69,7 +81,13 @@ class TokenExchange:
         dist.recv(self.host_buffer, src=src, tag=tag)
         _t0 = time.perf_counter()
         self.device_tensor.copy_(self.host_buffer)
-        torch.cuda.synchronize()
+        # REQUIRED, not removable. The caller reads device_tensor on the
+        # next line (it feeds the embedding for the following decode step);
+        # without this the H2D copy may not have landed and the step runs on
+        # the PREVIOUS token — silently wrong output, no error.
+        #
+        # Same current-stream scoping as send() above, for the same reason.
+        torch.cuda.current_stream().synchronize()
         self.stats["h2d_s"] += time.perf_counter() - _t0
         self.stats["n"] += 1
 
