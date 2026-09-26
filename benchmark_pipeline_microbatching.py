@@ -340,11 +340,18 @@ def run_pipeline(
         decode_recv_bufs = None
 
         # (the "Catching Mitts").
-        # Pre allocation of memory with zeroes so when we receive actual data
-        # There is no need for separate memory allocation
+        # Pre-allocated so receiving actual data needs no fresh allocation.
+        #
+        # torch.empty, not torch.zeros: every receive overwrites the buffer in
+        # full (mig_transport_pipeline.py:575 copies staging over the whole
+        # tensor), so initial contents are never read. Zeroing here would also
+        # be a default-stream write to a buffer that the transport later writes
+        # from recv_stream with no cross-stream dependency — see the recv-buffer
+        # note in CLAUDE.md. Allocating uninitialised removes that second writer
+        # instead of trying to order it.
         if rank > 0:
             prefill_recv_bufs = [
-                torch.zeros(
+                torch.empty(
                     (mb_size, seq_length, config.hidden_size),
                     dtype=torch.float16,
                     device=device,
@@ -352,7 +359,7 @@ def run_pipeline(
                 for _ in range(num_microbatches)
             ]
             decode_recv_bufs = [
-                torch.zeros(
+                torch.empty(
                     (mb_size, 1, config.hidden_size),
                     dtype=torch.float16,
                     device=device,
@@ -524,11 +531,15 @@ def run_pipeline(
                     .contiguous()
                 )
 
-                # Rank > 0: reuse decode buffers, post *all* irecvs up front
+                # Rank > 0: reuse decode buffers, post *all* irecvs up front.
+                #
+                # No buf.zero_() here. It used to clear each buffer every step;
+                # that was dead work (the H2D overwrites every element before
+                # the sole reader below at `current_hidden = decode_recv_bufs`)
+                # and it was a default-stream write racing the transport's
+                # recv_stream write to the same memory. Removed rather than
+                # synchronised — see CLAUDE.md, "recv buffers are not zeroed".
                 if rank > 0:
-                    for buf in decode_recv_bufs:
-                        buf.zero_()
-
                     decode_recv_handles = [
                         dist.irecv(
                             decode_recv_bufs[i],
