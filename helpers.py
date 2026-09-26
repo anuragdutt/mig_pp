@@ -78,7 +78,13 @@ def load_specific_weights(
                 continue
 
             if rank == world_size - 1:
-                if "norm.weight" in key and "norm" in model_components:
+                # endswith, not `in`: "norm.weight" also matches the per-layer
+                # input_layernorm.weight / post_attention_layernorm.weight keys.
+                # With `in`, every decoder layernorm on the last rank was copied
+                # into the final norm and then `continue`d past the layer loader,
+                # so the per-layer norms were never loaded at all and the final
+                # norm held whichever layernorm the shard happened to yield last.
+                if key.endswith("model.norm.weight") and "norm" in model_components:
                     model_components["norm"].weight.data.copy_(value)
                     continue
                 if "lm_head.weight" in key and "lm_head" in model_components:
