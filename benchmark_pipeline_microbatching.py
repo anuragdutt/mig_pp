@@ -60,24 +60,26 @@ HEADS = 32
 SEQ_LEN = 64
 MAX_NEW_TOKENS = 512
 
-MAX_RUNS = 10
+MAX_RUNS = None
 
-# Restore the full sweep by uncommenting the other pairs and raising
-# MAX_RUNS / MAX_NEW_TOKENS above.
 BATCH_MB_PAIRS = [
-    (24, 24), (24, 8), (24, 4)
+    (8, 4), (8, 2),
+    (16, 8), (16, 4), (16, 2),
+    (32, 16), (32, 8), (32, 4), (32, 2),
+    (64, 32), (64, 16), (64, 8), (64, 4), (64, 2),
 ]
 
-# 3-slice: 3g.20gb + 2g.10gb + 2g.10gb
+
 MIG_UUIDS = [
-    "MIG-f06fb156-37b3-527c-8f93-23db507c9704",
-    "MIG-814fba5b-2690-5fcf-be42-2f26f702dfc1",
-    "MIG-7101d6b5-fe6e-594b-adab-2d6a259e8620",
-    "MIG-e9631527-ed47-5561-8ba1-c6b599a5284c)2fc"
+    "MIG-f2a62e63-2358-5ed3-85cd-3c81569a7fc9",
+    "MIG-bda8234f-9d90-524f-ab05-70616f8b6756",
+    "MIG-a9c4b928-9bb0-5ef4-8666-449d84763863",
+    "MIG-618239e6-9ca8-5040-8455-89fe8896f7c0"
 ]
+
 
 SLICE_GB = [20, 10, 5, 5]
-LAYER_LIMITS = [22, 14, 7, 7]
+LAYER_LIMITS = [18, 12, 5, 5]
 
 WORLD_SIZE = len(MIG_UUIDS)
 
