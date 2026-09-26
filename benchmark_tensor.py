@@ -56,10 +56,8 @@ def generate_valid_splits():
 
     # Try every possible allocation for GPU 0
     for h0 in range(1, LIMITS[0] + 1):
-
         # Try every possible allocation for GPU 1
         for h1 in range(1, LIMITS[1] + 1):
-
             # GPU 2 gets whatever remains
             h2 = TOTAL_HEADS - (h0 + h1)
 
@@ -183,7 +181,6 @@ def run_inference(rank, world_size, split_config, result_queue, device_uuid):
     # --- MAIN BENCHMARK LOOP ---
 
     for i in range(steps):
-
         # Allocate input tensor (ensure contiguous memory)
         x = torch.zeros(
             1, SEQ_LEN, HIDDEN_SIZE, device=device, dtype=torch.float16

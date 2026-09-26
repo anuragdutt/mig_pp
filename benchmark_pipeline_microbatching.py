@@ -6,8 +6,9 @@ import queue
 import logging
 import traceback
 import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
+from helpers import get_wiki_sample, load_specific_weights
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -22,10 +23,11 @@ from transformers.models.llama.modeling_llama import (
     LlamaRotaryEmbedding,
 )
 from transformers.utils import hub
-from datasets import load_dataset
 
-import mig_transport_pipeline_non_blocking as mig_transport
+
+import mig_transport_pipeline as mig_transport
 import dcgm_mem_monitor as monitor
+from token_exchange import TokenExchange
 
 # ---------------------------------------------------------------------------
 # LOGGING SETUP
@@ -58,52 +60,33 @@ HEADS = 32
 SEQ_LEN = 64
 MAX_NEW_TOKENS = 512
 
+MAX_RUNS = 10
+
+# Restore the full sweep by uncommenting the other pairs and raising
+# MAX_RUNS / MAX_NEW_TOKENS above.
 BATCH_MB_PAIRS = [
-    # (32, 16),
-    # (32, 8),
-    # (32, 4),
-    # (32, 2),
-    # # batch 64
-    # (64, 32),
-    # (64, 16),
-    # (64, 8),
-    # (64, 4),
-    # (64, 2),
-    (8, 4),
-    (8, 2),
-    (16, 8),
-    (16, 4),
-    (16, 2),
+    (24, 24), (24, 8), (24, 4)
 ]
 
-# --- MIG TOPOLOGY ---
-# Single source of truth for the slice layout. Everything downstream
-# (world_size, CSV column names, per-rank memory reporting) is derived from
-# this list, so switching topologies means editing only this block.
-#
-# !!! REPLACE THESE UUIDs !!! They are per-card. After creating the MIG
-# instances on a new box, run `nvidia-smi -L` and paste the new ones here,
-# in the same order as SLICE_GB.
+# 3-slice: 3g.20gb + 2g.10gb + 2g.10gb
 MIG_UUIDS = [
-    "MIG-REPLACE-ME-SLICE0-20GB",  # Rank 0: 20GB (3g.20gb)
-    "MIG-REPLACE-ME-SLICE1-10GB",  # Rank 1: 10GB (2g.10gb)
-    "MIG-REPLACE-ME-SLICE2-10GB",  # Rank 2: 10GB (2g.10gb)
+    "MIG-f06fb156-37b3-527c-8f93-23db507c9704",
+    "MIG-814fba5b-2690-5fcf-be42-2f26f702dfc1",
+    "MIG-7101d6b5-fe6e-594b-adab-2d6a259e8620",
+    "MIG-e9631527-ed47-5561-8ba1-c6b599a5284c)2fc"
 ]
 
-# Slice capacity in GB, parallel to MIG_UUIDS. Drives CSV column naming.
-SLICE_GB = [20, 10, 10]
+SLICE_GB = [20, 10, 5, 5]
+LAYER_LIMITS = [22, 14, 7, 7]
 
 WORLD_SIZE = len(MIG_UUIDS)
 
-# Max layers each slice can hold. Roughly proportional to slice VRAM after
-# subtracting KV cache + activation headroom.
-#
-# Vicuna-7B: 32 layers, ~0.42GB/layer fp16 (4096 hidden).
-#   20GB slice: also holds the embedding table (~0.26GB) -> generous cap
-#   10GB slice: ~0.42GB/layer, leave ~4GB for KV cache + activations
-# Caps are upper bounds for the search, not targets — the enumerator still
-# has to make them sum to TOTAL_LAYERS.
-LAYER_LIMITS = [22, 14, 14]
+assert len(SLICE_GB) == WORLD_SIZE, "SLICE_GB must have one entry per rank"
+assert len(LAYER_LIMITS) == WORLD_SIZE, "LAYER_LIMITS must have one entry per rank"
+assert sum(LAYER_LIMITS) >= TOTAL_LAYERS, (
+    f"LAYER_LIMITS sums to {sum(LAYER_LIMITS)} but the model has "
+    f"{TOTAL_LAYERS} layers — no split can fit"
+)
 
 # Ordering constraint on splits. The two 10GB slices are identical, so
 # permuting layers between them produces duplicate configurations with
@@ -119,129 +102,6 @@ ENFORCE_SLICE_ORDERING = True
 PREFILL_TAG_BASE = 1000
 DECODE_TAG_BASE = 2000
 TOKENS_TAG_BASE = 9000
-
-# ---------------------------------------------------------------------------
-# DATA LOADING
-# ---------------------------------------------------------------------------
-
-
-# COMPLETE
-def get_wiki_sample(batch_size: int) -> torch.Tensor:
-    log.info(f"Loading WikiText... (SEQ_LEN={SEQ_LEN}, BATCH={batch_size})")
-    try:
-        dataset = load_dataset(
-            "wikitext", "wikitext-2-raw-v1", split="test", streaming=True
-        )
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-        tokenizer.pad_token = tokenizer.eos_token
-
-        text_sample = ""
-        for item in dataset:
-            if len(item["text"]) > 100:
-                text_sample = item["text"]
-                break
-
-        inputs = tokenizer(
-            text_sample,
-            return_tensors="pt",
-            max_length=SEQ_LEN,
-            padding="max_length",
-            truncation=True,
-        )
-        return inputs.input_ids.repeat(batch_size, 1)
-    except Exception:
-        log.warning("WikiText unavailable. Using random token IDs.")
-        return torch.randint(0, 32000, (batch_size, SEQ_LEN))
-
-
-# ---------------------------------------------------------------------------
-# WEIGHT LOADING
-# ---------------------------------------------------------------------------
-
-
-# COMPLETE
-def load_specific_weights(
-    rank: int,
-    world_size: int,
-    my_layers: nn.ModuleList,
-    my_layer_indices: List[int],
-    model_components: Dict[str, nn.Module],
-) -> None:
-    log.info(f"[Rank {rank}] Loading weights...")
-
-    try:
-        cached_index = hub.cached_file(MODEL_NAME, "pytorch_model.bin.index.json")
-        folder_path = os.path.dirname(cached_index)
-        with open(cached_index, "r") as f:
-            index_data = json.load(f)
-        weight_map = index_data["weight_map"]
-        shard_files = sorted(set(weight_map.values()))
-    except Exception:
-        log.warning(f"[Rank {rank}] Weight map not found. Skipping.")
-        return
-
-    layer_to_local: Dict[int, int] = {idx: i for i, idx in enumerate(my_layer_indices)}
-
-    for shard_file in tqdm(shard_files, desc=f"Rank {rank} shards", leave=False):
-        file_path = os.path.join(folder_path, shard_file)
-        state_dict: Dict[str, torch.Tensor] = torch.load(file_path, map_location="cpu")
-
-        for key, value in state_dict.items():
-            if rank == 0 and "embed_tokens" in key and "embed" in model_components:
-                model_components["embed"].weight.data.copy_(value)
-                continue
-
-            # Final norm + lm_head live on the LAST rank, whatever that is.
-            # (This was hardcoded to `rank == 3`, which silently loaded
-            # nothing once world_size changed — no error, just garbage
-            # output from an untrained lm_head.)
-            if rank == world_size - 1:
-                if "norm.weight" in key and "norm" in model_components:
-                    model_components["norm"].weight.data.copy_(value)
-                    continue
-                if "lm_head.weight" in key and "lm_head" in model_components:
-                    model_components["lm_head"].weight.data.copy_(value)
-                    continue
-
-            if "layers." in key:
-                parts = key.split(".")
-                try:
-                    layer_idx = int(parts[2])
-                except ValueError:
-                    continue
-
-                local_idx = layer_to_local.get(layer_idx)
-                if local_idx is None:
-                    continue
-
-                module = my_layers[local_idx]
-                local_key = ".".join(parts[3:])
-
-                try:
-                    sub_mod = module
-                    sub_parts = local_key.split(".")
-                    for sp in sub_parts[:-1]:
-                        sub_mod = getattr(sub_mod, sp)
-                    getattr(sub_mod, sub_parts[-1]).data.copy_(value)
-                except AttributeError:
-                    pass
-
-        del state_dict
-        gc.collect()
-        torch.cuda.empty_cache()
-
-    log.info(f"[Rank {rank}] Weights loaded.")
-
-
-# ---------------------------------------------------------------------------
-# FORWARD PASS HELPER
-# ---------------------------------------------------------------------------
-
-
-import torch
-import torch.nn as nn
-from typing import Optional, Tuple
-from transformers import DynamicCache
 
 
 # This function was manually implemented to bypass a tensor shape mismatch
@@ -270,7 +130,6 @@ def forward_through_layers(
 
     # Loop through every single layer assigned to this specific GPU
     for layer in layers:
-
         # 1. SAVE THE RESIDUAL (Skip Connection)
         # We keep an untouched copy of the data. If the complex math in this layer
         # degrades the signal, the network can fall back on this original copy.
@@ -417,12 +276,21 @@ def run_pipeline(
             m.eval()
         layers.eval()
 
-        # RoPE (Rotary Position Embeddings)/
-        # This single line creates the mathematical compass (the sine and cosine angles)
-        # that will be passed into every single layer so the AI understands word order.
-        rotary_emb = LlamaRotaryEmbedding(config=config, device=device)
+        # RoPE (Rotary Position Embeddings)
+        rotary_embedding = LlamaRotaryEmbedding(config=config, device=device)
+
+        # Weight loading reads every shard from disk and copies tensor by
+        # tensor; on a cold page cache it dominates process startup and is the
+        # reason a naive nsys capture is mostly this phase. Timed so the log
+        # says so outright instead of leaving it to be inferred.
+        _wl_t0 = time.perf_counter()
         load_specific_weights(
-            rank, world_size, layers, my_layer_indices, model_components
+            rank, world_size, MODEL_NAME, layers, my_layer_indices, model_components
+        )
+        _wl_s = time.perf_counter() - _wl_t0
+        log.info(
+            f"[B01][Rank {rank}] weight load: {_wl_s:.1f}s "
+            f"({len(my_layer_indices)} layers)"
         )
 
         # Deep clean after weight loading
@@ -443,6 +311,17 @@ def run_pipeline(
         # waiting to hold the final predicted words for all batch_size amt of sentences.
         next_tokens = torch.zeros((batch_size, 1), dtype=torch.long, device=device)
 
+        # next_tokens is on the GPU but the process group is gloo, which is
+        # CPU-only: it passes tensor.data_ptr() to writev(2), and a device
+        # pointer there is EFAULT ("writev ...: Bad address"), killing the
+        # rank and taking the others with it. Activations avoid this because
+        # dist.isend is intercepted by the SHM engine and staged D2H;
+        # patched_send/patched_recv deliberately bypass that for this small
+        # control tensor, so the staging belongs here. TokenExchange owns one
+        # pinned host buffer for the whole run and times every copy.
+        # Verified by probe_gloo_send.py (T1-T7, 512-exchange decode loop).
+        tok_exchange = TokenExchange(next_tokens)
+
         # Standard prefill mask code
         prefill_mask = torch.full(
             (1, 1, seq_length, seq_length),
@@ -456,11 +335,18 @@ def run_pipeline(
         decode_recv_bufs = None
 
         # (the "Catching Mitts").
-        # Pre allocation of memory with zeroes so when we receive actual data
-        # There is no need for separate memory allocation
+        # Pre-allocated so receiving actual data needs no fresh allocation.
+        #
+        # torch.empty, not torch.zeros: every receive overwrites the buffer in
+        # full (mig_transport_pipeline.py:575 copies staging over the whole
+        # tensor), so initial contents are never read. Zeroing here would also
+        # be a default-stream write to a buffer that the transport later writes
+        # from recv_stream with no cross-stream dependency — see the recv-buffer
+        # note in CLAUDE.md. Allocating uninitialised removes that second writer
+        # instead of trying to order it.
         if rank > 0:
             prefill_recv_bufs = [
-                torch.zeros(
+                torch.empty(
                     (mb_size, seq_length, config.hidden_size),
                     dtype=torch.float16,
                     device=device,
@@ -468,7 +354,7 @@ def run_pipeline(
                 for _ in range(num_microbatches)
             ]
             decode_recv_bufs = [
-                torch.zeros(
+                torch.empty(
                     (mb_size, 1, config.hidden_size),
                     dtype=torch.float16,
                     device=device,
@@ -481,16 +367,56 @@ def run_pipeline(
         # Beginning of prefill loop
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)
+
+        # Per-decode-step timing. The KV cache grows from seq_length to
+        # seq_length + MAX_NEW_TOKENS over the run, so attention reads more
+        # cache every step and per-step cost drifts upward — measured at
+        # +10% on ACK wait and +43% on rank1 D2H block over 512 steps.
+        # A single total_latency_ms averages that drift away, so record each
+        # step separately and let the analysis see the curve.
+        #
+        # Events are pre-allocated: creating them inside the loop would add
+        # allocation to the very thing being measured.
+        step_start_events = [
+            torch.cuda.Event(enable_timing=True) for _ in range(MAX_NEW_TOKENS)
+        ]
+        step_end_events = [
+            torch.cuda.Event(enable_timing=True) for _ in range(MAX_NEW_TOKENS)
+        ]
+
+        # Per-microbatch COMPUTE timing (the layer stack only — no transport).
+        # Nothing else measures this directly: the ACK wait [T11] reflects the
+        # downstream rank's compute, but only indirectly and only as seen from
+        # the sender. Measuring it here makes that inference checkable.
+        #
+        # One pair per (step, microbatch), flattened. Index: step_idx * n + mb.
+        # Pre-allocated for the same reason as the per-step events, and read
+        # back only after the final synchronize — calling elapsed_time() inside
+        # the loop would force a sync and distort what it measures.
+        _n_compute = (MAX_NEW_TOKENS + 1) * num_microbatches  # +1 for prefill
+        compute_start_events = [
+            torch.cuda.Event(enable_timing=True) for _ in range(_n_compute)
+        ]
+        compute_end_events = [
+            torch.cuda.Event(enable_timing=True) for _ in range(_n_compute)
+        ]
+
+        # Prefill/decode phase split. total_latency_ms covers both, but they
+        # are different regimes — prefill moves MB-scale activations and is
+        # compute-bound in mb_size; decode moves KB and is bound by weight
+        # streaming, which depends on microbatch COUNT and not size.
+        prefill_end_event = torch.cuda.Event(enable_timing=True)
+
+        # Barrier idle. Each barrier is a rendezvous, so a rank that arrives
+        # early sits there. That idle time is pipeline imbalance and is
+        # otherwise invisible — it is where a fast rank's time actually goes.
+        barrier_wait_s = {"post_prefill": 0.0, "final": 0.0}
+
         start_event.record()
 
         with torch.no_grad():
-            # =========================================================
-            # PREFILL — pipelined across microbatches
-            # =========================================================
-
             # Rank > 0: post *all* irecvs up front (max overlap)
             if rank > 0:
-
                 prefill_recv_handles = [
                     dist.irecv(
                         prefill_recv_bufs[i],
@@ -519,8 +445,10 @@ def run_pipeline(
                 position_ids = torch.arange(
                     0, seq_length, dtype=torch.long, device=device
                 ).unsqueeze(0)
-                position_embeddings = rotary_emb(current_hidden, position_ids)
+                position_embeddings = rotary_embedding(current_hidden, position_ids)
 
+                _ci = mb_idx  # prefill occupies slots [0, num_microbatches)
+                compute_start_events[_ci].record()
                 current_hidden = forward_through_layers(
                     layers,
                     current_hidden,
@@ -528,6 +456,7 @@ def run_pipeline(
                     prefill_mask,
                     past_key_values_list[mb_idx],
                 )
+                compute_end_events[_ci].record()
 
                 if rank == world_size - 1:
                     normed = model_components["norm"](current_hidden)
@@ -557,16 +486,38 @@ def run_pipeline(
             # Share next_tokens rank2 → rank0 (tagged)
             tok_tag = TOKENS_TAG_BASE + 0
             if rank == world_size - 1:
-                dist.send(next_tokens, dst=0, tag=tok_tag)
+                tok_exchange.send(dst=0, tag=tok_tag)
             elif rank == 0:
-                dist.recv(next_tokens, src=world_size - 1, tag=tok_tag)
+                tok_exchange.recv(src=world_size - 1, tag=tok_tag)
 
+            # Close prefill before the barrier so the phase split measures
+            # prefill work, not prefill + waiting for the other ranks.
+            prefill_end_event.record()
+
+            _bt0 = time.perf_counter()
             dist.barrier()
+            barrier_wait_s["post_prefill"] = time.perf_counter() - _bt0
 
             # =========================================================
             # DECODE — pipelined across microbatches
             # =========================================================
             for step in range(1, MAX_NEW_TOKENS + 1):
+                step_start_events[step - 1].record()
+
+                # Step boundary marker. The transport log interleaves all
+                # ranks and encodes the step inside the message tag
+                # (DECODE_TAG_BASE + step*10_000 + mb_idx), so segmenting it
+                # by step otherwise means doing tag arithmetic. This makes
+                # each step greppable directly.
+                _tlog_step = logging.getLogger("mig_transport")
+                _tlog_step.info(
+                    "[T32][rank%d] ===== DECODE STEP %d/%d (n=%d) =====",
+                    rank,
+                    step,
+                    MAX_NEW_TOKENS,
+                    num_microbatches,
+                )
+
                 position_ids = (
                     torch.tensor(
                         [[seq_length + step - 1]], dtype=torch.long, device=device
@@ -575,11 +526,15 @@ def run_pipeline(
                     .contiguous()
                 )
 
-                # Rank > 0: reuse decode buffers, post *all* irecvs up front
+                # Rank > 0: reuse decode buffers, post *all* irecvs up front.
+                #
+                # No buf.zero_() here. It used to clear each buffer every step;
+                # that was dead work (the H2D overwrites every element before
+                # the sole reader below at `current_hidden = decode_recv_bufs`)
+                # and it was a default-stream write racing the transport's
+                # recv_stream write to the same memory. Removed rather than
+                # synchronised — see CLAUDE.md, "recv buffers are not zeroed".
                 if rank > 0:
-                    for buf in decode_recv_bufs:
-                        buf.zero_()
-
                     decode_recv_handles = [
                         dist.irecv(
                             decode_recv_bufs[i],
@@ -604,8 +559,10 @@ def run_pipeline(
                         decode_recv_handles[mb_idx].wait()
                         current_hidden = decode_recv_bufs[mb_idx]
 
-                    position_embeddings = rotary_emb(current_hidden, position_ids)
+                    position_embeddings = rotary_embedding(current_hidden, position_ids)
 
+                    _ci = step * num_microbatches + mb_idx
+                    compute_start_events[_ci].record()
                     current_hidden = forward_through_layers(
                         layers,
                         current_hidden,
@@ -613,6 +570,7 @@ def run_pipeline(
                         None,
                         past_key_values_list[mb_idx],
                     )
+                    compute_end_events[_ci].record()
 
                     if rank == world_size - 1:
                         normed = model_components["norm"](current_hidden)
@@ -637,16 +595,98 @@ def run_pipeline(
                 if step < MAX_NEW_TOKENS:
                     tok_tag = TOKENS_TAG_BASE + step
                     if rank == world_size - 1:
-                        dist.send(next_tokens, dst=0, tag=tok_tag)
+                        tok_exchange.send(dst=0, tag=tok_tag)
                     elif rank == 0:
-                        dist.recv(next_tokens, src=world_size - 1, tag=tok_tag)
+                        tok_exchange.recv(src=world_size - 1, tag=tok_tag)
 
+                # Close the step AFTER the token exchange: that exchange is
+                # part of the step's critical path (rank0 cannot start the
+                # next step until it lands), so excluding it would understate
+                # the step and hide the serialization.
+                step_end_events[step - 1].record()
+
+        _bt0 = time.perf_counter()
         dist.barrier()
+        barrier_wait_s["final"] = time.perf_counter() - _bt0
+
         end_event.record()
+        # REQUIRED, not removable, and deliberately full-device. Every
+        # elapsed_time() call below reads CUDA events recorded across the
+        # default stream AND the transport engine's copy_stream; querying an
+        # event that has not completed raises or returns garbage. This is the
+        # one place a whole-device drain is the correct tool.
+        #
+        # Costs nothing measurable: it runs once, after the final barrier,
+        # outside the timed region. Not in the decode loop.
         torch.cuda.synchronize()
 
         total_latency_ms = start_event.elapsed_time(end_event)
         log.info(f"[Rank {rank}] Finished. Latency: {total_latency_ms:.0f} ms")
+
+        # Read back per-step times. Safe here: the torch.cuda.synchronize()
+        # above guarantees every recorded event has completed.
+        step_latencies_ms = [
+            step_start_events[i].elapsed_time(step_end_events[i])
+            for i in range(MAX_NEW_TOKENS)
+        ]
+        if step_latencies_ms:
+            _first = step_latencies_ms[0]
+            _last = step_latencies_ms[-1]
+            _drift = ((_last / _first) - 1.0) * 100.0 if _first > 0 else 0.0
+            log.info(
+                f"[B02][Rank {rank}] decode step latency: first={_first:.2f}ms "
+                f"last={_last:.2f}ms drift={_drift:+.1f}% "
+                f"mean={sum(step_latencies_ms) / len(step_latencies_ms):.2f}ms"
+            )
+
+        # Phase split: prefill vs decode.
+        prefill_ms = start_event.elapsed_time(prefill_end_event)
+        decode_ms = total_latency_ms - prefill_ms
+        log.info(
+            f"[B03][Rank {rank}] phase split: prefill={prefill_ms:.1f}ms "
+            f"({prefill_ms / total_latency_ms * 100:.1f}%) "
+            f"decode={decode_ms:.1f}ms "
+            f"({decode_ms / total_latency_ms * 100:.1f}%)"
+        )
+
+        # Per-microbatch compute (layer stack only, no transport). Compare
+        # against the downstream rank's [T11] ACK wait: if they match, the ACK
+        # wait really is downstream compute rather than a transport cost.
+        compute_ms = [
+            compute_start_events[i].elapsed_time(compute_end_events[i])
+            for i in range(_n_compute)
+        ]
+        _pre_compute = compute_ms[:num_microbatches]
+        _dec_compute = compute_ms[num_microbatches:]
+        if _pre_compute:
+            log.info(
+                f"[B04][Rank {rank}] prefill compute/mb: "
+                f"mean={sum(_pre_compute) / len(_pre_compute):.2f}ms "
+                f"total={sum(_pre_compute):.1f}ms over {len(_pre_compute)} mb"
+            )
+        if _dec_compute:
+            _sorted = sorted(_dec_compute)
+            log.info(
+                f"[B05][Rank {rank}] decode compute/mb: "
+                f"mean={sum(_dec_compute) / len(_dec_compute):.2f}ms "
+                f"median={_sorted[len(_sorted) // 2]:.2f}ms "
+                f"first={_dec_compute[0]:.2f}ms last={_dec_compute[-1]:.2f}ms "
+                f"total={sum(_dec_compute) / 1000:.1f}s over {len(_dec_compute)} mb"
+            )
+
+        # Barrier idle — where a fast rank's time actually goes.
+        log.info(
+            f"[B06][Rank {rank}] barrier idle: "
+            f"post_prefill={barrier_wait_s['post_prefill'] * 1000:.1f}ms "
+            f"final={barrier_wait_s['final'] * 1000:.1f}ms"
+        )
+
+        # next_tokens staging cost — the price of routing the token exchange
+        # around gloo's CPU-only transport. Reported on its own line rather
+        # than folded into the step, so it stays checkable: measured at
+        # ~0.04ms per exchange against ~745ms ACK waits, i.e. noise. If this
+        # ever stops being noise, it will be visible here first.
+        log.info(f"[B07][Rank {rank}] next_tokens staging: {tok_exchange.summary()}")
 
         # Per-rank transport verdict: did the async copies actually overlap?
         # Grep the log for T28 to get one VERDICT line per rank.
@@ -657,7 +697,35 @@ def run_pipeline(
         if rank == 0:
             result_queue.put(("latency", total_latency_ms))
 
+        # Every rank reports its own curve — the stages are asymmetric (the
+        # bottleneck rank is the one that sets the step time), so rank0 alone
+        # would not show where the drift comes from.
+        result_queue.put((f"step_latencies_rank{rank}", step_latencies_ms))
+        result_queue.put(
+            (
+                f"phase_rank{rank}",
+                {
+                    "prefill_ms": prefill_ms,
+                    "decode_ms": decode_ms,
+                    "weight_load_s": _wl_s,
+                    "barrier_post_prefill_ms": barrier_wait_s["post_prefill"] * 1000,
+                    "barrier_final_ms": barrier_wait_s["final"] * 1000,
+                    "decode_compute_mean_ms": (
+                        sum(_dec_compute) / len(_dec_compute) if _dec_compute else 0.0
+                    ),
+                    "prefill_compute_mean_ms": (
+                        sum(_pre_compute) / len(_pre_compute) if _pre_compute else 0.0
+                    ),
+                },
+            )
+        )
+
         dist.destroy_process_group()
+
+        # Release SHM segments. Without this each run leaves NUM_SLOTS
+        # segments per rank in /dev/shm; over a long sweep they accumulate
+        # until allocation fails.
+        mig_transport.cleanup()
 
     except torch.cuda.OutOfMemoryError:
         log.error(f"[Rank {rank}] OOM")
@@ -666,11 +734,19 @@ def run_pipeline(
             dist.destroy_process_group()
         except Exception:
             pass
+        try:
+            mig_transport.cleanup()
+        except Exception:
+            pass
 
     except Exception:
         log.error(f"[Rank {rank}] Unexpected exception:\n{traceback.format_exc()}")
         try:
             dist.destroy_process_group()
+        except Exception:
+            pass
+        try:
+            mig_transport.cleanup()
         except Exception:
             pass
 
@@ -686,28 +762,39 @@ def generate_layer_splits():
     subject to per-slice capacity (LAYER_LIMITS) and the symmetry-breaking
     ordering constraint.
 
-    Topology: 20GB / 10GB / 10GB. The two 10GB slices are interchangeable,
-    so [16, 9, 7] and [16, 7, 9] would benchmark identically — requiring
-    l1 >= l2 keeps only one of each such pair.
+    Works for any WORLD_SIZE: recurses over ranks 0..n-2 and lets the last
+    rank take the remainder. Ordering rules come from SLICE_GB — see
+    ENFORCE_SLICE_ORDERING above.
     """
     valid_splits = []
+    n = WORLD_SIZE
 
-    for l0 in range(1, LAYER_LIMITS[0] + 1):
-        for l1 in range(1, LAYER_LIMITS[1] + 1):
-            # Last slice takes whatever remains — no need to enumerate it.
-            l2 = TOTAL_LAYERS - (l0 + l1)
+    def _ok(prev_idx, prev_layers, layers):
+        """Ordering constraint between rank prev_idx and the next rank."""
+        if not ENFORCE_SLICE_ORDERING:
+            return True
+        if SLICE_GB[prev_idx] == SLICE_GB[prev_idx + 1]:
+            return prev_layers >= layers
+        return prev_layers > layers
 
-            if not (1 <= l2 <= LAYER_LIMITS[2]):
+    def _recurse(rank, assigned, remaining):
+        # Last rank takes whatever is left — no need to enumerate it.
+        if rank == n - 1:
+            if not (1 <= remaining <= LAYER_LIMITS[rank]):
+                return
+            if assigned and not _ok(rank - 1, assigned[-1], remaining):
+                return
+            valid_splits.append(assigned + [remaining])
+            return
+
+        # Leave at least one layer for each rank still to come.
+        max_here = min(LAYER_LIMITS[rank], remaining - (n - rank - 1))
+        for count in range(1, max_here + 1):
+            if assigned and not _ok(rank - 1, assigned[-1], count):
                 continue
+            _recurse(rank + 1, assigned + [count], remaining - count)
 
-            if ENFORCE_SLICE_ORDERING:
-                # 20GB gets the most; the two identical 10GB slices are
-                # ordered only to break the duplicate-permutation symmetry.
-                if not (l0 > l1 >= l2):
-                    continue
-
-            valid_splits.append([l0, l1, l2])
-
+    _recurse(0, [], TOTAL_LAYERS)
     return valid_splits
 
 
@@ -726,7 +813,9 @@ def main():
     log.info(f"Transport log stamp: {os.environ['MIG_LOG_STAMP']}")
 
     log.info("Setting up DCGM monitor group...")
-    monitor.setup_dcgm_group()
+    # Pass the topology so the monitor can map DCGM entities to the right
+    # ranks by MIG UUID, rather than a hardcoded entity->rank table.
+    monitor.setup_dcgm_group(mig_uuids=MIG_UUIDS, slice_gb=SLICE_GB)
 
     selected_splits = generate_layer_splits()
 
@@ -735,150 +824,248 @@ def main():
     except RuntimeError:
         pass
 
-    total_runs = len(selected_splits) * len(BATCH_MB_PAIRS)
+    # Flatten the sweep into an explicit list so MAX_RUNS can cap it cleanly.
+    run_plan = [
+        (split, batch_size, mb_size)
+        for split in selected_splits
+        for batch_size, mb_size in BATCH_MB_PAIRS
+    ]
+    full_sweep_size = len(run_plan)
+
+    if MAX_RUNS is not None and full_sweep_size > MAX_RUNS:
+        run_plan = run_plan[:MAX_RUNS]
+        log.warning(
+            f"MAX_RUNS={MAX_RUNS} is capping this sweep: running {len(run_plan)} "
+            f"of {full_sweep_size} configurations. Set MAX_RUNS=None for the "
+            f"full sweep."
+        )
+
+    total_runs = len(run_plan)
     results = []
+    # Per-decode-step latencies, one row per (config, rank, step). Kept out of
+    # the main results CSV because it is MAX_NEW_TOKENS * WORLD_SIZE rows per
+    # configuration — the summary table stays readable, the curve lives here.
+    step_latency_rows = []
     current_run = 1
 
-    for split in selected_splits:
-        for batch_size, mb_size in BATCH_MB_PAIRS:
-            log.info(
-                f"[{current_run}/{total_runs}] Split {split} | "
-                f"Batch: {batch_size} | Microbatch: {mb_size} | "
-                f"Microbatches: {batch_size // mb_size}"
-            )
+    for split, batch_size, mb_size in run_plan:
+        log.info(
+            f"[{current_run}/{total_runs}] Split {split} | "
+            f"Batch: {batch_size} | Microbatch: {mb_size} | "
+            f"Microbatches: {batch_size // mb_size}"
+        )
 
-            input_ids_seed = get_wiki_sample(batch_size)
+        input_ids_seed = get_wiki_sample(batch_size, SEQ_LEN, MODEL_NAME)
 
-            label = f"s{'_'.join(map(str, split))}_b{batch_size}_mb{mb_size}"
-            monitor.set_label(label)
-            monitor._samples.clear()
-            monitor.start()
+        label = f"s{'_'.join(map(str, split))}_b{batch_size}_mb{mb_size}"
+        monitor.set_label(label)
+        monitor.clear()
+        monitor.start()
 
-            q = mp.Queue()
-            procs: list[mp.Process] = []
+        q = mp.Queue()
+        procs: list[mp.Process] = []
 
-            try:
-                for rank in range(WORLD_SIZE):
-                    p = mp.Process(
-                        target=run_pipeline,
-                        args=(
-                            rank,
-                            WORLD_SIZE,
-                            split,
-                            q,
-                            MIG_UUIDS[rank],
-                            input_ids_seed,
-                            mb_size,
-                        ),
-                    )
-                    p.start()
-                    procs.append(p)
+        try:
+            for rank in range(WORLD_SIZE):
+                p = mp.Process(
+                    target=run_pipeline,
+                    args=(
+                        rank,
+                        WORLD_SIZE,
+                        split,
+                        q,
+                        MIG_UUIDS[rank],
+                        input_ids_seed,
+                        mb_size,
+                    ),
+                )
+                p.start()
+                procs.append(p)
 
-                JOIN_TIMEOUT_S = 1200
-                for p in procs:
-                    p.join(timeout=JOIN_TIMEOUT_S)
-
-                hung = [p for p in procs if p.is_alive()]
-                if hung:
-                    log.error(
-                        "Hang detected: ranks still alive after timeout: "
-                        + ", ".join(str(procs.index(p)) for p in hung)
-                    )
-                    for p in hung:
-                        p.terminate()
-                    for p in hung:
-                        p.join(timeout=10)
-
-                monitor.stop()
-
-                # Sample row: (timestamp, label, gpu_mb, gi0_mb, gi1_mb, ...)
-                # One gi<N>_mb column per MIG slice, in MIG_UUIDS order.
-                run_samples = list(monitor._samples)
-                # print("rum samples", run_samples)
-                peak_per_rank = [
-                    max((row[3 + r] for row in run_samples), default=0)
-                    for r in range(WORLD_SIZE)
-                ]
-                avg_per_rank = [
-                    (
-                        (sum(row[3 + r] for row in run_samples) / len(run_samples))
-                        if run_samples
-                        else 0
-                    )
-                    for r in range(WORLD_SIZE)
-                ]
-
-                exit_codes = [p.exitcode for p in procs]
-                queue_items = {}
-                try:
-                    while True:
-                        key, val = q.get(timeout=2.0)
-                        queue_items[key] = val
-                except queue.Empty:
-                    pass
-
-                base_row = {
-                    "split": str(split),
-                    "batch_size": batch_size,
-                    "microbatch_size": mb_size,
-                    "num_microbatches": batch_size // mb_size,
-                    "max_new_tokens": MAX_NEW_TOKENS,
-                    # Per-slice memory columns, generated from SLICE_GB so
-                    # they stay correct when the topology changes.
-                    **{
-                        f"peak_rank{r}_{SLICE_GB[r]}gb_mb": peak_per_rank[r]
-                        for r in range(WORLD_SIZE)
-                    },
-                    **{
-                        f"avg_rank{r}_{SLICE_GB[r]}gb_mb": round(avg_per_rank[r])
-                        for r in range(WORLD_SIZE)
-                    },
-                    "total_latency_ms": None,
-                    "status": None,
-                }
-
-                if hung:
-                    base_row["status"] = "hang"
-
-                elif "oom" in queue_items:
-                    oom_rank = queue_items["oom"]
-                    log.warning(f"OOM on Rank {oom_rank} — skipping.")
-                    base_row["status"] = f"OOM_rank{oom_rank}"
-
-                elif any((code is not None) and (code != 0) for code in exit_codes):
-                    log.error(f"Crashed. Exit codes: {exit_codes}")
-                    base_row["status"] = "crash"
-
-                elif "latency" in queue_items:
-                    latency = queue_items["latency"]
-                    log.info(f"Total latency:     {latency:.0f} ms")
-                    log.info(f"Peak 5GB memory:   {peak_per_rank[3]} MB")
-                    log.info(f"Avg  5GB memory:   {avg_per_rank[3]:.0f} MB")
-                    base_row["total_latency_ms"] = latency
-                    base_row["status"] = "ok"
-
-                else:
-                    log.warning("Timeout — no results received.")
-                    base_row["status"] = "timeout"
-
-                results.append(base_row)
-
-            finally:
-                try:
-                    monitor.stop()
-                except Exception:
-                    pass
-                q.close()
-                q.join_thread()
-
+            JOIN_TIMEOUT_S = 1200
             for p in procs:
-                if p.is_alive():
-                    p.terminate()
+                p.join(timeout=JOIN_TIMEOUT_S)
 
-            current_run += 1
+            hung = [p for p in procs if p.is_alive()]
+            if hung:
+                log.error(
+                    "Hang detected: ranks still alive after timeout: "
+                    + ", ".join(str(procs.index(p)) for p in hung)
+                )
+                for p in hung:
+                    p.terminate()
+                for p in hung:
+                    p.join(timeout=10)
+
+            monitor.stop()
+
+            # Sample row: (timestamp, label, gpu_mb, gi0_mb, gi1_mb, ...)
+            # One gi<N>_mb column per MIG slice, in MIG_UUIDS order.
+            run_samples = list(monitor._samples)
+            # print("rum samples", run_samples)
+            peak_per_rank = [
+                max((row[3 + r] for row in run_samples), default=0)
+                for r in range(WORLD_SIZE)
+            ]
+            avg_per_rank = [
+                (
+                    (sum(row[3 + r] for row in run_samples) / len(run_samples))
+                    if run_samples
+                    else 0
+                )
+                for r in range(WORLD_SIZE)
+            ]
+
+            exit_codes = [p.exitcode for p in procs]
+            queue_items = {}
+            try:
+                while True:
+                    key, val = q.get(timeout=2.0)
+                    queue_items[key] = val
+            except queue.Empty:
+                pass
+
+            # Harvest per-step curves before branching on run outcome, so a
+            # partial run still yields whatever steps completed.
+            for _r in range(WORLD_SIZE):
+                for _step_idx, _ms in enumerate(
+                    queue_items.get(f"step_latencies_rank{_r}", []), start=1
+                ):
+                    step_latency_rows.append(
+                        {
+                            "split": str(split),
+                            "batch_size": batch_size,
+                            "microbatch_size": mb_size,
+                            "num_microbatches": batch_size // mb_size,
+                            "rank": _r,
+                            "step": _step_idx,
+                            "step_latency_ms": _ms,
+                        }
+                    )
+
+            base_row = {
+                "split": str(split),
+                "batch_size": batch_size,
+                "microbatch_size": mb_size,
+                "num_microbatches": batch_size // mb_size,
+                "max_new_tokens": MAX_NEW_TOKENS,
+                # Per-slice memory columns, generated from SLICE_GB so
+                # they stay correct when the topology changes.
+                **{
+                    f"peak_rank{r}_{SLICE_GB[r]}gb_mb": peak_per_rank[r]
+                    for r in range(WORLD_SIZE)
+                },
+                **{
+                    f"avg_rank{r}_{SLICE_GB[r]}gb_mb": round(avg_per_rank[r])
+                    for r in range(WORLD_SIZE)
+                },
+                "total_latency_ms": None,
+                "status": None,
+                # Phase/compute breakdown from the bottleneck-visible ranks.
+                # Per-rank so an imbalanced split is visible in the summary
+                # table rather than only in the transport log.
+                **{
+                    f"prefill_ms_rank{r}": queue_items.get(f"phase_rank{r}", {}).get(
+                        "prefill_ms"
+                    )
+                    for r in range(WORLD_SIZE)
+                },
+                **{
+                    f"decode_ms_rank{r}": queue_items.get(f"phase_rank{r}", {}).get(
+                        "decode_ms"
+                    )
+                    for r in range(WORLD_SIZE)
+                },
+                **{
+                    f"decode_compute_mean_ms_rank{r}": queue_items.get(
+                        f"phase_rank{r}", {}
+                    ).get("decode_compute_mean_ms")
+                    for r in range(WORLD_SIZE)
+                },
+                **{
+                    f"barrier_idle_ms_rank{r}": (
+                        queue_items.get(f"phase_rank{r}", {}).get(
+                            "barrier_post_prefill_ms", 0.0
+                        )
+                        or 0.0
+                    )
+                    + (
+                        queue_items.get(f"phase_rank{r}", {}).get(
+                            "barrier_final_ms", 0.0
+                        )
+                        or 0.0
+                    )
+                    for r in range(WORLD_SIZE)
+                },
+                **{
+                    f"weight_load_s_rank{r}": queue_items.get(
+                        f"phase_rank{r}", {}
+                    ).get("weight_load_s")
+                    for r in range(WORLD_SIZE)
+                },
+            }
+
+            if hung:
+                base_row["status"] = "hang"
+
+            elif "oom" in queue_items:
+                oom_rank = queue_items["oom"]
+                log.warning(f"OOM on Rank {oom_rank} — skipping.")
+                base_row["status"] = f"OOM_rank{oom_rank}"
+
+            elif any((code is not None) and (code != 0) for code in exit_codes):
+                log.error(f"Crashed. Exit codes: {exit_codes}")
+                base_row["status"] = "crash"
+
+            elif "latency" in queue_items:
+                latency = queue_items["latency"]
+                log.info(f"Total latency:     {latency:.0f} ms")
+                # Report the tightest slice — that's the one at risk of OOM.
+                # (Was hardcoded to index 3, which IndexErrors on any
+                # topology with fewer than 4 slices.)
+                _tight = min(range(WORLD_SIZE), key=lambda r: SLICE_GB[r])
+                log.info(
+                    f"Peak {SLICE_GB[_tight]}GB memory (rank {_tight}): "
+                    f"{peak_per_rank[_tight]} MB"
+                )
+                log.info(
+                    f"Avg  {SLICE_GB[_tight]}GB memory (rank {_tight}): "
+                    f"{avg_per_rank[_tight]:.0f} MB"
+                )
+                base_row["total_latency_ms"] = latency
+                base_row["status"] = "ok"
+
+            else:
+                log.warning("Timeout — no results received.")
+                base_row["status"] = "timeout"
+
+            results.append(base_row)
+
+        finally:
+            try:
+                monitor.stop()
+            except Exception:
+                pass
+            q.close()
+            q.join_thread()
+
+        for p in procs:
+            if p.is_alive():
+                p.terminate()
+
+        current_run += 1
 
     df = pd.DataFrame(results)
     df.to_csv("mig_benchmark_results.csv", index=False)
+
+    # Per-step decode curves. One row per (config, rank, step) — the KV cache
+    # grows over a run, so step cost drifts and a single mean hides it.
+    if step_latency_rows:
+        step_df = pd.DataFrame(step_latency_rows)
+        step_df.to_csv("mig_step_latencies.csv", index=False)
+        log.info(
+            f"Wrote {len(step_latency_rows)} per-step rows -> mig_step_latencies.csv"
+        )
 
     monitor.save_csv("mig_memory_trace.csv")
 
@@ -886,9 +1073,7 @@ def main():
     if not successful.empty:
         # Column names follow the SLICE_GB topology, so build them here
         # rather than hardcoding rank2/rank3.
-        peak_cols = [
-            f"peak_rank{r}_{SLICE_GB[r]}gb_mb" for r in range(WORLD_SIZE)
-        ]
+        peak_cols = [f"peak_rank{r}_{SLICE_GB[r]}gb_mb" for r in range(WORLD_SIZE)]
 
         def _peaks(row):
             return " | ".join(
@@ -930,6 +1115,7 @@ def main():
 
     log.info("Done.")
     log.info("Benchmark results → mig_benchmark_results.csv")
+    log.info("Per-step decode   → mig_step_latencies.csv")
     log.info("Memory trace      → mig_memory_trace.csv")
 
 

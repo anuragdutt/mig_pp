@@ -22,15 +22,15 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
-import mig_transport_pipeline_non_blocking as mig_transport
+import mig_transport_pipeline as mig_transport
 
 # Keep this file standalone (no transformers/datasets import) so it can run
 # before the model is even downloaded. Paste the SAME UUIDs you put in
 # benchmark_pipeline_microbatching.py.
 MIG_UUIDS = [
-    "MIG-REPLACE-ME-SLICE0-20GB",  # Rank 0: 20GB (3g.20gb)
-    "MIG-REPLACE-ME-SLICE1-10GB",  # Rank 1: 10GB (2g.10gb)
-    "MIG-REPLACE-ME-SLICE2-10GB",  # Rank 2: 10GB (2g.10gb)
+    "MIG-cbf6f13f-88d6-550a-95b3-259a93afe90f",  # Rank 0: 20GB (3g.20gb)
+    "MIG-3551cc21-290c-58ef-936e-50bc04135d53",  # Rank 1: 10GB (2g.10gb)
+    "MIG-1e5ad904-ba2b-5830-9639-2ded2002e3a7",  # Rank 2: 10GB (2g.10gb)
 ]
 WORLD_SIZE = len(MIG_UUIDS)
 
@@ -55,6 +55,13 @@ def worker(rank, world_size, result_queue, device_uuid):
 
     device = torch.device("cuda:0")
     torch.cuda.set_device(device)
+
+    # Transport logging -> logs/transport_<stamp>_selftest.log, shared by all
+    # ranks. This is where the real evidence lands: per-send T05 queue times,
+    # T07 flush block times, and the T29/T30 verdict per rank.
+    log_path = mig_transport.setup_transport_logging(run_label="selftest")
+    if rank == 0:
+        print(f"[transport log] {log_path}", flush=True)
 
     mig_transport.register_hooks(
         mb_size=MB_SIZE,
@@ -131,16 +138,31 @@ def worker(rank, world_size, result_queue, device_uuid):
         big = torch.randn(4096, 4096, dtype=torch.float16, device=device)
         payload = torch.full(shape, 7.0, dtype=torch.float16, device=device)
 
+        # Warm up: first matmul triggers cuBLAS handle creation + autotuning,
+        # which would otherwise land inside the measured region.
+        for _ in range(3):
+            big = big @ big.T * 0.0001
         torch.cuda.synchronize()
-        t0 = time.perf_counter()
-        for _ in range(20):
-            big = big @ big.T * 0.0001  # keep the default stream busy
-        h = dist.isend(payload.clone(), dst=1, tag=TAG_BASE + 500)
-        queue_ms = (time.perf_counter() - t0) * 1000.0
 
+        # Queue enough compute to keep the GPU busy well past isend().
+        t_compute_start = time.perf_counter()
+        for _ in range(20):
+            big = big @ big.T * 0.0001
+        launch_ms = (time.perf_counter() - t_compute_start) * 1000.0
+
+        # Measure isend() ALONE. The previous version timed the matmul loop
+        # and isend() together, so matmul kernel-launch throttling dominated
+        # the number and isend()'s own cost was unmeasurable.
+        t_isend = time.perf_counter()
+        h = dist.isend(payload.clone(), dst=1, tag=TAG_BASE + 500)
+        isend_ms = (time.perf_counter() - t_isend) * 1000.0
+
+        # How much GPU work was still outstanding when isend() returned.
+        t_drain = time.perf_counter()
         torch.cuda.synchronize()
-        total_ms = (time.perf_counter() - t0) * 1000.0
-        overlap_ms = (queue_ms, total_ms)
+        drain_ms = (time.perf_counter() - t_drain) * 1000.0
+
+        overlap_ms = (isend_ms, drain_ms, launch_ms)
 
         h.flush()
         h.wait()
@@ -153,8 +175,25 @@ def worker(rank, world_size, result_queue, device_uuid):
 
     dist.barrier()
 
-    result_queue.put((rank, failures, overlap_ms))
+    # Per-rank aggregate stats + the T29/T30 verdict line.
+    stats = mig_transport.log_summary(label="selftest")
+
+    result_queue.put((rank, failures, overlap_ms, stats))
     dist.destroy_process_group()
+
+    # Release SHM so repeated runs don't accumulate segments in /dev/shm.
+    # Best-effort: cleanup is a teardown nicety, and failing it must not
+    # fail a rank whose actual checks all passed.
+    try:
+        mig_transport.cleanup()
+    except AttributeError:
+        print(
+            f"[rank {rank}] transport has no cleanup(); SHM will leak "
+            f"(update mig_transport_pipeline_non_blocking.py)",
+            flush=True,
+        )
+    except Exception as e:
+        print(f"[rank {rank}] cleanup failed: {e}", flush=True)
 
 
 def main():
@@ -181,34 +220,109 @@ def main():
                 p.terminate()
         return 1
 
+    # Non-zero exit code means the rank crashed (CUDA init failure, OOM,
+    # exception) rather than completing its checks. Without this, a run where
+    # every rank died would report PASS on an empty result set.
+    exit_codes = [p.exitcode for p in procs]
+    crashed = [i for i, c in enumerate(exit_codes) if c != 0]
+
     all_failures = []
     overlap = None
+    reported = set()
+    all_stats = {}
     while not q.empty():
-        rank, failures, ov = q.get()
+        rank, failures, ov, stats = q.get()
+        reported.add(rank)
         for f in failures:
             all_failures.append(f"[rank {rank}] {f}")
         if ov:
             overlap = ov
+        if stats:
+            all_stats[rank] = stats
+
+    silent = [r for r in range(WORLD_SIZE) if r not in reported]
 
     print("=" * 60)
+    if crashed:
+        print(
+            f"FAIL — ranks {crashed} exited non-zero: "
+            f"{[exit_codes[i] for i in crashed]}"
+        )
+        print("       Scroll up for the traceback. Nothing was verified.")
+    if silent:
+        print(f"FAIL — ranks {silent} never reported results")
     if all_failures:
         print("FAIL — correctness problems found:")
         for f in all_failures:
             print("  ", f)
-    else:
-        print("PASS — data integrity OK across all ranks/microbatches")
+
+    if not crashed and not silent and not all_failures:
+        print(f"PASS — data integrity OK across all {WORLD_SIZE} ranks/microbatches")
 
     if overlap:
-        queue_ms, total_ms = overlap
-        print(f"\nisend() queue time: {queue_ms:.1f} ms")
-        print(f"total incl. compute: {total_ms:.1f} ms")
-        if queue_ms < total_ms * 0.5:
-            print("PASS — isend() returns while compute is still running (overlap OK)")
+        isend_ms, drain_ms, launch_ms = overlap
+        print()
+        print(f"matmul launch loop : {launch_ms:7.2f} ms  (CPU-side kernel launches)")
+        print(f"isend() alone      : {isend_ms:7.2f} ms  <-- the measurement")
+        print(f"drain after isend  : {drain_ms:7.2f} ms  (GPU work still pending)")
+        print()
+        # The claim being tested: isend() queues a D2H copy on a side stream
+        # and returns, rather than calling torch.cuda.synchronize(). If it
+        # still synced the device, isend() could not return while the matmuls
+        # were outstanding — so drain would be ~0 and isend would absorb it.
+        if drain_ms < 1.0:
+            print("INCONCLUSIVE — no GPU work was left pending after isend();")
+            print("               the compute finished too early to test overlap.")
+        elif isend_ms < drain_ms * 0.25:
+            print("PASS — isend() returned in a fraction of the outstanding GPU time,")
+            print(
+                f"       so it did not wait for the device ({isend_ms:.2f}ms vs "
+                f"{drain_ms:.2f}ms still pending)."
+            )
         else:
-            print("FAIL — isend() is still blocking on the copy; fix did not take")
+            print("FAIL — isend() blocked for a large share of the outstanding")
+            print("       GPU time; it is still synchronizing rather than queueing.")
+
+    # Aggregated per-rank stats from the transport's own instrumentation.
+    # More trustworthy than the single-sample timing above: averaged over
+    # every send/recv the test performed.
+    if all_stats:
+        print()
+        print("--- transport stats (from instrumentation, all sends) ---")
+        print(
+            f"{'rank':>4} {'sends':>6} {'D2H block':>11} {'recvs':>6} "
+            f"{'H2D block':>11} {'spins':>6}"
+        )
+        for r in sorted(all_stats):
+            s = all_stats[r]
+            print(
+                f"{r:>4} {s['flush_count']:>6} "
+                f"{s['flush_block_mean_ms']:>9.2f}ms {s['h2d_count']:>6} "
+                f"{s['h2d_block_mean_ms']:>9.2f}ms {s['slot_spins']:>6}"
+            )
+
+        senders = [s for s in all_stats.values() if s["flush_count"] > 0]
+        if senders:
+            worst = max(s["flush_block_mean_ms"] for s in senders)
+            print()
+            if worst < 1.0:
+                print(
+                    f"PASS — D2H copies hid under compute on every rank "
+                    f"(worst mean block {worst:.2f}ms)"
+                )
+            else:
+                print(
+                    f"WARN — worst mean D2H block {worst:.2f}ms. At this "
+                    f"payload size the copy may simply be"
+                )
+                print(
+                    f"       shorter than the compute available to hide it; "
+                    f"check the same number in a real"
+                )
+                print(f"       benchmark run before concluding the fix failed.")
     print("=" * 60)
 
-    return 1 if all_failures else 0
+    return 1 if (all_failures or crashed or silent) else 0
 
 
 if __name__ == "__main__":

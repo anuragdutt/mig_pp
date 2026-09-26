@@ -37,7 +37,11 @@ def get_decoder_layers(model):
 
     # Fallback: find a ModuleList named 'layers'
     for name, module in model.named_modules():
-        if name.endswith("layers") and isinstance(module, torch.nn.ModuleList) and len(module) > 0:
+        if (
+            name.endswith("layers")
+            and isinstance(module, torch.nn.ModuleList)
+            and len(module) > 0
+        ):
             return list(module)
 
     raise RuntimeError("Could not locate decoder layers (expected model.model.layers).")
@@ -52,7 +56,9 @@ def tensor_param_bytes(module: torch.nn.Module) -> int:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model", default="lmsys/vicuna-7b-v1.5", help="HF model id or local path")
+    ap.add_argument(
+        "--model", default="lmsys/vicuna-7b-v1.5", help="HF model id or local path"
+    )
     ap.add_argument("--device", default="cuda:0")
     ap.add_argument("--dtype", choices=["fp16", "bf16"], default="fp16")
     ap.add_argument("--batch", type=int, default=1)
@@ -107,40 +113,56 @@ def main():
 
     # KV per layer at peak seq (simple default): 2 * B * kv_heads * peak_seq * head_dim * dtype_bytes
     dtype_bytes = 2 if dtype in (torch.float16, torch.bfloat16) else 4
-    kv_bytes_peak_per_layer = 2 * args.batch * n_kv_heads * peak_seq * head_dim * dtype_bytes
+    kv_bytes_peak_per_layer = (
+        2 * args.batch * n_kv_heads * peak_seq * head_dim * dtype_bytes
+    )
 
     # Write per-layer memory CSV (overwrite each run for cleanliness)
     mem_path = out_dir / args.mem_csv
     with open(mem_path, "w", newline="") as f:
         w = csv.DictWriter(
             f,
-            fieldnames=["component", "layer_id", "param_bytes", "kv_bytes_peak", "notes"],
+            fieldnames=[
+                "component",
+                "layer_id",
+                "param_bytes",
+                "kv_bytes_peak",
+                "notes",
+            ],
         )
         w.writeheader()
-        w.writerow({
-            "component": "shared_embed_lm_head" if tied else "embed_plus_lm_head",
-            "layer_id": -1,
-            "param_bytes": int(shared_embed_lm_bytes),
-            "kv_bytes_peak": 0,
-            "notes": "tied_weights" if tied else "",
-        })
+        w.writerow(
+            {
+                "component": "shared_embed_lm_head" if tied else "embed_plus_lm_head",
+                "layer_id": -1,
+                "param_bytes": int(shared_embed_lm_bytes),
+                "kv_bytes_peak": 0,
+                "notes": "tied_weights" if tied else "",
+            }
+        )
         for i, layer in enumerate(layers):
-            w.writerow({
-                "component": "decoder_block",
-                "layer_id": i,
-                "param_bytes": int(tensor_param_bytes(layer)),
-                "kv_bytes_peak": int(kv_bytes_peak_per_layer),
-                "notes": "",
-            })
+            w.writerow(
+                {
+                    "component": "decoder_block",
+                    "layer_id": i,
+                    "param_bytes": int(tensor_param_bytes(layer)),
+                    "kv_bytes_peak": int(kv_bytes_peak_per_layer),
+                    "notes": "",
+                }
+            )
 
     # -------- Exactly ONE inference call for timing --------
     vocab_size = int(cfg.vocab_size)
     input_ids = torch.randint(
-        low=0, high=vocab_size,
+        low=0,
+        high=vocab_size,
         size=(args.batch, args.input_len),
-        device=device, dtype=torch.long
+        device=device,
+        dtype=torch.long,
     )
-    attention_mask = torch.ones((args.batch, args.input_len), device=device, dtype=torch.long)
+    attention_mask = torch.ones(
+        (args.batch, args.input_len), device=device, dtype=torch.long
+    )
 
     torch.cuda.reset_peak_memory_stats(device)
 
@@ -157,7 +179,7 @@ def main():
             attention_mask=attention_mask,
             max_new_tokens=args.output_len,
             do_sample=False,
-            use_cache=True,   # default KV cache
+            use_cache=True,  # default KV cache
         )
 
         end_evt.record()
@@ -202,8 +224,12 @@ def main():
     write_csv(run_path, run_row)
 
     print(f"Wrote:\n  {run_path}\n  {mem_path}")
-    print(f"Total (CUDA event): {total_ms:.3f} ms | ms/token (avg over all tokens): {ms_per_total_token:.6f}")
-    print(f"Peak allocated: {peak_alloc_mb:.2f} MB | Peak reserved: {peak_reserved_mb:.2f} MB")
+    print(
+        f"Total (CUDA event): {total_ms:.3f} ms | ms/token (avg over all tokens): {ms_per_total_token:.6f}"
+    )
+    print(
+        f"Peak allocated: {peak_alloc_mb:.2f} MB | Peak reserved: {peak_reserved_mb:.2f} MB"
+    )
 
 
 if __name__ == "__main__":

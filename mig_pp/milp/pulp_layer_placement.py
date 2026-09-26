@@ -80,6 +80,7 @@ WHAT IS EMPIRICAL (measure once on ONE MIG slice -- see measure_constants.py):
     replace them with measured values for a clean, non-circular model.
 ============================================================================
 """
+
 import pulp  # type: ignore
 
 # ================= EMPIRICAL CONSTANTS (measure once, then freeze) =========
@@ -118,7 +119,7 @@ EFF_WEIGHT = 0.85
 # weighted scalar, and it settles both the level and whether a scalar suffices.
 # TODO: replace with the measured sweep; if the curve is steep, make this a
 #       function of ctx rather than picking a compromise scalar.
-EFF_ACT    = 0.25
+EFF_ACT = 0.25
 
 # LAUNCH_US: per-kernel launch + framework dispatch overhead.
 #
@@ -129,7 +130,7 @@ EFF_ACT    = 0.25
 # (no CUDA graphs, no torch.compile -- see forward_through_layers), so the full
 # eager path applies. 12 us is a mid-range eager estimate; the prior 20.0 sat at
 # the pessimistic end of plausible.
-LAUNCH_US  = 12.0
+LAUNCH_US = 12.0
 
 # KERNELS_PER_LAYER: CUDA kernel launches in one LlamaDecoderLayer forward.
 #
@@ -189,19 +190,19 @@ KERNELS_PER_LAYER = 16
 # NOTE: this assumes gen4. If the instance is gen3 x16 the ceiling halves to
 # ~16 GB/s theoretical and this constant should drop to ~12e9. Confirm the
 # link generation (nvidia-smi -q | grep -i pcie) before trusting transport costs.
-PCIE_BW_PINNED   = 25e9   # bytes/s, pinned host<->device DMA
+PCIE_BW_PINNED = 25e9  # bytes/s, pinned host<->device DMA
 #
 # PCIE_BW_UNPINNED: line 387 copies from an ordinary heap buffer produced by
 # peer_data.copy(), so the driver stages it through an internal pinned bounce
 # buffer -- an extra host-to-host copy hidden inside the transfer. The standard
 # observed penalty is roughly half the pinned rate.
-PCIE_BW_UNPINNED = 12e9   # bytes/s, pageable host->device
+PCIE_BW_UNPINNED = 12e9  # bytes/s, pageable host->device
 #
 # MEMCPY_BW: host-to-host, used for both the pinned->SHM write (line 363) and
 # the SHM->heap read (line 385). These are numpy slice-assign / .copy(), not a
 # hand-tuned memcpy, and they are single-threaded. Server DDR4 single-threaded
 # memcpy lands ~8-15 GB/s; numpy's path sits in the lower half of that.
-MEMCPY_BW        = 10e9   # bytes/s, host-to-host memcpy
+MEMCPY_BW = 10e9  # bytes/s, host-to-host memcpy
 #
 # HANDOFF_FIXED_US: the residual per-handoff cost -- the cuda.synchronize() at
 # line 356 plus the gloo handshake dispatch. A bare cudaDeviceSynchronize with
@@ -225,7 +226,7 @@ TOK_ROUNDTRIP_US = 60.0
 
 # ---------- model architecture: Vicuna-7B (LLaMA-7B) ----------
 HIDDEN, INTER, LAYERS, VOCAB = 4096, 11008, 32, 32000
-WEIGHT_BYTES_PER_LAYER = (4*HIDDEN*HIDDEN + 3*HIDDEN*INTER) * 2   # FP16
+WEIGHT_BYTES_PER_LAYER = (4 * HIDDEN * HIDDEN + 3 * HIDDEN * INTER) * 2  # FP16
 
 # fixed-position components: embedding on first slice, lm_head+norm on last.
 # Their PLACEMENT is not a decision (the harness hardcodes it), but their COST is
@@ -233,19 +234,19 @@ WEIGHT_BYTES_PER_LAYER = (4*HIDDEN*HIDDEN + 3*HIDDEN*INTER) * 2   # FP16
 # The time half matters for placement even though the position is fixed -- lm_head
 # makes the last stage slower, so the optimizer should give that stage fewer
 # transformer layers to compensate.
-EMBED_BYTES   = VOCAB * HIDDEN * 2
+EMBED_BYTES = VOCAB * HIDDEN * 2
 LM_HEAD_BYTES = VOCAB * HIDDEN * 2
-NORM_BYTES    = HIDDEN * 2
+NORM_BYTES = HIDDEN * 2
 
 # workload
 SEQ_LEN, MAX_NEW_TOKENS = 64, 512
 MAX_SEQ = SEQ_LEN + MAX_NEW_TOKENS
-S = 1 + MAX_NEW_TOKENS               # total steps (kept for reference)
+S = 1 + MAX_NEW_TOKENS  # total steps (kept for reference)
 
 # ---------- hardware: A100 40GB, MIG slices ----------
-A100_BW     = 1555e9                  # HBM2 bytes/s, full GPU
-SLICE_FRAC  = [3/7, 2/7, 2/7]        # 3g.20gb, 2g.10gb, 2g.10gb
-SLICE_NAME  = ["20gb", "10gb", "10gb"]
+A100_BW = 1555e9  # HBM2 bytes/s, full GPU
+SLICE_FRAC = [3 / 7, 2 / 7, 2 / 7]  # 3g.20gb, 2g.10gb, 2g.10gb
+SLICE_NAME = ["20gb", "10gb", "10gb"]
 SLICE_BYTES = [20e9, 10e9, 10e9]
 USABLE_FRAC = 0.9
 BW = [A100_BW * f for f in SLICE_FRAC]
@@ -260,14 +261,14 @@ LAUNCH_MS_PER_LAYER = KERNELS_PER_LAYER * LAUNCH_US / 1000.0
 # ---------------------------------------------------------------------------
 def activation_bytes_per_token(ctx):
     B = 2  # FP16
-    qkv    = (HIDDEN + 3*HIDDEN) * B          # read input, write Q,K,V
-    flash  = (HIDDEN + 2*ctx*HIDDEN + HIDDEN) * B   # Q + K,V(ctx read) + out
-    oproj  = (HIDDEN + HIDDEN) * B
-    gate   = (HIDDEN + INTER) * B
-    up     = (HIDDEN + INTER) * B
-    swiglu = (2*INTER + INTER) * B
-    down   = (INTER + HIDDEN) * B
-    misc   = (6*HIDDEN) * B                   # ~2 rmsnorm + 2 residual r/w
+    qkv = (HIDDEN + 3 * HIDDEN) * B  # read input, write Q,K,V
+    flash = (HIDDEN + 2 * ctx * HIDDEN + HIDDEN) * B  # Q + K,V(ctx read) + out
+    oproj = (HIDDEN + HIDDEN) * B
+    gate = (HIDDEN + INTER) * B
+    up = (HIDDEN + INTER) * B
+    swiglu = (2 * INTER + INTER) * B
+    down = (INTER + HIDDEN) * B
+    misc = (6 * HIDDEN) * B  # ~2 rmsnorm + 2 residual r/w
     return qkv + flash + oproj + gate + up + swiglu + down + misc
 
 
@@ -281,18 +282,28 @@ def activation_bytes_per_token(ctx):
 #   decode  : one token per sequence; weights efficient, per-token activation/KV
 #             traffic is the scattered latency-bound regime.
 # ---------------------------------------------------------------------------
-def layer_compute_in_seconds(slice_bandwidth_bytes_per_second, microbatch_size, context_length, is_prefill):
+def layer_compute_in_seconds(
+    slice_bandwidth_bytes_per_second, microbatch_size, context_length, is_prefill
+):
     if is_prefill:
         # prefill processes all context_length tokens at once for every sequence in the microbatch
-        activation_bytes = activation_bytes_per_token(context_length) * microbatch_size * context_length
+        activation_bytes = (
+            activation_bytes_per_token(context_length)
+            * microbatch_size
+            * context_length
+        )
         # weights and activations both stream in large contiguous chunks during prefill, so both use EFF_WEIGHT
-        time_seconds = (WEIGHT_BYTES_PER_LAYER + activation_bytes) / (slice_bandwidth_bytes_per_second * EFF_WEIGHT)
+        time_seconds = (WEIGHT_BYTES_PER_LAYER + activation_bytes) / (
+            slice_bandwidth_bytes_per_second * EFF_WEIGHT
+        )
         return time_seconds + LAUNCH_MS_PER_LAYER / 1000.0
 
     # decode: only 1 new token per sequence (not the full context)
     activation_bytes = activation_bytes_per_token(context_length) * microbatch_size
     # weights are read as one large contiguous block -- efficient streaming
-    time_seconds  = WEIGHT_BYTES_PER_LAYER / (slice_bandwidth_bytes_per_second * EFF_WEIGHT)
+    time_seconds = WEIGHT_BYTES_PER_LAYER / (
+        slice_bandwidth_bytes_per_second * EFF_WEIGHT
+    )
     # KV cache reads are scattered across memory (one entry per previous token per head) -- slow, latency-bound
     time_seconds += activation_bytes / (slice_bandwidth_bytes_per_second * EFF_ACT)
     time_seconds += LAUNCH_MS_PER_LAYER / 1000.0
@@ -327,8 +338,13 @@ def layer_compute_in_seconds(slice_bandwidth_bytes_per_second, microbatch_size, 
 # Without the time term the optimizer balances layers as if all stages were bare
 # transformer stacks, and systematically overloads the two endpoints.
 # ---------------------------------------------------------------------------
-def endpoint_compute_in_seconds(stage_index, num_stages, slice_bandwidth_bytes_per_second,
-                                microbatch_size, is_prefill):
+def endpoint_compute_in_seconds(
+    stage_index,
+    num_stages,
+    slice_bandwidth_bytes_per_second,
+    microbatch_size,
+    is_prefill,
+):
     time_seconds = 0.0
 
     if stage_index == 0:
@@ -337,31 +353,35 @@ def endpoint_compute_in_seconds(stage_index, num_stages, slice_bandwidth_bytes_p
         rows = microbatch_size * (SEQ_LEN if is_prefill else 1)
         gathered_bytes = rows * HIDDEN * 2
         # scattered row gather + the .half() copy -> read + write, latency-bound
-        time_seconds += 2 * gathered_bytes / (slice_bandwidth_bytes_per_second * EFF_ACT)
-        time_seconds += LAUNCH_US / 1e6            # embed + .half() dispatch
+        time_seconds += (
+            2 * gathered_bytes / (slice_bandwidth_bytes_per_second * EFF_ACT)
+        )
+        time_seconds += LAUNCH_US / 1e6  # embed + .half() dispatch
 
     if stage_index == num_stages - 1:
         # final norm over the hidden state being classified (one token per
         # sequence in both phases -- prefill slices normed[:, -1:, :] before
         # lm_head, L475-478).
-        norm_bytes = 2 * microbatch_size * HIDDEN * 2      # read + write
+        norm_bytes = 2 * microbatch_size * HIDDEN * 2  # read + write
         time_seconds += norm_bytes / (slice_bandwidth_bytes_per_second * EFF_ACT)
 
         # lm_head: stream the full [HIDDEN, VOCAB] weight, write the logits.
         logit_bytes = microbatch_size * VOCAB * 2
-        time_seconds += (LM_HEAD_BYTES + logit_bytes) / (slice_bandwidth_bytes_per_second * EFF_WEIGHT)
+        time_seconds += (LM_HEAD_BYTES + logit_bytes) / (
+            slice_bandwidth_bytes_per_second * EFF_WEIGHT
+        )
 
         # argmax reduces the logits -- one more full read of them.
         time_seconds += logit_bytes / (slice_bandwidth_bytes_per_second * EFF_ACT)
 
-        time_seconds += 3 * LAUNCH_US / 1e6        # norm + lm_head + argmax
+        time_seconds += 3 * LAUNCH_US / 1e6  # norm + lm_head + argmax
 
     return time_seconds
 
 
 # ---------------------------------------------------------------------------
 # TRANSPORT: computes the cost of moving activattions of microbatch N to N+1
-# Both sides are inline/blocking on their rank, 
+# Both sides are inline/blocking on their rank,
 # so this cost serializes with compute rather than overlapping it.
 # ie its not E_s = max(compute, transport) but E_s = compute + transport
 
@@ -371,21 +391,22 @@ def endpoint_compute_in_seconds(stage_index, num_stages, slice_bandwidth_bytes_p
 #   prefill handoff: tokens = ctx (full sequence)
 #   decode  handoff: tokens = 1 (single new token)
 
+
 # dst_slice is the RECEIVING slice: the final device-local tensor.copy_()
 # (line 387) runs on the receiver's HBM, so it is charged at that slice's
 # bandwidth. Pass None to skip that term.
 # ---------------------------------------------------------------------------
 def transport_time_for_activation_transfer_seconds(mb, ctx, is_prefill, dst_slice=None):
-    tokens  = ctx if is_prefill else 1
-    payload = mb * tokens * HIDDEN * 2                 # bytes, FP16
-    
+    tokens = ctx if is_prefill else 1
+    payload = mb * tokens * HIDDEN * 2  # bytes, FP16
+
     # --- sender rank N---
-    t  = payload / PCIE_BW_PINNED          # line 351: GPU -> pinned CPU
-    t += payload / MEMCPY_BW               # line 363: pinned -> SHM
+    t = payload / PCIE_BW_PINNED  # line 351: GPU -> pinned CPU
+    t += payload / MEMCPY_BW  # line 363: pinned -> SHM
 
     # --- receiver rank N+1 ---
-    t += payload / MEMCPY_BW               # line 385: SHM -> heap (.copy())
-    t += payload / PCIE_BW_UNPINNED        # line 387: heap -> GPU (pageable)
+    t += payload / MEMCPY_BW  # line 385: SHM -> heap (.copy())
+    t += payload / PCIE_BW_UNPINNED  # line 387: heap -> GPU (pageable)
 
     if dst_slice is not None:
         # After the data arrives on the receiving GPU it sits in a temporary
@@ -400,21 +421,21 @@ def transport_time_for_activation_transfer_seconds(mb, ctx, is_prefill, dst_slic
         # to matter. Only revisit if transport costs ever grow to dominate.
         t += 2 * payload / (BW[dst_slice] * EFF_WEIGHT)
 
-    t += HANDOFF_FIXED_US / 1e6            # line 356 cuda.sync + gloo handshake
+    t += HANDOFF_FIXED_US / 1e6  # line 356 cuda.sync + gloo handshake
     return t
 
 
 def kv_bytes_per_layer(batch_size):
-    return 2 * batch_size * MAX_SEQ * HIDDEN * 2   # K+V, FP16
+    return 2 * batch_size * MAX_SEQ * HIDDEN * 2  # K+V, FP16
 
 
 def layer_limits(batch_size):
-    kv_per_layer  = kv_bytes_per_layer(batch_size)
+    kv_per_layer = kv_bytes_per_layer(batch_size)
     mem_per_layer = WEIGHT_BYTES_PER_LAYER + kv_per_layer
 
     usable = [USABLE_FRAC * b for b in SLICE_BYTES]
     usable[0] -= EMBED_BYTES
-    usable[2] -= (LM_HEAD_BYTES + NORM_BYTES)
+    usable[2] -= LM_HEAD_BYTES + NORM_BYTES
 
     return [int(usable[s] // mem_per_layer) for s in range(3)]
 
@@ -448,9 +469,12 @@ def _endpoint_rank_cost_ms(stage_index, num_stages, bw, mb=1):
     chosen split, because a min-max objective balances TOTAL stage cost -- a
     stage carrying lm_head should be given fewer layers.
     """
-    total_s = endpoint_compute_in_seconds(stage_index, num_stages, bw, mb, is_prefill=True)
+    total_s = endpoint_compute_in_seconds(
+        stage_index, num_stages, bw, mb, is_prefill=True
+    )
     total_s += MAX_NEW_TOKENS * endpoint_compute_in_seconds(
-        stage_index, num_stages, bw, mb, is_prefill=False)
+        stage_index, num_stages, bw, mb, is_prefill=False
+    )
     return total_s * 1000.0
 
 
@@ -472,8 +496,10 @@ def optimize_placement(total_layers=LAYERS, batch_size=32):
 
     # decision variable x[i][s] = 1 if layer i is placed on slice s, else 0.
     # one binary variable per (layer, slice) pair -- total_layers * 3 of them.
-    x = [[pulp.LpVariable(f"x_{i}_{s}", cat="Binary") for s in range(3)]
-         for i in range(total_layers)]
+    x = [
+        [pulp.LpVariable(f"x_{i}_{s}", cat="Binary") for s in range(3)]
+        for i in range(total_layers)
+    ]
 
     # CONSTRAINT: each layer placed on exactly one slice (not zero, not two).
     for i in range(total_layers):
@@ -490,8 +516,8 @@ def optimize_placement(total_layers=LAYERS, batch_size=32):
     # contiguity falls out automatically once slice 0 and slice 2's blocks are
     # fixed to the front and back.
     for i in range(total_layers - 1):
-        prob += x[i][0] >= x[i+1][0]
-        prob += x[i][2] <= x[i+1][2]
+        prob += x[i][0] >= x[i + 1][0]
+        prob += x[i][2] <= x[i + 1][2]
 
     for s in range(3):
         # total layers assigned to slice s (sum of its binary indicators)
@@ -534,8 +560,9 @@ def optimize_placement(total_layers=LAYERS, batch_size=32):
     # read back the solved values: for each slice, count how many of its
     # binary indicators came back 1 (pulp.value returns floats like 1.0/0.0,
     # so sum + int() collapses that to a clean layer count).
-    counts = [int(sum(pulp.value(x[i][s]) for i in range(total_layers)))
-              for s in range(3)]
+    counts = [
+        int(sum(pulp.value(x[i][s]) for i in range(total_layers))) for s in range(3)
+    ]
     return counts, limits
 
 
@@ -564,7 +591,9 @@ def _stage_intervals_s(counts, mb, ctx, is_prefill):
         e = counts[s] * layer_compute_in_seconds(BW[s], mb, ctx, is_prefill)
         e += endpoint_compute_in_seconds(s, n, BW[s], mb, is_prefill)
         if s < n - 1:
-            e += transport_time_for_activation_transfer_seconds(mb, ctx, is_prefill, dst_slice=s + 1)
+            e += transport_time_for_activation_transfer_seconds(
+                mb, ctx, is_prefill, dst_slice=s + 1
+            )
         E.append(e)
     return E
 
@@ -622,7 +651,7 @@ def _step_latency_s(counts, mb, N, ctx, is_prefill):
 # ---------------------------------------------------------------------------
 def predict_latency_ms(counts, num_microbatches, batch_size):
     mb = batch_size // num_microbatches
-    N  = num_microbatches
+    N = num_microbatches
 
     # prefill: one step, full-sequence activations, no token round-trip
     total_s = _step_latency_s(counts, mb, N, SEQ_LEN, is_prefill=True)

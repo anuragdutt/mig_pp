@@ -12,7 +12,6 @@ _ORIGINAL_ALL_REDUCE = dist.all_reduce
 
 
 class MIGTransport:
-
     def __init__(self, rank, world_size, buffer_size_mb=64):
         self.rank = rank
         # Integer ID of this process
@@ -49,7 +48,6 @@ class MIGTransport:
         try:
             # Check if leftover shared memory file exists in /dev/shm
             if os.path.exists(f"/dev/shm/{my_name}"):
-
                 os.unlink(f"/dev/shm/{my_name}")
                 # Delete old shared memory file
                 # Prevents conflicts from previous runs
@@ -114,7 +112,6 @@ class MIGTransport:
         # -----------------------------------------
 
         for peer_rank in range(world_size):
-
             if peer_rank == rank:
                 continue
             # Skip myself — already have my own buffer
@@ -127,7 +124,6 @@ class MIGTransport:
             attempts = 0
 
             while not connected and attempts < 1000:
-
                 try:
                     shm = SharedMemory(
                         name=peer_name, create=False, size=self.buffer_size
@@ -243,7 +239,6 @@ class MIGTransport:
         # Clone ensures we don't modify original CPU view directly.
 
         for peer_rank, peer_buffer in self.peer_buffers.items():
-
             raw_bytes = peer_buffer[:nbytes]
             # Read first nbytes from peer's shared memory buffer.
             # Example:
@@ -342,7 +337,6 @@ def patched_all_reduce(tensor, op=dist.ReduceOp.SUM, group=None, async_op=False)
 
     # Only intercept SUM operations if Engine is active
     if _MIG_ENGINE is not None and op == dist.ReduceOp.SUM:
-
         _MIG_ENGINE.all_reduce_sum(tensor)
         # Calls your shared-memory implementation
         #
