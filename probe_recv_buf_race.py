@@ -136,9 +136,14 @@ def p5_h2d_fully_overwrites_buffer():
     sentinel, copy over it, and confirm not one sentinel element survives.
     """
     dev = torch.device("cuda:0")
-    buf = torch.full((MB, SEQ, HIDDEN), 7.0, dtype=torch.float16, device=dev)
+    # The sentinel must be a value the payload CANNOT contain, or legitimately
+    # copied elements read as survivors. (First cut used 7.0 against an
+    # `arange % 100` payload, which contains 7.0 — 21 false survivors.)
+    SENTINEL = -12345.0
+    buf = torch.full((MB, SEQ, HIDDEN), SENTINEL, dtype=torch.float16, device=dev)
     staging = torch.empty(MB * SEQ * HIDDEN, dtype=torch.float16, pin_memory=True)
     staging.copy_(torch.arange(MB * SEQ * HIDDEN, dtype=torch.float16) % 100)
+    assert not (staging == SENTINEL).any(), "sentinel collides with payload"
 
     stream = torch.cuda.Stream()
     with torch.cuda.stream(stream):
@@ -148,7 +153,7 @@ def p5_h2d_fully_overwrites_buffer():
     evt.record(stream)
     evt.synchronize()
 
-    survivors = int((buf == 7.0).sum().item())
+    survivors = int((buf == SENTINEL).sum().item())
     expected = staging.view(buf.shape).to(dev)
     if survivors == 0 and torch.equal(buf, expected):
         record("P5 H2D overwrites every element", PASS, "0 sentinel survivors")
