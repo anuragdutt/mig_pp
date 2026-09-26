@@ -60,38 +60,33 @@ HEADS = 32
 SEQ_LEN = 64
 MAX_NEW_TOKENS = 512
 
-# Hard cap on how many (split, batch, microbatch) configurations to run.
-# Set to None for the full sweep. Kept low while validating on a fresh box
-# so a broken setup costs minutes instead of hours of GPU time.
 MAX_RUNS = 10
 
-# --- nsys single-pass trace config ---
-# One run, one prefill + one decode (MAX_NEW_TOKENS=1) = 2 forward passes.
-# n=3 microbatches matches the advisor's formula n = num_mig_instances,
-# so the trace shows three microbatches in flight across the three ranks.
-#
 # Restore the full sweep by uncommenting the other pairs and raising
 # MAX_RUNS / MAX_NEW_TOKENS above.
 BATCH_MB_PAIRS = [
-    (24, 8),    # n=3 — advisor's formula: n = num_mig_instances
-    # (24, 24), # n=1 — no microbatching
-    # (24, 12), # n=2
-    # (24, 6),  # n=4
+    (24, 24), (24, 8), (24, 4)
 ]
 
+# 3-slice: 3g.20gb + 2g.10gb + 2g.10gb
 MIG_UUIDS = [
-    "MIG-cbf6f13f-88d6-550a-95b3-259a93afe90f",  # Rank 0: 20GB (3g.20gb)
-    "MIG-3551cc21-290c-58ef-936e-50bc04135d53",  # Rank 1: 10GB (2g.10gb)
-    "MIG-1e5ad904-ba2b-5830-9639-2ded2002e3a7",  # Rank 2: 10GB (2g.10gb)
+    "MIG-f06fb156-37b3-527c-8f93-23db507c9704",
+    "MIG-814fba5b-2690-5fcf-be42-2f26f702dfc1",
+    "MIG-7101d6b5-fe6e-594b-adab-2d6a259e8620",
+    "MIG-e9631527-ed47-5561-8ba1-c6b599a5284c)2fc"
 ]
 
-SLICE_GB = [20, 10, 10]
+SLICE_GB = [20, 10, 5, 5]
+LAYER_LIMITS = [22, 14, 7, 7]
 
 WORLD_SIZE = len(MIG_UUIDS)
 
-# Max layers each slice can hold. Roughly proportional to slice VRAM after
-# subtracting KV cache + activation headroom.
-LAYER_LIMITS = [22, 14, 14]
+assert len(SLICE_GB) == WORLD_SIZE, "SLICE_GB must have one entry per rank"
+assert len(LAYER_LIMITS) == WORLD_SIZE, "LAYER_LIMITS must have one entry per rank"
+assert sum(LAYER_LIMITS) >= TOTAL_LAYERS, (
+    f"LAYER_LIMITS sums to {sum(LAYER_LIMITS)} but the model has "
+    f"{TOTAL_LAYERS} layers — no split can fit"
+)
 
 # Ordering constraint on splits. The two 10GB slices are identical, so
 # permuting layers between them produces duplicate configurations with
@@ -767,28 +762,39 @@ def generate_layer_splits():
     subject to per-slice capacity (LAYER_LIMITS) and the symmetry-breaking
     ordering constraint.
 
-    Topology: 20GB / 10GB / 10GB. The two 10GB slices are interchangeable,
-    so [16, 9, 7] and [16, 7, 9] would benchmark identically — requiring
-    l1 >= l2 keeps only one of each such pair.
+    Works for any WORLD_SIZE: recurses over ranks 0..n-2 and lets the last
+    rank take the remainder. Ordering rules come from SLICE_GB — see
+    ENFORCE_SLICE_ORDERING above.
     """
     valid_splits = []
+    n = WORLD_SIZE
 
-    for l0 in range(1, LAYER_LIMITS[0] + 1):
-        for l1 in range(1, LAYER_LIMITS[1] + 1):
-            # Last slice takes whatever remains — no need to enumerate it.
-            l2 = TOTAL_LAYERS - (l0 + l1)
+    def _ok(prev_idx, prev_layers, layers):
+        """Ordering constraint between rank prev_idx and the next rank."""
+        if not ENFORCE_SLICE_ORDERING:
+            return True
+        if SLICE_GB[prev_idx] == SLICE_GB[prev_idx + 1]:
+            return prev_layers >= layers
+        return prev_layers > layers
 
-            if not (1 <= l2 <= LAYER_LIMITS[2]):
+    def _recurse(rank, assigned, remaining):
+        # Last rank takes whatever is left — no need to enumerate it.
+        if rank == n - 1:
+            if not (1 <= remaining <= LAYER_LIMITS[rank]):
+                return
+            if assigned and not _ok(rank - 1, assigned[-1], remaining):
+                return
+            valid_splits.append(assigned + [remaining])
+            return
+
+        # Leave at least one layer for each rank still to come.
+        max_here = min(LAYER_LIMITS[rank], remaining - (n - rank - 1))
+        for count in range(1, max_here + 1):
+            if assigned and not _ok(rank - 1, assigned[-1], count):
                 continue
+            _recurse(rank + 1, assigned + [count], remaining - count)
 
-            if ENFORCE_SLICE_ORDERING:
-                # 20GB gets the most; the two identical 10GB slices are
-                # ordered only to break the duplicate-permutation symmetry.
-                if not (l0 > l1 >= l2):
-                    continue
-
-            valid_splits.append([l0, l1, l2])
-
+    _recurse(0, [], TOTAL_LAYERS)
     return valid_splits
 
 
