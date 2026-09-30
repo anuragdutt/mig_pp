@@ -64,5 +64,8 @@ SWEEP = dict(
 RUNNER = dict(
     base_port=29500,  # lane port = base_port + 10 * gpu
     mem_monitor="nvml",  # "nvml" (per MIG UUID), "dcgm" (one lane on GPU 0 only), "off"
-    env={},  # extra env for every job, e.g. {"MIG_LOG_LEVEL": "summary"} for smaller logs
+    # Extra env for every job. MIG_LOG_LEVEL: "summary" = end-of-run transport
+    # summaries only (T22-T29), "off" = no transport log; unset = per-microbatch
+    # INFO (the transport's default, GBs per sweep).
+    env={"MIG_LOG_LEVEL": "summary"},
 )

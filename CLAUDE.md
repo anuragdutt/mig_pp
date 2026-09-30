@@ -61,6 +61,9 @@ and asked for wider small-slice caps than the April 80GB branches' `[24,10,5,5]`
 24B 7/5 -- Qwen's and 24B's last rank within ~300 MiB of the lm_head build peak, and
 the smoke split does not exercise them), 0 OOM predicted; ranks 0-1 narrowed to fit.
 
+Smoke on cc@mig 9/30 (`20260930_215856_smoke`, copied to the Mac as `runs_1/`): VERDICT
+PASS, all 4 jobs.
+
 Time. April 80GB data (branches `vic-13b-4mig-80gb`, `mistral-24b-4mig-80gb`; pre-ACK-fix
 code): 13B `[24,10,5,5]` x 14 pairs = 34.8 h, 24B 49 splits = 102.6 h; wall - latency
 per config ~80 s (13B), ~141 s (24B). New-harness estimate = 9/28's within-batch
