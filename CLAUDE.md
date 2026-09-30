@@ -51,7 +51,8 @@ Hard budget: the run must finish in 2.5 days. (`pace@etracker2` was a mix-up: 2 
 
 Layout 40/20/10/10 (3g.40gb + 2g.20gb + 1g.10gb + 1g.10gb: the 9/28 compute split,
 twice the memory, ~1.3x the bandwidth, so latencies do not line up with 40GB data).
-One model per GPU, all 14 batch pairs (the user's call: the 16/32-microbatch pairs were
+GPU time shrank to 2 days (48 h); the user comments out batch pairs by hand and
+checks progress themselves (B64 first). One model per GPU, all 14 batch pairs (the user's call: the 16/32-microbatch pairs were
 only expensive on the pre-ACK-fix harness): vicuna_13b `[22,11,6,6]` 33 splits,
 llama_13b same, qwen_14b `[27,10,9,9]` 31, mistral_24b (Mistral-Small-24B-Base-2501)
 `[22,10,7,5]` 29 = 462/462/434/406 configs. The user dropped nemo_12b for mistral_24b
