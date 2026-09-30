@@ -10,29 +10,24 @@ another. Steps on the box:
 Layer limits are in layer_limits.py. Unknown keys are errors, so typos fail loudly.
 """
 
-# Where download_models.py puts the weights (~165 GB for all eight models).
+# Where download_models.py puts the weights (~70 GB for these four models).
 MODEL_ROOT = "/data/models"
 
 # path: local model dir, or an HF repo id already in the HF cache (never downloads).
 # Optional per model: seq_len, max_new_tokens, max_runs, batch_mb_pairs, splits,
 # layer_limits, min_last_rank_layers (these override SWEEP / layer_limits.py).
+# vicuna_7b, llama_13b, qwen_14b and nemo_12b are still known to layer_limits.py
+# and download_models.py; their MODELS lines are in commit 2236a5e.
 MODELS = {
-    # Swept on 9/28 (solo, old box); re-run here with the same sweep to measure
-    # how much the new box + eight lanes at once move latency.
-    "vicuna_7b": dict(path=f"{MODEL_ROOT}/vicuna-7b-v1.5"),
+    # Same shapes and the same 938 configs as the 9/28 Vicuna-7B sweep (Vicuna
+    # v1.5 is a Llama-2-7B fine-tune), so its latencies also show how much the
+    # new box + four lanes at once move things.
     "llama_7b": dict(path=f"{MODEL_ROOT}/llama-2-7b-hf"),
     "mistral_7b": dict(path=f"{MODEL_ROOT}/Mistral-7B-Instruct-v0.3"),
     "qwen_7b": dict(path=f"{MODEL_ROOT}/Qwen2.5-7B"),
     # 13B weights + KV cannot fit on 20/10/5/5 at B32 or B64 (memory_limits.py;
-    # the old 13B runs swept B8/B16 only). Qwen2.5-14B still fits at B32.
+    # the old 13B runs swept B8/B16 only).
     "vicuna_13b": dict(path=f"{MODEL_ROOT}/vicuna-13b-v1.5", batch_mb_pairs=[(8, 4), (8, 2), (16, 8), (16, 4), (16, 2)]),
-    "llama_13b": dict(path=f"{MODEL_ROOT}/llama-2-13b-hf", batch_mb_pairs=[(8, 4), (8, 2), (16, 8), (16, 4), (16, 2)]),
-    "qwen_14b": dict(
-        path=f"{MODEL_ROOT}/Qwen2.5-14B",
-        batch_mb_pairs=[(8, 4), (8, 2), (16, 8), (16, 4), (16, 2), (32, 16), (32, 8), (32, 4), (32, 2)],
-    ),
-    # Fits every batch (GQA keeps the KV cache small); full sweep.
-    "nemo_12b": dict(path=f"{MODEL_ROOT}/Mistral-Nemo-Base-2407"),
 }
 
 # One entry per GPU. slice_gb and mig_uuids in RANK ORDER (largest slice first);
@@ -43,10 +38,6 @@ GPUS = [
     dict(gpu=1, slice_gb=[20, 10, 5, 5], mig_uuids=["MIG-PASTE-1-0", "MIG-PASTE-1-1", "MIG-PASTE-1-2", "MIG-PASTE-1-3"], models=["mistral_7b"]),
     dict(gpu=2, slice_gb=[20, 10, 5, 5], mig_uuids=["MIG-PASTE-2-0", "MIG-PASTE-2-1", "MIG-PASTE-2-2", "MIG-PASTE-2-3"], models=["qwen_7b"]),
     dict(gpu=3, slice_gb=[20, 10, 5, 5], mig_uuids=["MIG-PASTE-3-0", "MIG-PASTE-3-1", "MIG-PASTE-3-2", "MIG-PASTE-3-3"], models=["vicuna_13b"]),
-    dict(gpu=4, slice_gb=[20, 10, 5, 5], mig_uuids=["MIG-PASTE-4-0", "MIG-PASTE-4-1", "MIG-PASTE-4-2", "MIG-PASTE-4-3"], models=["llama_13b"]),
-    dict(gpu=5, slice_gb=[20, 10, 5, 5], mig_uuids=["MIG-PASTE-5-0", "MIG-PASTE-5-1", "MIG-PASTE-5-2", "MIG-PASTE-5-3"], models=["qwen_14b"]),
-    dict(gpu=6, slice_gb=[20, 10, 5, 5], mig_uuids=["MIG-PASTE-6-0", "MIG-PASTE-6-1", "MIG-PASTE-6-2", "MIG-PASTE-6-3"], models=["nemo_12b"]),
-    dict(gpu=7, slice_gb=[20, 10, 5, 5], mig_uuids=["MIG-PASTE-7-0", "MIG-PASTE-7-1", "MIG-PASTE-7-2", "MIG-PASTE-7-3"], models=["vicuna_7b"]),
 ]
 
 # The benchmark's own constants (benchmark_pipeline_microbatching.py).
