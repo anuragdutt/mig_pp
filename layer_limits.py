@@ -35,6 +35,26 @@ LAYER_LIMITS = {
         # rule: fits up to B32, B64 is the stress batch (~18% OOM predicted).
         "nemo_12b": [26, 15, 6, 0],
     },
+    # 3g.40gb + 2g.20gb + 1g.10gb + 1g.10gb on A100-80GB: the 20_10_5_5 compute
+    # split with twice the memory. The rule above would admit hundreds of splits
+    # per model here, so these are sized to a ~2.5-day sweep (35-48 splits x 11
+    # batch pairs) instead: the widest small-slice caps that still fit every
+    # split at B64 (memory_limits.py), then as wide on ranks 0-1 as the budget
+    # allows. The April 80GB runs used [24, 10, 5, 5] (13B) and [30, 10, 4, 2]
+    # (24B) -- small-slice caps left over from the 5GB slices.
+    "40_20_10_10": {
+        # 10GB slices hold 6 13B layers at B64 (MHA: big KV). 48 splits:
+        # rank 0 16-22, rank 1 7-12, rank 2 3-6, rank 3 1-6 layers.
+        "vicuna_13b": [22, 12, 6, 6],
+        "llama_13b": [22, 12, 6, 6],  # same shapes as Vicuna-13B
+        # 44 splits: 20-26 / 8-12 / 5-8 / 2-8. No longer head-only: the 152k-vocab
+        # lm_head build still leaves room for 9 layers on a 10GB slice (its
+        # head-only flag is moot here, ranks 0-2 hold at most 46 of 48 layers).
+        "qwen_14b": [26, 12, 8, 8],
+        # Mistral-Small-24B, 1060 MiB/layer: rank 2 holds 7 at B64, rank 3 5
+        # beside the 131k-vocab lm_head. 35 splits: 19-24 / 6-9 / 4-7 / 1-5.
+        "mistral_24b": [24, 9, 7, 5],
+    },
 }
 
 # Models whose LAST rank may hold no decoder layers (only norm + lm_head), as

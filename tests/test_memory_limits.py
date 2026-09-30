@@ -15,10 +15,22 @@ sys.path.insert(0, str(ROOT))
 import experiment_config as ec  # noqa: E402
 import layer_limits as ll  # noqa: E402
 import memory_limits as ml  # noqa: E402
+import parallel_plan as pp  # noqa: E402
 
 LAYOUT = [20, 10, 5, 5]
+LAYOUT_80 = [40, 20, 10, 10]
 RESULTS_928 = ROOT / "mig_benchmark_results_9_28.csv"
 PROFILE = ROOT / "mig_pp" / "profiles" / "poc_layer_memory.csv"
+# The April 80GB runs sit under oracle/80gb/20_10_5_5/ although their slices
+# were 40/20/10/10 (their columns say so: peak_rank0_40gb_mb, ...).
+ORACLE_80 = ROOT / "oracle" / "80gb" / "20_10_5_5"
+
+
+def oracle_splits(path):
+    # The header repeats a slice size, which DictReader would collapse: read
+    # the split columns positionally.
+    with open(path) as f:
+        return {tuple(int(x) for x in r[:4]) for r in list(csv.reader(f))[1:] if r}
 
 
 class LayerLimitsFile(unittest.TestCase):
@@ -49,8 +61,11 @@ class LayerLimitsFile(unittest.TestCase):
 
     def test_lookup_errors_name_the_problem(self):
         with self.assertRaises(KeyError) as cm:
-            ll.limits_for("vicuna_7b", [40, 20, 10, 10])
-        self.assertIn("40_20_10_10", str(cm.exception))
+            ll.limits_for("vicuna_13b", [20, 20, 20])
+        self.assertIn("20_20_20", str(cm.exception))
+        with self.assertRaises(KeyError) as cm:
+            ll.limits_for("vicuna_7b", LAYOUT_80)  # known layout, model not in it
+        self.assertIn("vicuna_7b", str(cm.exception))
         with self.assertRaises(KeyError) as cm:
             ll.limits_for("gemma_7b", LAYOUT)
         self.assertIn("gemma_7b", str(cm.exception))
@@ -67,6 +82,56 @@ class LayerLimitsFile(unittest.TestCase):
         self.assertEqual(s["vicuna_7b"], s["llama_7b"])
         self.assertEqual(s["vicuna_7b"], s["mistral_7b"])
         self.assertEqual(len(s["vicuna_7b"]), 67)
+
+
+class Layout80GB(unittest.TestCase):
+    """40/20/10/10 on A100-80GB, sized to a ~2.5-day sweep."""
+
+    def splits(self, key):
+        limits, min_last = ll.limits_for(key, LAYOUT_80)
+        return ec.generate_layer_splits(
+            ml.REFERENCE_SHAPES[key]["L"], limits, LAYOUT_80, True, min_last
+        )
+
+    def test_split_counts_fit_the_budget(self):
+        # x 11 batch pairs, at the April 80GB per-config times: ~2 days per lane.
+        # Changing a vector changes the run time: re-check the budget.
+        counts = {k: len(self.splits(k)) for k in ll.LAYER_LIMITS["40_20_10_10"]}
+        self.assertEqual(counts, {"vicuna_13b": 48, "llama_13b": 48, "qwen_14b": 44, "mistral_24b": 35})
+
+    def test_13b_models_share_a_split_set(self):
+        self.assertEqual(self.splits("llama_13b"), self.splits("vicuna_13b"))
+
+    def test_every_slice_holds_layers(self):
+        # Small slices up to their B64 capacity; none head-only on this layout.
+        for key in ll.LAYER_LIMITS["40_20_10_10"]:
+            self.assertTrue(all(min(s) >= 1 for s in self.splits(key)), key)
+
+    def test_april_13b_splits_are_a_subset_not_the_sweep(self):
+        # The April [24, 10, 5, 5] sweep reached rank 0 up to 24; the new vector
+        # trades that end for more layers on the 10GB slices. Overlap keeps a
+        # cross-check against the April rows.
+        path = ORACLE_80 / "vicuna_13B.csv"
+        if not path.exists():
+            self.skipTest("oracle CSV not present")
+        ours, april = {tuple(s) for s in self.splits("vicuna_13b")}, oracle_splits(path)
+        self.assertEqual(len(april), 22)
+        self.assertTrue(ours & april)
+        self.assertGreater(max(s[3] for s in ours), max(s[3] for s in april))
+
+    def test_slice_capacities(self):
+        self.assertEqual(ml.slice_mibs(LAYOUT_80), [40192, 19968, 9728, 9728])
+        self.assertEqual(ml.slice_mibs(LAYOUT), [20096, 9984, 4864, 4864])
+
+    def test_every_config_fits(self):
+        # The April 13B sweep had no OOM at any of the 14 pairs; the model agrees
+        # and extends that to the two GQA models.
+        pairs = pp.SWEEP_DEFAULTS["batch_mb_pairs"]
+        for key in ll.LAYER_LIMITS["40_20_10_10"]:
+            mm = ml.MemoryModel(ml.REFERENCE_SHAPES[key])
+            for s in self.splits(key):
+                for b, mb in pairs:
+                    self.assertEqual(mm.oom_ranks(s, b, mb, LAYOUT_80), [], (key, s, b, mb))
 
 
 class MemoryModelShapes(unittest.TestCase):

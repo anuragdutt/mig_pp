@@ -36,6 +36,7 @@ REPOS = {
     "llama_13b": "meta-llama/Llama-2-13b-hf",
     "qwen_14b": "Qwen/Qwen2.5-14B",
     "nemo_12b": "mistralai/Mistral-Nemo-Base-2407",
+    "mistral_24b": "mistralai/Mistral-Small-24B-Base-2501",
 }
 
 # config.json, generation_config.json and the tokenizer files, whatever the family.

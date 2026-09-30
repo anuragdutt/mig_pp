@@ -43,6 +43,10 @@ KV_FACTOR = 1.10
 # Usable MiB per MIG profile by nominal GB (A100-40GB; the 9/28 per-slice
 # maxima 4863 / 9983 / 20085 MiB sit just under these).
 SLICE_MIB = {5: 4864, 10: 9984, 20: 20096, 40: 40192}
+# Layouts whose nominal sizes are other profiles: A100-80GB's 2g.20gb and 1g.10gb
+# are smaller than the 40GB card's 3g.20gb and 2g.10gb (April 80GB maxima
+# 40190 / 19965 / 9728 MiB).
+LAYOUT_MIB = {"40_20_10_10": [40192, 19968, 9728, 9728]}
 
 # Public config.json shapes, for when the weights are not on this machine.
 REFERENCE_SHAPES = {
@@ -54,6 +58,7 @@ REFERENCE_SHAPES = {
     "llama_13b": dict(L=40, H=5120, I=13824, heads=40, kv=40, hd=128, V=32000, bias=False),
     "qwen_14b": dict(L=48, H=5120, I=13824, heads=40, kv=8, hd=128, V=152064, bias=True),
     "nemo_12b": dict(L=40, H=5120, I=14336, heads=32, kv=8, hd=128, V=131072, bias=False),
+    "mistral_24b": dict(L=40, H=5120, I=32768, heads=32, kv=8, hd=128, V=131072, bias=False),
 }
 
 
@@ -70,6 +75,11 @@ def shape_from_config(raw: dict) -> dict:
 
 def slice_mib_for(gb) -> int:
     return SLICE_MIB.get(int(gb), int(gb * 1024 * 0.95))
+
+
+def slice_mibs(slice_gb) -> list:
+    """Usable MiB per rank of a layout."""
+    return list(LAYOUT_MIB.get(ll.layout_key(slice_gb)) or [slice_mib_for(g) for g in slice_gb])
 
 
 class MemoryModel:
@@ -103,8 +113,8 @@ class MemoryModel:
         return n
 
     def oom_ranks(self, split, batch, mb, slice_gb):
-        return [r for r in range(len(split))
-                if self.need(r, len(split), split[r], batch, mb) > slice_mib_for(slice_gb[r])]
+        caps = slice_mibs(slice_gb)
+        return [r for r in range(len(split)) if self.need(r, len(split), split[r], batch, mb) > caps[r]]
 
 
 def shape_for(key, entry):
@@ -127,7 +137,7 @@ def report(key, entry, sweep, slice_gb):
           f"lm_head build {mm.build:.0f} MiB ({source})")
     for b in batches:
         mb = max(m for bb, m in pairs if bb == b)
-        caps = [mm.max_layers(r, world, b, mb, slice_mib_for(slice_gb[r])) for r in range(world)]
+        caps = [mm.max_layers(r, world, b, mb, cap) for r, cap in enumerate(slice_mibs(slice_gb))]
         print(f"  B{b:<3d} max layers {caps}" + ("" if sum(max(c, 0) for c in caps) >= shape["L"] else "  <- model cannot fit"))
     try:
         limits, min_last = ll.limits_for(key, slice_gb)
@@ -171,7 +181,7 @@ def main(argv=None):
     models, sweep = ns.get("MODELS", {}), ns.get("SWEEP", {})
     layouts = sorted({tuple(g["slice_gb"]) for g in ns.get("GPUS", []) if g.get("models")}) or [(20, 10, 5, 5)]
     for layout in layouts:
-        print(f"=== layout {ll.layout_key(layout)} (slices {[slice_mib_for(g) for g in layout]} MiB)")
+        print(f"=== layout {ll.layout_key(layout)} (slices {slice_mibs(layout)} MiB)")
         for key in args.model or list(models):
             report(key, models.get(key), sweep, list(layout))
     return 0
