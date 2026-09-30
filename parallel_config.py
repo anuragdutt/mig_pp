@@ -47,7 +47,7 @@ GPUS = [
 SWEEP = dict(
     seq_len=64,
     max_new_tokens=512,
-    max_runs=5,
+    max_runs=None,
     enforce_slice_ordering=True,
     # All 14 pairs. The 16/32-microbatch ones ((32, 2), (64, 4), (64, 2)) are
     # ~1/3 of a split's time on the current harness (46% on April's pre-ACK-fix
