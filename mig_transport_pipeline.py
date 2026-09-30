@@ -89,6 +89,26 @@ NUM_SLOTS = 48
 # ACK tag is tag + ACK_TAG_OFFSET so it never collides with normal handshakes
 ACK_TAG_OFFSET = 10_000_000
 
+# SHM segment names are "<prefix>_<rank>_slot<slot>". The prefix used to be the
+# fixed "mig_pipe_shm", which is only safe while ONE pipeline runs on the box:
+# a second one would unlink the first's live segments on startup (the stale-
+# entry cleanup below), attach its peers to the wrong run's slots, and unlink
+# them again in cleanup(). run_parallel.sh gives every job its own prefix via
+# MIG_SHM_PREFIX (see experiment_config.SHM_PREFIX_ENV_VAR); unset keeps the
+# legacy names, so a standalone run is unchanged.
+#
+# Read at engine construction, not import: the benchmark sets the variable in
+# its config block, after this module is already imported.
+_LEGACY_SHM_PREFIX = "mig_pipe_shm"
+
+
+def _shm_prefix() -> str:
+    return os.environ.get("MIG_SHM_PREFIX") or _LEGACY_SHM_PREFIX
+
+
+def _slot_name(prefix: str, rank: int, slot: int) -> str:
+    return f"{prefix}_{rank}_slot{slot}"
+
 # Control-message tag window (TOKENS_TAG_BASE .. +999 in the benchmark).
 # Currently unused: ALL blocking sends go direct to gloo, so no tag test is
 # needed. Retained for a future blocking SHM path — see the commented
@@ -126,10 +146,14 @@ class MIGPipelineTransport:
         # Each slot holds raw bytes for largest tensor.
         self.slot_size = buffer_size_mb * 1024 * 1024
 
+        # Fixed for this engine's lifetime: creation, peer attach and
+        # cleanup() must all agree on the names.
+        self.shm_prefix = _shm_prefix()
+
         _tlog.info(
             "[T01][rank%d] init transport: world_size=%d num_slots=%d "
             "slot_size=%dMB (host cost: %dMB SHM + %dMB pinned send + "
-            "%dMB pinned recv)",
+            "%dMB pinned recv) shm_prefix=%s",
             rank,
             world_size,
             num_slots,
@@ -137,6 +161,7 @@ class MIGPipelineTransport:
             num_slots * buffer_size_mb,
             num_slots * buffer_size_mb,
             num_slots * buffer_size_mb,
+            self.shm_prefix,
         )
         print(
             f"[MIG-Pipe] Rank {rank} initializing transport "
@@ -150,7 +175,7 @@ class MIGPipelineTransport:
         self.slot_free = [True] * num_slots
 
         for slot in range(num_slots):
-            name = f"mig_pipe_shm_{rank}_slot{slot}"
+            name = _slot_name(self.shm_prefix, rank, slot)
 
             # Clean stale /dev/shm entries if present
             try:
@@ -245,7 +270,7 @@ class MIGPipelineTransport:
 
             self.peer_slots[peer_rank] = []
             for slot in range(num_slots):
-                peer_name = f"mig_pipe_shm_{peer_rank}_slot{slot}"
+                peer_name = _slot_name(self.shm_prefix, peer_rank, slot)
                 connected = False
                 attempts = 0
 
@@ -806,7 +831,8 @@ def cleanup():
     own_names = set()
     if engine is not None:
         own_names = {
-            f"mig_pipe_shm_{engine.rank}_slot{s}" for s in range(engine.num_slots)
+            _slot_name(engine.shm_prefix, engine.rank, s)
+            for s in range(engine.num_slots)
         }
 
     for shm in _MIG_SHM_HANDLES:

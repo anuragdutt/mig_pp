@@ -2,3 +2,5 @@
 __pycache__/
 *.py[cod]
 *$py.class
+# run_parallel.sh output: per-job logs, CSVs, transport logs (GBs over a sweep)
+runs/

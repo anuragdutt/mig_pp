@@ -15,8 +15,14 @@ Corollary: make anything the user runs self-contained and one-shot. Every round 
 costs a copy-paste, so front-load diagnostics and make one run answer as many
 questions as possible.
 
-**No local torch.** Neither system `python3` nor `.venv` has it. Nothing in
-`tests/` can be executed on the Mac — it all runs on the box.
+**Local torch is CPU-only and partial.** `.venv` has torch 2.14.0 (CPU build) but
+no transformers/numpy/datasets/pandas; system `python3` has none of them. The
+torch-free suites run on the Mac (see the parallel-runner section). For torch-level
+checks, install the pinned transformers into the scratchpad, not the venv:
+`.venv/bin/python -m pip install --target <scratch>/pylib transformers==5.14.1
+safetensors==0.8.0 numpy tqdm`, then `PYTHONPATH=<scratch>/pylib` (in zsh write
+`${LIB}:tests`, not `$LIB:tests` — `:t` is a zsh modifier). Anything needing
+CUDA, MIG or gloo across slices still only runs on the box.
 
 **Permission gate on benchmark edits.** A probe or test whose cases all pass is
 required *before* modifying benchmark files. This was set after Claude patched
@@ -28,6 +34,61 @@ They are harness overhead, not a property of the configuration being swept.
 
 **Stay on harness and experiment setup.** The user builds the predictive model. No
 equation modelling unless explicitly asked.
+
+## State as of 2026-09-29 — 8-GPU parallel runner (uncommitted)
+
+Goal: one box, 8 A100s, MIG on each; one **lane per GPU** running that GPU's model
+list sequentially, all lanes at once, nothing shared between lanes. Vicuna-7B is
+done (9/28); the other six models are on GPUs 0-5, Mistral-Nemo-12B on GPU 6, and a
+full Vicuna-7B re-run (same 938 configs as 9/28) on GPU 7 to measure how much the new
+box + eight lanes at once move latency (and to check the recovered 9/28 memory
+mapping against NVML's per-UUID columns). `download_models.py` fetches all eight
+(162.8 GB, one weight format each) into `MODEL_ROOT`; the two Llama-2 repos are gated.
+
+Collisions that made 8 plain copies unsafe (all fixed, all default-preserving):
+
+| Resource | Was | Now |
+|---|---|---|
+| Rendezvous port | `MASTER_PORT="29500"` hardcoded | `MASTER_PORT` constant; per job `base_port + gpu*10` |
+| /dev/shm names | `mig_pipe_shm_{rank}_slot{N}`; startup *unlinks* any existing one | `$MIG_SHM_PREFIX` (`migpp_<run>_g<gpu>j<NN>`); legacy name when unset |
+| Outputs | `benchmark.log`, CSVs, `logs/` in CWD | unchanged code; the manager runs each job with CWD = its job dir |
+| Memory monitor | DCGM: `sudo pkill -f 'dcgmi dmon'`, one group name, GPU 0 hardcoded | `nvml_mem_monitor.py`, per MIG UUID, no sudo; planner refuses DCGM for >1 lane |
+| Model | Llama classes + `.bin` only; other models lived on per-model branches | `model_family.resolve(model_type)` (llama, mistral, qwen2); safetensors + mmap'd `.bin`; `[B08]` coverage line |
+| CPU | unbound | each lane `taskset` to its GPU's NUMA-local CPUs (lanes on a node share them) |
+
+How a job gets its config: `parallel_plan.py` reads each model's `config.json`
+(layers, hidden, type), writes `job.json`, the lane exports `MIG_EXP_CONFIG`, and the
+benchmark's PARALLEL-RUN OVERRIDE block replaces its constants. Unset => standalone
+run exactly as before (`tests/test_benchmark_wiring.py` execs the real config
+section both ways).
+
+Layer limits live in `layer_limits.py` (layout -> model -> per-rank caps, plus
+`HEAD_ONLY_LAST_RANK`). `memory_limits.py` is the theory behind them: fp16 weights +
+KV (x1.10) + context 250 MiB + prefill activations + the embed/lm_head fp32 build
+peak. Calibrated on the 9/28 sweep it predicts 933/938 ok/OOM outcomes, and
+reproduces `mig_pp/profiles/poc_layer_memory.csv` byte-for-byte. `[18,12,5,5]` is
+exactly "rank0 = capacity at B64 - 1, ranks 1-3 = capacity at B32 - 1"; 7B models
+share it, 13B uses the same rule (`[23,12,5,5]`), Qwen keeps a head-only last rank.
+
+`generate_layer_splits` now delegates to `experiment_config` (torch-free), proven
+equal to a frozen copy of the old body (67 splits x 14 = 938 = the 9/28 CSV) and,
+with `min_last_rank_layers=0`, to the qwen-14b branch's generator. The qwen-7b branch
+also allowed a head-only last rank (oracle has `(16,8,4,0)`) — the 9/24 generator
+could not express either.
+
+Gate status: torch-free suites green on Python 3.13 and 3.10, bash 3.2 and 5.3,
+shellcheck clean; `tests/test_model_family_torch.py` (loader + stage maths vs HF,
+3 families x 3 checkpoint formats) green on CPU against transformers 5.14.1.
+**Box side not run yet:** `./run_parallel.sh smoke` is the acceptance gate — one tiny
+config per job on every lane at once, then a PASS/FAIL verdict per job (state ok,
+results rows ok, `[B08] missing=0` per rank, `[T01] shm_prefix=` = the job's prefix per
+rank, memory trace within slice capacity, no /dev/shm leftovers). On the box,
+`python3 -m unittest discover -s tests -p 'test_model_family_torch.py'` also runs
+there on CPU in seconds.
+
+Simplified on 2026-09-29 at the user's request ("get rid of over-engineering"):
+the 2.5k-line preflight is gone (check + smoke cover it), and the planner, NVML
+monitor and manager were cut to what is listed here.
 
 ## State as of 2026-09-24
 
@@ -146,16 +207,45 @@ This was the permission gate for the ACK change, which is now committed.
    (`benchmark_pipeline_microbatching.py:487`, `:592`) but line 547 reads it on every
    rank, so rank 1 sees stale zeros. Probably harmless since only rank 0 feeds embed.
    Flagged, awaiting a decision — not fixed.
-3. **DCGM is unavailable.** Not a rename — `datacenter-gpu-manager` is absent from the
-   box's apt repo entirely; `apt-cache search dcgm` returns only NSCQ libs. `pynvml` is
-   already in the venv and is the proposed fallback. `dcgm_mem_monitor.py` (481 lines,
-   unmodified) would need rewriting behind its existing interface:
-   `setup_dcgm_group(mig_uuids, slice_gb)`, `start()`, `stop()`, `set_label()`,
-   `clear()`, `save_csv(path)`, and `_samples` rows of
-   `(ts, label, gpu_mb, gi0_mb, gi1_mb, gi2_mb)`.
+3. **DCGM: availability varies by box; its rank mapping is wrong where it runs.**
+   It was absent from one box's apt repo, but on the 9/26 box it ran — and fell
+   back to `could not parse DCGM entity ids ... assuming ids 0..3` (see item 5).
+   `nvml_mem_monitor.py` now implements the same interface by MIG UUID; parallel
+   runs use it (`RUNNER mem_monitor="nvml"`). The standalone default is still DCGM.
 4. **MIG on the Autoresearch H100 is blocked.** `CapEff: 0000000000000000` — the
    container has no capabilities, so `nvidia-smi -mig 1` cannot work. Ticket
    `tkt-bx3vt` filed. Log at `logs/h100_mig_enable_probe_2026-09-21.log`.
+
+5. **9/28 memory columns are permuted** (latency and OOM status are fine — those come
+   from the ranks). Recovered mapping, same for peak_*, avg_* and the trace:
+
+   | column | actually holds |
+   |---|---|
+   | `*_rank0_20gb_mb` | rank 2 (5GB) |
+   | `*_rank1_10gb_mb` | rank 3 (5GB, lm_head) |
+   | `*_rank2_5gb_mb` | rank 1 (10GB) |
+   | `*_rank3_5gb_mb` | rank 0 (20GB) |
+
+   Three independent checks: column maxima sit at the true slices' capacities
+   (4861/4863/9983/20085 MB); each rank's layer count correlates most with that
+   column (r 0.51/0.51/0.63/0.84); with equal layers on ranks 2-3, col1-col0 = +203 MB
+   (the 262 MB lm_head) in 184/209 rows. A pure reversal was considered first and is
+   wrong for the two 5GB columns.
+6. **Embed / lm_head are built fp32 on the GPU, then `.half()`** (`nn.Linear(...).to(device).half()`):
+   6 bytes/param at the peak. Harmless for 32k vocabs (750 MiB) but it is what caps
+   Qwen's last 5GB rank — 3118 MiB for Qwen2.5-7B (max 3 layers), 4455 MiB for
+   Qwen2.5-14B (0 layers). Building them in fp16 directly would free ~2/3 of that.
+   Not changed: it would move memory numbers against the 9/28 and oracle data.
+   Awaiting a decision.
+7. **Parallel-run interference is unmeasured.** Lanes are pinned to their GPU's NUMA
+   node (lanes on one node share its cores); host memory bandwidth, PCIe switches
+   (GPU pairs) and page cache are shared. Compare one model solo (`--gpus N`) against the same model
+   in the full run before trusting cross-lane comparisons.
+8. **Results CSV is written only at the end of a job's sweep** (pre-existing). A job
+   killed at config 500/938 loses its rows; `benchmark.log` keeps per-config latency.
+9. **13B at B32/B64 cannot fit on 20/10/5/5 at all** (26 GB weights + KV; the old 13B
+   oracle runs only ever swept B8/B16), so `parallel_config.py` restricts the 13B
+   models to B8/B16 and Qwen2.5-14B to B<=32. Put them back if OOM rows are wanted.
 
 ## Things that cost time before
 
@@ -261,4 +351,15 @@ compute, which is no longer true now that receives are posted during `flush()`.
 | `probe_gloo_send.py` | acceptance gate for the gloo fix (T1–T7) |
 | `probe_recv_buf_race.py` | gate for the recv-buffer + norm fixes (P1–P7) |
 | `tests/test_async_ack.py` | acceptance gate for the ACK fix — never run |
-| `dcgm_mem_monitor.py` | memory sampling; DCGM unavailable, needs a pynvml rewrite |
+| `dcgm_mem_monitor.py` | DCGM memory sampling; GPU 0 only, not parallel-safe, mis-maps ranks (open item 5) |
+| `nvml_mem_monitor.py` | same interface via NVML by MIG UUID; parallel-safe, no sudo |
+| `run_parallel.sh` | bash manager: `discover check smoke start status stop` (+ `--detach`, `--resume`); `stop` only aborts early; one session per lane |
+| `parallel_plan.py` | torch-free planner: validation, run dirs, report, smoke verdict |
+| `parallel_config.py` | which models on which GPU (+ per-model batch overrides); the file you edit |
+| `layer_limits.py` | per-layout, per-model layer caps (dictionary) + head-only-last-rank set |
+| `memory_limits.py` | theoretical per-slice capacity per model/batch; `--validate` against a results CSV |
+| `download_models.py` | fetches every MODELS entry into its configured path (`--check` = access/sizes/disk only) |
+| `experiment_config.py` | job.json schema + the split enumeration (torch-free) |
+| `model_family.py` | model_type -> classes, model path / weight-file discovery (torch-free at import) |
+| `tests/test_run_parallel.py` | end-to-end: real planner + manager + stub benchmark on a fake 8-GPU box |
+| `tests/test_model_family_torch.py` | loader + stage maths vs HF for llama/mistral/qwen2 (skips without transformers) |

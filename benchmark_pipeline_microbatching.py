@@ -16,17 +16,13 @@ import torch.nn as nn
 import pandas as pd
 from tqdm import tqdm
 
-from transformers import DynamicCache, LlamaConfig, AutoTokenizer
-from transformers.models.llama.modeling_llama import (
-    LlamaDecoderLayer,
-    LlamaRMSNorm,
-    LlamaRotaryEmbedding,
-)
+from transformers import AutoConfig, DynamicCache, AutoTokenizer
 from transformers.utils import hub
 
 
 import mig_transport_pipeline as mig_transport
-import dcgm_mem_monitor as monitor
+import experiment_config
+import model_family
 from token_exchange import TokenExchange
 
 # ---------------------------------------------------------------------------
@@ -81,15 +77,6 @@ MIG_UUIDS = [
 SLICE_GB = [20, 10, 5, 5]
 LAYER_LIMITS = [18, 12, 5, 5]
 
-WORLD_SIZE = len(MIG_UUIDS)
-
-assert len(SLICE_GB) == WORLD_SIZE, "SLICE_GB must have one entry per rank"
-assert len(LAYER_LIMITS) == WORLD_SIZE, "LAYER_LIMITS must have one entry per rank"
-assert sum(LAYER_LIMITS) >= TOTAL_LAYERS, (
-    f"LAYER_LIMITS sums to {sum(LAYER_LIMITS)} but the model has "
-    f"{TOTAL_LAYERS} layers — no split can fit"
-)
-
 # Ordering constraint on splits. The two 10GB slices are identical, so
 # permuting layers between them produces duplicate configurations with
 # identical performance. Requiring l1 >= l2 breaks that symmetry and halves
@@ -99,6 +86,72 @@ assert sum(LAYER_LIMITS) >= TOTAL_LAYERS, (
 # Set to False to search the full space including "inverted" splits (small
 # slice doing more work than a big one) — slower, and mostly OOMs.
 ENFORCE_SLICE_ORDERING = True
+
+# 0 lets the last rank hold no decoder layers, only norm + lm_head — how the
+# qwen-14b-4mig branch fit Qwen2.5-14B's 152k-vocab head on a 5GB slice.
+MIN_LAST_RANK_LAYERS = 1
+
+# Explicit split list to run instead of the enumeration; None = enumerate.
+SPLITS = None
+
+# Rendezvous port for this pipeline's process group.
+MASTER_PORT = 29500
+
+# Memory sampler: "dcgm" (dcgm_mem_monitor, GPU 0 only), "nvml"
+# (nvml_mem_monitor, per MIG UUID) or "off".
+MEM_MONITOR = "dcgm"
+
+# --- PARALLEL-RUN OVERRIDE ---
+# run_parallel.sh launches this script once per (GPU, model) job with
+# MIG_EXP_CONFIG pointing at that job's job.json (written by
+# parallel_plan.py), and every constant above is replaced from it. Unset — a
+# standalone run — this block does nothing and the constants above are used
+# exactly as written.
+#
+# Spawned ranks re-import this module with the parent's environment, so they
+# re-read the same file: parent and ranks cannot disagree.
+_JOB = experiment_config.load_job()
+if _JOB is not None:
+    MODEL_NAME = _JOB["model_path"]
+    TOTAL_LAYERS = _JOB["num_layers"]
+    HIDDEN_SIZE = _JOB["hidden_size"]
+    HEADS = _JOB["num_heads"]
+    SEQ_LEN = _JOB["seq_len"]
+    MAX_NEW_TOKENS = _JOB["max_new_tokens"]
+    MAX_RUNS = _JOB["max_runs"]
+    BATCH_MB_PAIRS = [tuple(p) for p in _JOB["batch_mb_pairs"]]
+    MIG_UUIDS = list(_JOB["mig_uuids"])
+    SLICE_GB = list(_JOB["slice_gb"])
+    LAYER_LIMITS = list(_JOB["layer_limits"])
+    ENFORCE_SLICE_ORDERING = _JOB["enforce_slice_ordering"]
+    MIN_LAST_RANK_LAYERS = _JOB.get("min_last_rank_layers", 1)
+    SPLITS = _JOB.get("splits")
+    MASTER_PORT = _JOB["master_port"]
+    MEM_MONITOR = _JOB["mem_monitor"]
+    # The transport names its /dev/shm segments from this (read when each
+    # rank builds its engine). Unique per job, so two pipelines on one box
+    # cannot attach to, or unlink, each other's slots.
+    os.environ[experiment_config.SHM_PREFIX_ENV_VAR] = _JOB["shm_prefix"]
+
+# The DCGM monitor pkills every `dcgmi dmon` on the box and hardcodes GPU 0,
+# so it is only safe for a single run on GPU 0; parallel jobs use NVML, which
+# reads each MIG slice by UUID.
+if MEM_MONITOR == "dcgm":
+    import dcgm_mem_monitor as monitor
+else:
+    import nvml_mem_monitor as monitor
+
+    if MEM_MONITOR == "off":
+        monitor.disable()
+
+WORLD_SIZE = len(MIG_UUIDS)
+
+assert len(SLICE_GB) == WORLD_SIZE, "SLICE_GB must have one entry per rank"
+assert len(LAYER_LIMITS) == WORLD_SIZE, "LAYER_LIMITS must have one entry per rank"
+assert sum(LAYER_LIMITS) >= TOTAL_LAYERS, (
+    f"LAYER_LIMITS sums to {sum(LAYER_LIMITS)} but the model has "
+    f"{TOTAL_LAYERS} layers — no split can fit"
+)
 
 # Dist message tag bases (avoid collisions)
 PREFILL_TAG_BASE = 1000
@@ -197,7 +250,9 @@ def run_pipeline(
         os.environ["CUDA_VISIBLE_DEVICES"] = device_uuid
         os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
         os.environ["MASTER_ADDR"] = "127.0.0.1"
-        os.environ["MASTER_PORT"] = "29500"
+        # Per job under run_parallel.sh, so eight pipelines rendezvous on
+        # eight ports instead of all joining the first one's store.
+        os.environ["MASTER_PORT"] = str(MASTER_PORT)
 
         dist.init_process_group(
             backend="gloo",
@@ -228,8 +283,24 @@ def run_pipeline(
             num_slots=_num_mb + 8,
         )
 
-        # Getting model dimensions
-        config = LlamaConfig.from_pretrained(MODEL_NAME)
+        # Getting model dimensions. AutoConfig + model_family rather than the
+        # Llama classes directly: one harness builds Llama/Vicuna, Mistral and
+        # Qwen2 stages, where each used to need its own branch with the three
+        # class names swapped.
+        config = AutoConfig.from_pretrained(MODEL_NAME)
+        family = model_family.resolve(config.model_type)
+        # The parent enumerated splits from TOTAL_LAYERS and the transport
+        # sized its slots from HIDDEN_SIZE; a checkpoint that disagrees is a
+        # different model from the one the job describes.
+        if (config.num_hidden_layers, config.hidden_size) != (
+            TOTAL_LAYERS,
+            HIDDEN_SIZE,
+        ):
+            raise ValueError(
+                f"{MODEL_NAME}: config.json has {config.num_hidden_layers} layers "
+                f"/ hidden {config.hidden_size}, but this run was configured for "
+                f"{TOTAL_LAYERS} / {HIDDEN_SIZE}"
+            )
         # Using Scaled Dot-Product Attention (Flash attention)
         config._attn_implementation = "sdpa"
 
@@ -253,7 +324,7 @@ def run_pipeline(
         layers = nn.ModuleList()
         for idx in my_layer_indices:
             layers.append(
-                LlamaDecoderLayer(config, layer_idx=idx).half().to(device)
+                family.decoder_layer(config, layer_idx=idx).half().to(device)
             )  # Empty physical layer
 
             # This is critical to do for 5gb instance
@@ -263,7 +334,7 @@ def run_pipeline(
         # Into english sentences
         if rank == world_size - 1:
             model_components["norm"] = (
-                LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+                family.rms_norm(config.hidden_size, eps=config.rms_norm_eps)
                 .to(device)
                 .half()
             )
@@ -279,7 +350,7 @@ def run_pipeline(
         layers.eval()
 
         # RoPE (Rotary Position Embeddings)
-        rotary_embedding = LlamaRotaryEmbedding(config=config, device=device)
+        rotary_embedding = family.rotary_embedding(config=config, device=device)
 
         # Weight loading reads every shard from disk and copies tensor by
         # tensor; on a cold page cache it dominates process startup and is the
@@ -287,7 +358,13 @@ def run_pipeline(
         # says so outright instead of leaving it to be inferred.
         _wl_t0 = time.perf_counter()
         load_specific_weights(
-            rank, world_size, MODEL_NAME, layers, my_layer_indices, model_components
+            rank,
+            world_size,
+            MODEL_NAME,
+            layers,
+            my_layer_indices,
+            model_components,
+            tie_word_embeddings=getattr(config, "tie_word_embeddings", False),
         )
         _wl_s = time.perf_counter() - _wl_t0
         log.info(
@@ -767,37 +844,19 @@ def generate_layer_splits():
     Works for any WORLD_SIZE: recurses over ranks 0..n-2 and lets the last
     rank take the remainder. Ordering rules come from SLICE_GB — see
     ENFORCE_SLICE_ORDERING above.
+
+    The algorithm lives in experiment_config (torch-free) so parallel_plan.py
+    can count and validate a sweep before launching it.
+    tests/test_experiment_config.py checks it against a frozen copy of the
+    body that used to be here: same splits, same order.
     """
-    valid_splits = []
-    n = WORLD_SIZE
-
-    def _ok(prev_idx, prev_layers, layers):
-        """Ordering constraint between rank prev_idx and the next rank."""
-        if not ENFORCE_SLICE_ORDERING:
-            return True
-        if SLICE_GB[prev_idx] == SLICE_GB[prev_idx + 1]:
-            return prev_layers >= layers
-        return prev_layers > layers
-
-    def _recurse(rank, assigned, remaining):
-        # Last rank takes whatever is left — no need to enumerate it.
-        if rank == n - 1:
-            if not (1 <= remaining <= LAYER_LIMITS[rank]):
-                return
-            if assigned and not _ok(rank - 1, assigned[-1], remaining):
-                return
-            valid_splits.append(assigned + [remaining])
-            return
-
-        # Leave at least one layer for each rank still to come.
-        max_here = min(LAYER_LIMITS[rank], remaining - (n - rank - 1))
-        for count in range(1, max_here + 1):
-            if assigned and not _ok(rank - 1, assigned[-1], count):
-                continue
-            _recurse(rank + 1, assigned + [count], remaining - count)
-
-    _recurse(0, [], TOTAL_LAYERS)
-    return valid_splits
+    return experiment_config.generate_layer_splits(
+        TOTAL_LAYERS,
+        LAYER_LIMITS,
+        SLICE_GB,
+        ENFORCE_SLICE_ORDERING,
+        MIN_LAST_RANK_LAYERS,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -814,12 +873,23 @@ def main():
     os.environ.setdefault("MIG_LOG_STAMP", time.strftime("%Y%m%d_%H%M%S"))
     log.info(f"Transport log stamp: {os.environ['MIG_LOG_STAMP']}")
 
-    log.info("Setting up DCGM monitor group...")
+    if _JOB is not None:
+        log.info(
+            f"Parallel job {_JOB.get('job_id', '?')}: {MODEL_NAME} on "
+            f"{len(MIG_UUIDS)} slices {SLICE_GB}, port {MASTER_PORT}, "
+            f"shm prefix {_JOB['shm_prefix']}"
+        )
+
+    log.info(f"Setting up memory monitor ({MEM_MONITOR})...")
     # Pass the topology so the monitor can map DCGM entities to the right
     # ranks by MIG UUID, rather than a hardcoded entity->rank table.
     monitor.setup_dcgm_group(mig_uuids=MIG_UUIDS, slice_gb=SLICE_GB)
 
-    selected_splits = generate_layer_splits()
+    # An explicit split list (job.json "splits" — e.g. a smoke run's single
+    # front-loaded split) replaces the enumeration.
+    selected_splits = (
+        [list(s) for s in SPLITS] if SPLITS else generate_layer_splits()
+    )
 
     try:
         mp.set_start_method("spawn", force=True)
