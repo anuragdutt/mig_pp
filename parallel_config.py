@@ -9,9 +9,10 @@ another. Steps on the box:
   4. ./run_parallel.sh smoke, then ./run_parallel.sh start --detach
 Layer limits are in layer_limits.py. Unknown keys are errors, so typos fail loudly.
 """
+import os
 
 # Where download_models.py puts the weights (~70 GB for these four models).
-MODEL_ROOT = "/data/models"
+MODEL_ROOT = os.path.expanduser("~/models")
 
 # path: local model dir, or an HF repo id already in the HF cache (never downloads).
 # Optional per model: seq_len, max_new_tokens, max_runs, batch_mb_pairs, splits,
