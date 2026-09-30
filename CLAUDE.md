@@ -35,7 +35,44 @@ They are harness overhead, not a property of the configuration being swept.
 **Stay on harness and experiment setup.** The user builds the predictive model. No
 equation modelling unless explicitly asked.
 
-## State as of 2026-09-29 — 8-GPU parallel runner (uncommitted)
+## State as of 2026-09-30 — 4 x A100-80GB, heavier models (uncommitted)
+
+**The run box is `cc@mig` (repo `~/mig_pp`): 4 x A100-SXM4-80GB**, driver 560.35.05
+(CUDA 12.6 max), MIG disabled as of 9/30. Its venv came with torch `2.14.1+cu130`
+("driver too old (found version 12060)"); now `2.14.1+cu126` from the PyTorch cu126
+index: 4 GPUs, fp16 matmul + SDPA ok. It has **transformers 5.18.0** (not the pinned
+5.14.1): `tests/test_model_family_torch.py` passes against 5.18.0, including a Mistral
+variant with explicit `head_dim` != hidden/heads (Mistral-Small-24B's 128 vs 160).
+Enabling MIG there needs a reboot: `-mig 1` stays pending ("In use by another client")
+and `nvidia-smi -r` is refused even with nothing in `fuser -v /dev/nvidia*` and
+nvidia-persistenced stopped. MIG slices (and so their UUIDs) do not survive a reboot.
+Hard budget: the run must finish in 2.5 days. (`pace@etracker2` was a mix-up: 2 x GTX
+1080 Ti, no MIG; `/data` not writable there, hence `MODEL_ROOT = ~/models`.)
+
+Layout 40/20/10/10 (3g.40gb + 2g.20gb + 1g.10gb + 1g.10gb: the 9/28 compute split,
+twice the memory, ~1.3x the bandwidth, so latencies do not line up with 40GB data).
+One model per GPU, all 14 batch pairs (the user's call: the 16/32-microbatch pairs were
+only expensive on the pre-ACK-fix harness): vicuna_13b `[22,11,6,6]` 33 splits,
+llama_13b same, qwen_14b `[27,10,9,9]` 31, mistral_24b (Mistral-Small-24B-Base-2501)
+`[22,10,7,5]` 29 = 462/462/434/406 configs. The user dropped nemo_12b for mistral_24b
+and asked for wider small-slice caps than the April 80GB branches' `[24,10,5,5]` /
+`[30,10,4,2]` (5GB-era 5s): the 10GB slices sit at their B64 capacity (13B 6, Qwen 9,
+24B 7/5 -- Qwen's and 24B's last rank within ~300 MiB of the lm_head build peak, and
+the smoke split does not exercise them), 0 OOM predicted; ranks 0-1 narrowed to fit.
+
+Time. April 80GB data (branches `vic-13b-4mig-80gb`, `mistral-24b-4mig-80gb`; pre-ACK-fix
+code): 13B `[24,10,5,5]` x 14 pairs = 34.8 h, 24B 49 splits = 102.6 h; wall - latency
+per config ~80 s (13B), ~141 s (24B). New-harness estimate = 9/28's within-batch
+microbatch profile x each model's April 2-microbatch latency + that overhead: per split
+at 14 pairs 4124 s (13B), 4472 s (24B); x1.15-1.2 for more layers on slow slices ->
+~43 h per lane (April pace: 59-73 h). The 3 high-microbatch pairs are ~1/3 of a split
+on the new harness (46% in April). 14 pairs x the earlier 48/44/35 splits was ~52-63 h:
+over budget. April's `hang` rows were not hangs: `JOIN_TIMEOUT_S = 1200` includes weight
+load and April's (64,2) ran ~20 min; new-harness (64,2) estimate ~600-750 s. April
+maxima give the 80GB slice sizes (40190/19965/9728 MiB): `memory_limits.LAYOUT_MIB`.
+`oracle/80gb/20_10_5_5/` holds these 40/20/10/10 runs despite its name.
+
+## State as of 2026-09-29 — 8-GPU parallel runner (committed `2236a5e`)
 
 Goal: one box, 8 A100s, MIG on each; one **lane per GPU** running that GPU's model
 list sequentially, all lanes at once, nothing shared between lanes. Vicuna-7B is

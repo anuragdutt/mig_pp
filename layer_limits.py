@@ -37,23 +37,24 @@ LAYER_LIMITS = {
     },
     # 3g.40gb + 2g.20gb + 1g.10gb + 1g.10gb on A100-80GB: the 20_10_5_5 compute
     # split with twice the memory. The rule above would admit hundreds of splits
-    # per model here, so these are sized to a ~2.5-day sweep (35-48 splits x 11
-    # batch pairs) instead: the widest small-slice caps that still fit every
-    # split at B64 (memory_limits.py), then as wide on ranks 0-1 as the budget
+    # per model here, so these are sized to a ~2.5-day sweep (29-33 splits x 14
+    # batch pairs, ~43 h per lane estimated) instead: small-slice caps at their
+    # B64 capacity (memory_limits.py), then as wide on ranks 0-1 as the budget
     # allows. The April 80GB runs used [24, 10, 5, 5] (13B) and [30, 10, 4, 2]
     # (24B) -- small-slice caps left over from the 5GB slices.
     "40_20_10_10": {
-        # 10GB slices hold 6 13B layers at B64 (MHA: big KV). 48 splits:
-        # rank 0 16-22, rank 1 7-12, rank 2 3-6, rank 3 1-6 layers.
-        "vicuna_13b": [22, 12, 6, 6],
-        "llama_13b": [22, 12, 6, 6],  # same shapes as Vicuna-13B
-        # 44 splits: 20-26 / 8-12 / 5-8 / 2-8. No longer head-only: the 152k-vocab
-        # lm_head build still leaves room for 9 layers on a 10GB slice (its
-        # head-only flag is moot here, ranks 0-2 hold at most 46 of 48 layers).
-        "qwen_14b": [26, 12, 8, 8],
+        # 10GB slices hold 6 13B layers at B64 (MHA: big KV). 33 splits:
+        # rank 0 17-22, rank 1 7-11, rank 2 4-6, rank 3 1-6 layers.
+        "vicuna_13b": [22, 11, 6, 6],
+        "llama_13b": [22, 11, 6, 6],  # same shapes as Vicuna-13B
+        # 31 splits: 20-27 / 8-10 / 6-9 / 2-9. No longer head-only: the
+        # 152k-vocab lm_head build leaves room for 9 layers on a 10GB slice
+        # (within ~300 MiB; its head-only flag is moot, ranks 0-2 hold <= 46 of 48).
+        "qwen_14b": [27, 10, 9, 9],
         # Mistral-Small-24B, 1060 MiB/layer: rank 2 holds 7 at B64, rank 3 5
-        # beside the 131k-vocab lm_head. 35 splits: 19-24 / 6-9 / 4-7 / 1-5.
-        "mistral_24b": [24, 9, 7, 5],
+        # beside the 131k-vocab lm_head build (within ~340 MiB). 29 splits:
+        # 18-22 / 7-10 / 4-7 / 1-5.
+        "mistral_24b": [22, 10, 7, 5],
     },
 }
 

@@ -94,10 +94,10 @@ class Layout80GB(unittest.TestCase):
         )
 
     def test_split_counts_fit_the_budget(self):
-        # x 11 batch pairs, at the April 80GB per-config times: ~2 days per lane.
+        # x 14 batch pairs: ~43 h per lane estimated against a 60 h budget.
         # Changing a vector changes the run time: re-check the budget.
         counts = {k: len(self.splits(k)) for k in ll.LAYER_LIMITS["40_20_10_10"]}
-        self.assertEqual(counts, {"vicuna_13b": 48, "llama_13b": 48, "qwen_14b": 44, "mistral_24b": 35})
+        self.assertEqual(counts, {"vicuna_13b": 33, "llama_13b": 33, "qwen_14b": 31, "mistral_24b": 29})
 
     def test_13b_models_share_a_split_set(self):
         self.assertEqual(self.splits("llama_13b"), self.splits("vicuna_13b"))

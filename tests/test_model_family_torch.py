@@ -70,12 +70,16 @@ TINY = dict(
 )
 
 
-def tiny_config(model_type):
+def tiny_config(variant):
     from transformers import LlamaConfig, MistralConfig, Qwen2Config
-    if model_type == "llama":
+    if variant == "llama":
         return LlamaConfig(num_key_value_heads=4, **TINY)
-    if model_type == "mistral":
+    if variant == "mistral":
         return MistralConfig(num_key_value_heads=2, sliding_window=None, **TINY)
+    if variant == "mistral_head_dim":
+        # Mistral-Small-24B's shape: head_dim set explicitly, 128 != 5120 / 32,
+        # so q/o project to heads * head_dim, not to hidden_size.
+        return MistralConfig(num_key_value_heads=2, sliding_window=None, head_dim=8, **TINY)
     return Qwen2Config(num_key_value_heads=2, **TINY)  # q/k/v bias on by default
 
 
@@ -87,7 +91,7 @@ class ModelFamilyTorch(unittest.TestCase):
         cls.bench, cls.helpers, cls.mf = import_benchmark()
         cls.tmp = tempfile.TemporaryDirectory()
         cls.models = {}
-        for mt in ("llama", "mistral", "qwen2"):
+        for mt in ("llama", "mistral", "mistral_head_dim", "qwen2"):
             cfg = tiny_config(mt)
             cfg._attn_implementation = "sdpa"
             model = AutoModelForCausalLM.from_config(cfg).float().eval()
@@ -188,7 +192,7 @@ class ModelFamilyTorch(unittest.TestCase):
 
     def test_family_resolves_to_hf_classes(self):
         for mt, (cfg, model, _) in self.models.items():
-            fam = self.mf.resolve(mt)
+            fam = self.mf.resolve(cfg.model_type)
             self.assertIs(type(model.model.layers[0]), fam.decoder_layer)
             self.assertIs(type(model.model.norm), fam.rms_norm)
 

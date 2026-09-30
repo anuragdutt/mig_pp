@@ -43,12 +43,12 @@ GPUS = [
 SWEEP = dict(
     seq_len=64,
     max_new_tokens=512,
-    max_runs=None,
+    max_runs=5,
     enforce_slice_ordering=True,
-    # Up to 8 microbatches. Dropped (32, 2), (64, 4), (64, 2) -- 16 and 32
-    # microbatches: 46% of a split's time in the April 80GB 13B run, and at
-    # ~20 min each (64, 2) overran the benchmark's 1200 s join timeout, so
-    # those rows were recorded as "hang" and lost.
+    # All 14 pairs. The 16/32-microbatch ones ((32, 2), (64, 4), (64, 2)) are
+    # ~1/3 of a split's time on the current harness (46% on April's pre-ACK-fix
+    # one, where (64, 2) overran the 1200 s join timeout and was logged "hang");
+    # layer_limits.py's 40_20_10_10 split counts are sized for all 14.
     batch_mb_pairs=[
         (8, 4), (8, 2),
         (16, 8), (16, 4), (16, 2),
