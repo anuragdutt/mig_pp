@@ -61,12 +61,10 @@ LAYER_LIMITS = {
         # ~11 min per split at the 9/28 7B pace + 15%), small slices as high as the
         # ordering allows. The user widened rank 0 to 18: 112 splits, 10-18 / 6-11 /
         # 2-9 / 1-7, ~21 h at that pace -- a bet that the 80GB box runs ~2x faster.
-        "llama_7b": [18, 11, 9, 7],
-        "mistral_7b": [18, 11, 9, 7],
+        "llama_7b": [18, 12, 5, 5],
+        "mistral_7b": [18, 12, 5, 5],
         # 53 splits: 9-13 / 6-12 / 2-8 / 1-6.
         "qwen_7b": [13, 12, 8, 6],
-        # The 9/28 vector: same ordering rules as 20_10_5_5, so exactly the 67 splits
-        # of the 9/28 Vicuna-7B sweep (40GB) -- every row has a 40GB twin.
         "vicuna_7b": [18, 12, 5, 5],
     },
 }
