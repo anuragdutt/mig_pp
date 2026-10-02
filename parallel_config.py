@@ -54,9 +54,9 @@ SWEEP = dict(
     # one, where (64, 2) overran the 1200 s join timeout and was logged "hang");
     # layer_limits.py's 40_20_10_10 split counts are sized for all 14.
     batch_mb_pairs=[
-        # (8, 4), (8, 2),
-        (16, 8), (16, 4), (16, 2),
-        (32, 16), (32, 8), (32, 4), (32, 2),
+        (8, 4), (8, 2),
+        # (16, 8), (16, 4), (16, 2),
+        # (32, 16), (32, 8), (32, 4), (32, 2),
         # (64, 32), (64, 16), (64, 8), (64, 4), (64, 2),
     ],
 )
