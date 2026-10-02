@@ -4,6 +4,7 @@ Run locally:
     python3 -m unittest discover -s tests -p 'test_memory_limits.py' -v
 """
 
+import ast
 import csv
 import sys
 import unittest
@@ -56,16 +57,16 @@ class LayerLimitsFile(unittest.TestCase):
                     )
 
     def test_head_only_models_exist(self):
-        every = {k for m in ll.LAYER_LIMITS.values() for k in m}
-        self.assertLessEqual(ll.HEAD_ONLY_LAST_RANK, every)
+        for layout, models in ll.HEAD_ONLY_LAST_RANK.items():
+            self.assertLessEqual(models, set(ll.LAYER_LIMITS[layout]), layout)
 
     def test_lookup_errors_name_the_problem(self):
         with self.assertRaises(KeyError) as cm:
             ll.limits_for("vicuna_13b", [20, 20, 20])
         self.assertIn("20_20_20", str(cm.exception))
         with self.assertRaises(KeyError) as cm:
-            ll.limits_for("vicuna_7b", LAYOUT_80)  # known layout, model not in it
-        self.assertIn("vicuna_7b", str(cm.exception))
+            ll.limits_for("nemo_12b", LAYOUT_80)  # known layout, model not in it
+        self.assertIn("nemo_12b", str(cm.exception))
         with self.assertRaises(KeyError) as cm:
             ll.limits_for("gemma_7b", LAYOUT)
         self.assertIn("gemma_7b", str(cm.exception))
@@ -97,10 +98,21 @@ class Layout80GB(unittest.TestCase):
         # x 14 batch pairs: ~43 h per lane estimated against a 60 h budget.
         # Changing a vector changes the run time: re-check the budget.
         counts = {k: len(self.splits(k)) for k in ll.LAYER_LIMITS["40_20_10_10"]}
-        self.assertEqual(counts, {"vicuna_13b": 33, "llama_13b": 33, "qwen_14b": 31, "mistral_24b": 29})
+        self.assertEqual(counts, {"vicuna_13b": 33, "llama_13b": 33, "qwen_14b": 31, "mistral_24b": 29,
+                                  "llama_7b": 112, "mistral_7b": 112, "qwen_7b": 53,
+                                  "vicuna_7b": 67})
 
-    def test_13b_models_share_a_split_set(self):
+    def test_same_shape_models_share_a_split_set(self):
         self.assertEqual(self.splits("llama_13b"), self.splits("vicuna_13b"))
+        self.assertEqual(self.splits("mistral_7b"), self.splits("llama_7b"))
+
+    def test_vicuna_7b_is_the_928_split_set(self):
+        if not RESULTS_928.exists():
+            self.skipTest("9/28 results CSV not present")
+        with open(RESULTS_928) as f:
+            sweep = {tuple(ast.literal_eval(r["split"])) for r in csv.DictReader(f)}
+        self.assertEqual({tuple(x) for x in self.splits("vicuna_7b")}, sweep)
+        self.assertEqual(len(sweep), 67)
 
     def test_every_slice_holds_layers(self):
         # Small slices up to their B64 capacity; none head-only on this layout.

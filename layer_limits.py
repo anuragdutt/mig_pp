@@ -49,18 +49,33 @@ LAYER_LIMITS = {
         "llama_13b": [22, 11, 6, 6],  # same shapes as Vicuna-13B
         # 31 splits: 20-27 / 8-10 / 6-9 / 2-9. No longer head-only: the
         # 152k-vocab lm_head build leaves room for 9 layers on a 10GB slice
-        # (within ~300 MiB; its head-only flag is moot, ranks 0-2 hold <= 46 of 48).
+        # (within ~300 MiB).
         "qwen_14b": [27, 10, 9, 9],
         # Mistral-Small-24B, 1060 MiB/layer: rank 2 holds 7 at B64, rank 3 5
         # beside the 131k-vocab lm_head build (within ~340 MiB). 29 splits:
         # 18-22 / 7-10 / 4-7 / 1-5.
         "mistral_24b": [22, 10, 7, 5],
+        # 7B models: every split fits even at B64 (10GB slices hold 8-17 of their
+        # layers), so the ordering rule, not memory, caps the small slices (at 9 / 7
+        # for 32 layers, 8 / 6 for Qwen's 28). Sized for ~12 h of B32 only (4 pairs,
+        # ~11 min per split at the 9/28 7B pace + 15%), small slices as high as the
+        # ordering allows. The user widened rank 0 to 18: 112 splits, 10-18 / 6-11 /
+        # 2-9 / 1-7, ~21 h at that pace -- a bet that the 80GB box runs ~2x faster.
+        "llama_7b": [18, 11, 9, 7],
+        "mistral_7b": [18, 11, 9, 7],
+        # 53 splits: 9-13 / 6-12 / 2-8 / 1-6.
+        "qwen_7b": [13, 12, 8, 6],
+        # The 9/28 vector: same ordering rules as 20_10_5_5, so exactly the 67 splits
+        # of the 9/28 Vicuna-7B sweep (40GB) -- every row has a 40GB twin.
+        "vicuna_7b": [18, 12, 5, 5],
     },
 }
 
-# Models whose LAST rank may hold no decoder layers (only norm + lm_head), as
-# the qwen-7b / qwen-14b branches swept (e.g. the oracle's [16, 8, 4, 0]).
-HEAD_ONLY_LAST_RANK = {"qwen_7b", "qwen_14b", "nemo_12b"}
+# Per layout, models whose LAST rank may hold no decoder layers (only norm +
+# lm_head), as the qwen-7b / qwen-14b branches swept (e.g. the oracle's
+# [16, 8, 4, 0]): on a 5GB slice their lm_head build leaves no room. A 10GB
+# slice has room, so 40_20_10_10 has none.
+HEAD_ONLY_LAST_RANK = {"20_10_5_5": {"qwen_7b", "qwen_14b", "nemo_12b"}}
 
 
 def layout_key(slice_gb) -> str:
@@ -77,4 +92,4 @@ def limits_for(model_key: str, slice_gb):
     limits = list(LAYER_LIMITS[key][model_key])
     if len(limits) != len(list(slice_gb)):
         raise KeyError(f"layer_limits.py: '{model_key}' has {len(limits)} limits for {len(list(slice_gb))} slices")
-    return limits, (0 if model_key in HEAD_ONLY_LAST_RANK else 1)
+    return limits, (0 if model_key in HEAD_ONLY_LAST_RANK.get(key, ()) else 1)

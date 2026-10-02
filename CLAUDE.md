@@ -62,7 +62,17 @@ and asked for wider small-slice caps than the April 80GB branches' `[24,10,5,5]`
 the smoke split does not exercise them), 0 OOM predicted; ranks 0-1 narrowed to fit.
 
 Smoke on cc@mig 9/30 (`20260930_215856_smoke`, copied to the Mac as `runs_1/`): VERDICT
-PASS, all 4 jobs.
+PASS, all 4 jobs. The heavy models' B64 sweep took ~15 h; the 5-config trial
+(one split x splits) had projected 12.2-15.7 h, so that projection holds on this box.
+
+**10/02: 7B sweep, ~12 h left.** GPUs 0-2 run llama_7b / mistral_7b `[18,11,9,7]` (112
+splits) and qwen_7b `[13,12,8,6]` (53), B32 pairs only; GPU 3 runs vicuna_7b with the
+9/28 vector `[18,12,5,5]`: exactly the 9/28 40GB split set (67), so every row has a 40GB
+twin (a test checks it against `mig_benchmark_results_9_28.csv`). Every 7B split fits
+on 40/20/10/10 even at B64; the ordering rule, not memory, caps the small slices.
+`HEAD_ONLY_LAST_RANK` is now per layout (none on 40_20_10_10). 112 splits is ~21 h at
+the 9/28 7B pace (40GB card) -- the user's bet that this box is ~1.75x faster; the
+go/no-go is the first split's time (<= 6.4 min for 112 splits in 12 h).
 
 Time. April 80GB data (branches `vic-13b-4mig-80gb`, `mistral-24b-4mig-80gb`; pre-ACK-fix
 code): 13B `[24,10,5,5]` x 14 pairs = 34.8 h, 24B 49 splits = 102.6 h; wall - latency
