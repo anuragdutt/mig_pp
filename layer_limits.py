@@ -25,15 +25,15 @@ LAYER_LIMITS = {
         # 152k-vocab lm_head is built fp32 then halved: 3118 MiB of the last
         # 5GB slice for a moment, leaving room for 3 layers at most.
         "qwen_7b": [18, 12, 5, 3],
-        "vicuna_13b": [23, 12, 5, 5],  # cannot fit at B32/B64 at all on this layout
-        "llama_13b": [23, 12, 5, 5],
+        # "vicuna_13b": [23, 12, 5, 5],  # cannot fit at B32/B64 at all on this layout
+        # "llama_13b": [23, 12, 5, 5],
         # lm_head build needs 4455 MiB of the last slice: rank 3 holds only
         # norm + lm_head. [30, 15, 7] is exactly the capacity at B32.
-        "qwen_14b": [30, 15, 7, 0],
+        # "qwen_14b": [30, 15, 7, 0],
         # Mistral-Nemo-12B, 40 layers: its 131k-vocab lm_head build needs 3840 MiB
         # of the last slice, so rank 3 is head-only as for Qwen2.5-14B. By the
         # rule: fits up to B32, B64 is the stress batch (~18% OOM predicted).
-        "nemo_12b": [26, 15, 6, 0],
+        # "nemo_12b": [26, 15, 6, 0],
     },
     # 3g.40gb + 2g.20gb + 1g.10gb + 1g.10gb on A100-80GB: the 20_10_5_5 compute
     # split with twice the memory. The rule above would admit hundreds of splits
