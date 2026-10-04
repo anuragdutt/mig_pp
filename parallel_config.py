@@ -35,7 +35,7 @@ MODELS = {
 # switch RUN to SMALL and start again.
 HEAVY = ["vicuna_13b", "llama_13b", "qwen_14b", "mistral_24b"]
 SMALL = ["vicuna_7b", "llama_7b", "qwen_7b", "mistral_7b"]
-RUN = HEAVY
+RUN = SMALL
 # RUN = SMALL
 
 # One entry per GPU. slice_gb and mig_uuids in RANK ORDER (largest slice first);
