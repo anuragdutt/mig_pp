@@ -86,7 +86,8 @@ planner drops splits measured at all of a job's pairs and prints a NOTE per job.
 manual runs, one model per GPU, switched by `RUN = HEAVY` / `RUN = SMALL` in
 `parallel_config.py` (no chaining inside a lane, the user's call), 14 pairs, new splits
 only: heavy 13/13/10/12 = 672 configs (~14 h, Mistral-24B the long pole), then 7B
-12/12/18/6 = 672 configs (~9 h; qwen_7b `[18,6,5,5]`, the front-loaded region), at the measured per-split times (13B 46.5 min,
+12/12/18/12 = 756 configs (~9 h; qwen_7b `[18,6,5,5]`, the front-loaded region;
+mistral_7b `[19,12,5,5]` like llama/vicuna), at the measured per-split times (13B 46.5 min,
 Qwen-14B 53.7, Mistral-24B 70.5, 7B ~29.5 per 14-pair split).
 The user commented the heavy models out of the 20_10_5_5 (40GB) entries in `30cbd4d`;
 8 fake-box tests need them (all pass with them restored).

@@ -60,13 +60,13 @@ LAYER_LIMITS = {
         "mistral_24b": [23, 10, 7, 5],
         # 7B: every split fits even at B64; the ordering rule, not memory, caps the
         # small slices. Were [18, 12, 5, 5] (67, the 9/28 split set) and [13, 12, 8, 6]
-        # (53). Llama/Vicuna 79 (+12), Mistral 73 (+6). Qwen moves to the front-loaded
+        # (53). Llama/Vicuna/Mistral 79 (+12 each), one split set. Qwen moves to the front-loaded
         # region its earlier sweep (rank 0 <= 13, small slices up to 8 / 6) left out:
         # 20 splits, rank 0 12-18 / 4-6 / 2-5 / 1-5, 18 of them new.
         "llama_7b": [19, 12, 5, 5],
         "vicuna_7b": [19, 12, 5, 5],
-        "mistral_7b": [18, 13, 5, 5],
-        "qwen_7b": [18, 6, 5, 5],
+        "mistral_7b": [19, 12, 5, 5],
+        "qwen_7b": [19, 12, 5, 5],
     },
 }
 
