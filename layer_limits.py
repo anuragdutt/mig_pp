@@ -43,29 +43,30 @@ LAYER_LIMITS = {
     # allows. The April 80GB runs used [24, 10, 5, 5] (13B) and [30, 10, 4, 2]
     # (24B) -- small-slice caps left over from the 5GB slices.
     "40_20_10_10": {
-        # 10GB slices hold 6 13B layers at B64 (MHA: big KV). 33 splits:
-        # rank 0 17-22, rank 1 7-11, rank 2 4-6, rank 3 1-6 layers.
-        "vicuna_13b": [22, 11, 6, 6],
-        "llama_13b": [22, 11, 6, 6],  # same shapes as Vicuna-13B
-        # 31 splits: 20-27 / 8-10 / 6-9 / 2-9. No longer head-only: the
-        # 152k-vocab lm_head build leaves room for 9 layers on a 10GB slice
-        # (within ~300 MiB).
-        "qwen_14b": [27, 10, 9, 9],
-        # Mistral-Small-24B, 1060 MiB/layer: rank 2 holds 7 at B64, rank 3 5
-        # beside the 131k-vocab lm_head build (within ~340 MiB). 29 splits:
-        # 18-22 / 7-10 / 4-7 / 1-5.
-        "mistral_24b": [22, 10, 7, 5],
-        # 7B models: every split fits even at B64 (10GB slices hold 8-17 of their
-        # layers), so the ordering rule, not memory, caps the small slices (at 9 / 7
-        # for 32 layers, 8 / 6 for Qwen's 28). Sized for ~12 h of B32 only (4 pairs,
-        # ~11 min per split at the 9/28 7B pace + 15%), small slices as high as the
-        # ordering allows. The user widened rank 0 to 18: 112 splits, 10-18 / 6-11 /
-        # 2-9 / 1-7, ~21 h at that pace -- a bet that the 80GB box runs ~2x faster.
-        "llama_7b": [18, 12, 5, 5],
-        "mistral_7b": [18, 12, 5, 5],
-        # 53 splits: 9-13 / 6-12 / 2-8 / 1-6.
-        "qwen_7b": [13, 12, 8, 6],
-        "vicuna_7b": [18, 12, 5, 5],
+        # Every vector below was swept at all 14 batch pairs by 10/03 (done_configs.py)
+        # in its earlier, narrower form; each grew by ~1 layer on rank 0 (or rank 1),
+        # staying within every rank's B64 capacity (memory_limits.py), and a run with
+        # RUNNER skip_done=True only runs the new splits.
+        # 13B: 10GB slices hold 6 layers at B64 (MHA: big KV). Was [22, 11, 6, 6]
+        # (33 splits); 46 splits, +13 new: rank 0 17-23 / 7-11 / 3-6 / 1-6.
+        "vicuna_13b": [23, 11, 6, 6],
+        "llama_13b": [23, 11, 6, 6],  # same shapes as Vicuna-13B
+        # 152k-vocab lm_head build leaves room for 9 layers on a 10GB slice (within
+        # ~300 MiB). Was [27, 10, 9, 9] (31); 41 splits, +10 new.
+        "qwen_14b": [28, 10, 9, 9],
+        # Mistral-Small-24B, 1060 MiB/layer: rank 2 holds 7 at B64, rank 3 5 beside
+        # the 131k-vocab lm_head build (within ~340 MiB). Was [22, 10, 7, 5] (29);
+        # 41 splits, +12 new.
+        "mistral_24b": [23, 10, 7, 5],
+        # 7B: every split fits even at B64; the ordering rule, not memory, caps the
+        # small slices. Were [18, 12, 5, 5] (67, the 9/28 split set) and [13, 12, 8, 6]
+        # (53). Llama/Vicuna 79 (+12), Mistral 73 (+6). Qwen moves to the front-loaded
+        # region its earlier sweep (rank 0 <= 13, small slices up to 8 / 6) left out:
+        # 20 splits, rank 0 12-18 / 4-6 / 2-5 / 1-5, 18 of them new.
+        "llama_7b": [19, 12, 5, 5],
+        "vicuna_7b": [19, 12, 5, 5],
+        "mistral_7b": [18, 13, 5, 5],
+        "qwen_7b": [18, 6, 5, 5],
     },
 }
 

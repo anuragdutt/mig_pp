@@ -6,6 +6,7 @@ Run locally:
 
 import ast
 import csv
+import runpy
 import sys
 import unittest
 from pathlib import Path
@@ -94,25 +95,36 @@ class Layout80GB(unittest.TestCase):
             ml.REFERENCE_SHAPES[key]["L"], limits, LAYOUT_80, True, min_last
         )
 
-    def test_split_counts_fit_the_budget(self):
-        # x 14 batch pairs: ~43 h per lane estimated against a 60 h budget.
+    def test_split_counts(self):
         # Changing a vector changes the run time: re-check the budget.
         counts = {k: len(self.splits(k)) for k in ll.LAYER_LIMITS["40_20_10_10"]}
-        self.assertEqual(counts, {"vicuna_13b": 33, "llama_13b": 33, "qwen_14b": 31, "mistral_24b": 29,
-                                  "llama_7b": 112, "mistral_7b": 112, "qwen_7b": 53,
-                                  "vicuna_7b": 67})
+        self.assertEqual(counts, {"vicuna_13b": 46, "llama_13b": 46, "qwen_14b": 41, "mistral_24b": 41,
+                                  "llama_7b": 79, "vicuna_7b": 79, "mistral_7b": 73, "qwen_7b": 20})
 
     def test_same_shape_models_share_a_split_set(self):
         self.assertEqual(self.splits("llama_13b"), self.splits("vicuna_13b"))
-        self.assertEqual(self.splits("mistral_7b"), self.splits("llama_7b"))
+        self.assertEqual(self.splits("vicuna_7b"), self.splits("llama_7b"))
 
-    def test_vicuna_7b_is_the_928_split_set(self):
+    def test_vicuna_7b_still_holds_the_928_split_set(self):
         if not RESULTS_928.exists():
             self.skipTest("9/28 results CSV not present")
         with open(RESULTS_928) as f:
             sweep = {tuple(ast.literal_eval(r["split"])) for r in csv.DictReader(f)}
-        self.assertEqual({tuple(x) for x in self.splits("vicuna_7b")}, sweep)
+        self.assertLessEqual(sweep, {tuple(x) for x in self.splits("vicuna_7b")})
         self.assertEqual(len(sweep), 67)
+
+    def test_widened_vectors_keep_every_measured_split(self):
+        # Widening never drops a split already measured, so skip_done covers them all.
+        # Qwen-7B is the exception by design: it moved to the region its sweep left out.
+        done = ROOT / "done_configs.py"
+        if not done.exists():
+            self.skipTest("done_configs.py not present")
+        measured = runpy.run_path(str(done))["DONE"]["40_20_10_10"]
+        for key, splits in measured.items():
+            if key == "qwen_7b":
+                continue
+            with self.subTest(model=key):
+                self.assertLessEqual(set(splits), {tuple(x) for x in self.splits(key)})
 
     def test_every_slice_holds_layers(self):
         # Small slices up to their B64 capacity; none head-only on this layout.

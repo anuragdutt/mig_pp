@@ -111,6 +111,57 @@ class _Box(unittest.TestCase):
         return {j["model_key"]: j for lane in plan["lanes"] for j in lane["jobs"]}
 
 
+class SkipDone(_Box):
+    """RUNNER skip_done=True drops splits done_configs.py lists as measured."""
+
+    PAIRS = [(8, 4), (8, 2)]
+    SKIP = staticmethod(lambda t: t.replace("RUNNER = dict()", "RUNNER = dict(skip_done=True)"))
+
+    def setUp(self):
+        super().setUp()
+        self.all = ec.generate_layer_splits(32, [18, 12, 5, 5], [20, 10, 5, 5])
+        self.done_file = self.tmp / "done_configs.py"
+        env = mock.patch.dict(os.environ, {"MIG_PARALLEL_DONE": str(self.done_file)})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def write_done(self, measured):  # {split: [pairs]} for llama_7b on 20_10_5_5
+        self.done_file.write_text("DONE = " + repr({"20_10_5_5": {"llama_7b": measured}}))
+
+    def lane(self):
+        return {0: [dict(model="llama_7b", batch_mb_pairs=self.PAIRS, layer_limits=[18, 12, 5, 5])]}
+
+    def test_skips_fully_measured_splits(self):
+        a = self.all
+        self.write_done({tuple(a[0]): self.PAIRS, tuple(a[1]): self.PAIRS + [(64, 2)], tuple(a[2]): [(8, 4)]})
+        plan = self.plan(self.lane(), self.SKIP)
+        self.assertEqual(self.jobs(plan)["llama_7b"]["job"]["splits"], a[2:])
+        self.assertIn("67 splits within limits, 2 already measured, 65 to run", plan["notes"][0])
+        self.assertTrue(any("1 split(s) measured at only some" in w for w in plan["warnings"]))
+
+    def test_model_missing_from_done_warns(self):
+        self.done_file.write_text("DONE = {'20_10_5_5': {}}")
+        plan = self.plan(self.lane(), self.SKIP)
+        self.assertTrue(any("no llama_7b on 20_10_5_5; nothing is skipped" in w for w in plan["warnings"]))
+        self.assertEqual(len(self.jobs(plan)["llama_7b"]["job"]["splits"]), 67)
+
+    def test_fully_measured_job_is_dropped(self):
+        self.write_done({tuple(sp): self.PAIRS for sp in self.all})
+        plan = self.plan({**self.lane(), 1: ["mistral_7b"]}, self.SKIP)
+        self.assertNotIn("llama_7b", self.jobs(plan))
+        self.assertIn("mistral_7b", self.jobs(plan))
+
+    def test_off_by_default_and_ignored_by_smoke(self):
+        self.write_done({tuple(sp): self.PAIRS for sp in self.all})
+        self.assertEqual(len(self.jobs(self.plan(self.lane()))["llama_7b"]["job"]["splits"]), 67)
+        smoke = self.plan(self.lane(), self.SKIP, smoke=True)
+        self.assertEqual(self.jobs(smoke)["llama_7b"]["job"]["splits"], [self.all[-1]])
+
+    def test_unreadable_done_file_is_a_problem(self):
+        msg = self.problems(self.lane(), self.SKIP)  # no file written
+        self.assertIn("RUNNER.skip_done: cannot read DONE from", msg)
+
+
 class Planning(_Box):
     def test_inventory_mismatch_names_gpu_rank_uuid(self):
         u = [FakeBox.uuid(0, r) for r in range(4)]

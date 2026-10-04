@@ -73,6 +73,23 @@ on 40/20/10/10 even at B64; the ordering rule, not memory, caps the small slices
 `HEAD_ONLY_LAST_RANK` is now per layout (none on 40_20_10_10). 112 splits is ~21 h at
 the 9/28 7B pace (40GB card) -- the user's bet that this box is ~1.75x faster; the
 go/no-go is the first split's time (<= 6.4 min for 112 splits in 12 h).
+(In the end all 8 models were swept at all 14 pairs with 33/33/31/29 and 67/67/67/53
+splits: `../logs/oracle/80gb/40_20_10_10/`, whose folder names do not match their
+contents -- `bigger_models_bs_32_16` holds the 7B runs, `smaller_models_bs_32` the
+heavy ones.)
+
+**10/03: widening, ~24 h, no reruns.** Each 40_20_10_10 vector grew ~1 layer (rank 0,
+or rank 1 for mistral_7b), all within B64 capacity. `done_configs.py` (DONE: layout ->
+model -> split -> measured (batch, mb) pairs) is built by
+`python3 make_done.py ../logs/oracle/80gb/40_20_10_10`; with `RUNNER skip_done=True` the
+planner drops splits measured at all of a job's pairs and prints a NOTE per job. Two
+manual runs, one model per GPU, switched by `RUN = HEAVY` / `RUN = SMALL` in
+`parallel_config.py` (no chaining inside a lane, the user's call), 14 pairs, new splits
+only: heavy 13/13/10/12 = 672 configs (~14 h, Mistral-24B the long pole), then 7B
+12/12/18/6 = 672 configs (~9 h; qwen_7b `[18,6,5,5]`, the front-loaded region), at the measured per-split times (13B 46.5 min,
+Qwen-14B 53.7, Mistral-24B 70.5, 7B ~29.5 per 14-pair split).
+The user commented the heavy models out of the 20_10_5_5 (40GB) entries in `30cbd4d`;
+8 fake-box tests need them (all pass with them restored).
 
 Time. April 80GB data (branches `vic-13b-4mig-80gb`, `mistral-24b-4mig-80gb`; pre-ACK-fix
 code): 13B `[24,10,5,5]` x 14 pairs = 34.8 h, 24B 49 splits = 102.6 h; wall - latency

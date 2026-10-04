@@ -31,18 +31,25 @@ MODELS = {
     "vicuna_7b": dict(path=f"{MODEL_ROOT}/vicuna-7b-v1.5"),
 }
 
+# Two runs, one model per GPU: the heavy models first; once that run is done,
+# switch RUN to SMALL and start again.
+HEAVY = ["vicuna_13b", "llama_13b", "qwen_14b", "mistral_24b"]
+SMALL = ["vicuna_7b", "llama_7b", "qwen_7b", "mistral_7b"]
+RUN = HEAVY
+# RUN = SMALL
+
 # One entry per GPU. slice_gb and mig_uuids in RANK ORDER (largest slice first);
 # `./run_parallel.sh discover` prints this block with the real UUIDs.
 # models: MODELS keys (or dict(model=key, <overrides>)) run in order; [] = GPU unused.
 # A100-80GB: 3g.40gb + 2g.20gb + 1g.10gb + 1g.10gb per GPU.
 GPUS = [
-    dict(gpu=0, slice_gb=[40, 20, 10, 10], models=["llama_7b"],
+    dict(gpu=0, slice_gb=[40, 20, 10, 10], models=[RUN[0]],
          mig_uuids=["MIG-0cfc69bb-d780-5095-9656-be2b83fb379d", "MIG-f6677aed-01af-56f3-83f3-91e511d24e6c", "MIG-4035a060-869a-58e6-9794-21dcff020348", "MIG-b2e8e895-ae5f-5e49-863d-35b4ad3bc0d5"]),  # NVIDIA A100-SXM4-80GB: 3g.40gb 2g.20gb 1g.10gb 1g.10gb
-    dict(gpu=1, slice_gb=[40, 20, 10, 10], models=["mistral_7b"],
+    dict(gpu=1, slice_gb=[40, 20, 10, 10], models=[RUN[1]],
          mig_uuids=["MIG-3300dd9c-59a5-5978-866a-9a4b62713e56", "MIG-0c88400e-21c0-5b39-a698-dd1230d974b7", "MIG-18295ce0-0f18-520b-9ae0-1ff8980abd2c", "MIG-b42afb91-2f72-526f-b908-b4f956ecc0e8"]),  # NVIDIA A100-SXM4-80GB: 3g.40gb 2g.20gb 1g.10gb 1g.10gb
-    dict(gpu=2, slice_gb=[40, 20, 10, 10], models=["qwen_7b"],
+    dict(gpu=2, slice_gb=[40, 20, 10, 10], models=[RUN[2]],
          mig_uuids=["MIG-a1190fb5-b8a0-57aa-9ad0-58dd183cae3b", "MIG-4b6fbb23-1c51-5293-b9b4-fd4964e7cded", "MIG-b9edd97b-d54e-56da-b43a-e252908cd96f", "MIG-8daa456f-0b2e-5d62-9608-c3d51797a857"]),  # NVIDIA A100-SXM4-80GB: 3g.40gb 2g.20gb 1g.10gb 1g.10gb
-    dict(gpu=3, slice_gb=[40, 20, 10, 10], models=["vicuna_7b"],
+    dict(gpu=3, slice_gb=[40, 20, 10, 10], models=[RUN[3]],
          mig_uuids=["MIG-13c176dc-1fb4-5e69-af95-14744f1a6dc1", "MIG-c325e781-a6cc-5d8e-bf85-074ad7ede982", "MIG-b22269c6-b770-5ecd-86a5-25c3901391ac", "MIG-7da53c6b-6132-5d50-a1e3-f2c991b4ffd0"]),  # NVIDIA A100-SXM4-80GB: 3g.40gb 2g.20gb 1g.10gb 1g.10gb
 ]
 
@@ -59,8 +66,8 @@ SWEEP = dict(
     batch_mb_pairs=[
         (8, 4), (8, 2),
         (16, 8), (16, 4), (16, 2),
-        # (32, 16), (32, 8), (32, 4), (32, 2),
-        # (64, 32), (64, 16), (64, 8), (64, 4), (64, 2),
+        (32, 16), (32, 8), (32, 4), (32, 2),
+        (64, 32), (64, 16), (64, 8), (64, 4), (64, 2),
     ],
 )
 
@@ -71,4 +78,7 @@ RUNNER = dict(
     # summaries only (T22-T29), "off" = no transport log; unset = per-microbatch
     # INFO (the transport's default, GBs per sweep).
     env={"MIG_LOG_LEVEL": "summary"},
+    # Skip configs already measured: done_configs.py, built by
+    # `python3 make_done.py <results dirs>` (rebuild it after every run).
+    skip_done=True,
 )

@@ -39,7 +39,7 @@ SWEEP_DEFAULTS = dict(
     batch_mb_pairs=[[8, 4], [8, 2], [16, 8], [16, 4], [16, 2], [32, 16], [32, 8],
                     [32, 4], [32, 2], [64, 32], [64, 16], [64, 8], [64, 4], [64, 2]],
 )
-RUNNER_DEFAULTS = dict(base_port=29500, mem_monitor="nvml", env={})
+RUNNER_DEFAULTS = dict(base_port=29500, mem_monitor="nvml", env={}, skip_done=False)
 # What a MODELS entry or a GPU's dict(model=...) may set. SWEEP < MODELS < GPU.
 OVERRIDE_KEYS = set(SWEEP_DEFAULTS) | {"splits", "layer_limits", "min_last_rank_layers", "stub"}
 GPU_KEYS = {"gpu", "slice_gb", "mig_uuids", "models"}
@@ -240,6 +240,33 @@ def _finish_job(job, s, key, smoke):
     return job, []
 
 
+def _skip_done(job, done, notes, warnings):
+    """Drop the splits done_configs.py lists as measured at every one of the job's
+    batch pairs. -> the job, or None when nothing is left to run"""
+    layout = layer_limits.layout_key(job["slice_gb"])
+    measured = done.get(layout, {}).get(job["model_key"])
+    if measured is None:
+        warnings.append(f"{job['job_id']}: done_configs.py has no {job['model_key']} on {layout}; "
+                        "nothing is skipped")
+        measured = {}
+    pairs = {tuple(p) for p in job["batch_mb_pairs"]}
+    keep, partial = [], 0
+    for sp in job["splits"]:
+        have = pairs & {tuple(p) for p in measured.get(tuple(sp), ())}
+        if have != pairs:
+            keep.append(sp)
+            partial += bool(have)
+    notes.append(f"{job['job_id']}: {len(job['splits'])} splits within limits, "
+                 f"{len(job['splits']) - len(keep)} already measured, {len(keep)} to run")
+    if partial:
+        warnings.append(f"{job['job_id']}: {partial} split(s) measured at only some of the job's "
+                        "batch pairs run again at all of them")
+    if not keep:
+        return None
+    job["splits"] = keep
+    return job
+
+
 def build_plan(config_path, smoke=False, gpus=None):
     """Validate the config and lay out every job for write_run_dir(). Raises PlanError
     listing every problem, having written nothing. gpus: keep only these GPU indices."""
@@ -308,7 +335,13 @@ def build_plan(config_path, smoke=False, gpus=None):
         run_id = f"{base}_{n}"
     run_dir, safe_id = os.path.join(runs_dir, run_id), re.sub(r"[^A-Za-z0-9_]", "_", run_id)
     cpus = _numa_cpus([lane[0] for lane in lanes], warnings)
-    plan_lanes = []
+    plan_lanes, notes, done = [], [], None
+    if runner["skip_done"] and not smoke:
+        done_path = os.environ.get("MIG_PARALLEL_DONE") or os.path.join(REPO, "done_configs.py")
+        try:
+            done = runpy.run_path(done_path)["DONE"]
+        except (OSError, KeyError, SyntaxError) as e:
+            problems.append(f"RUNNER.skip_done: cannot read DONE from {done_path}: {e}")
     for idx, slice_gb, uuids, refs in lanes:
         lane_id, port, jobs = f"gpu{idx}", runner["base_port"] + 10 * idx, []
         for nn, (key, over) in enumerate(refs, 1):
@@ -330,6 +363,8 @@ def build_plan(config_path, smoke=False, gpus=None):
                 job.update(max_new_tokens=8, batch_mb_pairs=[[8, 4]], max_runs=1)
             job, errors = _finish_job(job, s, key, smoke)
             problems += [f"{job_id}: {e}" for e in errors]
+            if job and done is not None:
+                job = _skip_done(job, done, notes, warnings)
             if job:
                 total = len(job["splits"]) * len(job["batch_mb_pairs"])
                 jobs.append({"job_id": job_id, "job_dir": os.path.join(run_dir, job_id),
@@ -341,7 +376,7 @@ def build_plan(config_path, smoke=False, gpus=None):
         _fail(problems)
     env = [(str(k), str(v)) for k, v in runner["env"].items()]
     return {"run_id": run_id, "smoke": smoke, "config": config_path, "lanes": plan_lanes,
-            "run_dir": run_dir, "env": env, "warnings": warnings}
+            "run_dir": run_dir, "env": env, "warnings": warnings, "notes": notes}
 
 
 def write_run_dir(plan):
@@ -379,6 +414,7 @@ def _summary(plan):
             for lane in plan["lanes"] for j in lane["jobs"]]
     out = _table(("LANE", "GPU", "PORT", "MODEL", "TYPE", "LAYERS", "SPLITS", "CONFIGS"), rows)
     out.append(f"total {len(rows)} jobs, {sum(r[-1] for r in rows)} configs")
+    out += [f"NOTE: {n}" for n in plan.get("notes", [])]
     return out + [f"WARNING: {w}" for w in plan["warnings"]]
 
 
