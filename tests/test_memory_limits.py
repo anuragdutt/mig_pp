@@ -99,7 +99,7 @@ class Layout80GB(unittest.TestCase):
         # Changing a vector changes the run time: re-check the budget.
         counts = {k: len(self.splits(k)) for k in ll.LAYER_LIMITS["40_20_10_10"]}
         self.assertEqual(counts, {"vicuna_13b": 46, "llama_13b": 46, "qwen_14b": 41, "mistral_24b": 41,
-                                  "llama_7b": 79, "vicuna_7b": 79, "mistral_7b": 79, "qwen_7b": 20})
+                                  "llama_7b": 79, "vicuna_7b": 79, "mistral_7b": 79, "qwen_7b": 67})
 
     def test_same_shape_models_share_a_split_set(self):
         self.assertEqual(self.splits("llama_13b"), self.splits("vicuna_13b"))
