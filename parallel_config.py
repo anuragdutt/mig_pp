@@ -34,22 +34,56 @@ MODELS = {
 # Two runs, one model per GPU: the heavy models first; once that run is done,
 # switch RUN to SMALL and start again.
 HEAVY = ["vicuna_13b", "llama_13b", "qwen_14b", "mistral_24b"]
-SMALL = ["vicuna_7b", "llama_7b", "mistral_7b", "qwen_7b"]
-RUN = SMALL
-# RUN = SMALL
+SMALL = ["llama_7b", "mistral_7b", "vicuna_7b", "qwen_7b"]
+
+
+def _qwen_chunks(sizes):
+    """Qwen-7B's splits within layer_limits.py not yet measured (done_configs.py),
+    dealt in turn to len(sizes) jobs until each holds its size (the last takes any rest)."""
+    import experiment_config as ec
+    import layer_limits as ll
+    from done_configs import DONE
+    measured = set(DONE["40_20_10_10"]["qwen_7b"])
+    every = ec.generate_layer_splits(28, ll.LAYER_LIMITS["40_20_10_10"]["qwen_7b"], [40, 20, 10, 10])
+    rest = [s for s in every if tuple(s) not in measured]
+    chunks = [[] for _ in sizes]
+    i = 0
+    for sp in rest:
+        while len(chunks[i % len(sizes)]) >= sizes[i % len(sizes)] and any(len(c) < n for c, n in zip(chunks, sizes)):
+            i += 1
+        chunks[i % len(sizes)].append(sp)
+        i += 1
+    return [dict(model="qwen_7b", splits=c) for c in chunks]
+
+
+# 10/04 night: each GPU runs its jobs in order -- a 7B model's new splits (~4.9 h), then a
+# share of Qwen-7B's 60 new splits (12/12/13/23 sized so every GPU ends ~10-11 h in).
+QWEN = _qwen_chunks([12, 12, 13, 23])
+NIGHT = [
+    ["llama_7b", QWEN[0]],      # GPU 0
+    ["mistral_7b", QWEN[1]],    # GPU 1
+    ["vicuna_7b", QWEN[2]],     # GPU 2
+    [QWEN[3]],                  # GPU 3
+]
+
+RUN = NIGHT
+
+def _lane(i):  # RUN[i]: a model key, a job dict, or a list of them run in order
+    return RUN[i] if isinstance(RUN[i], list) else [RUN[i]]
+
 
 # One entry per GPU. slice_gb and mig_uuids in RANK ORDER (largest slice first);
 # `./run_parallel.sh discover` prints this block with the real UUIDs.
 # models: MODELS keys (or dict(model=key, <overrides>)) run in order; [] = GPU unused.
 # A100-80GB: 3g.40gb + 2g.20gb + 1g.10gb + 1g.10gb per GPU.
 GPUS = [
-    dict(gpu=0, slice_gb=[40, 20, 10, 10], models=[RUN[0]],
+    dict(gpu=0, slice_gb=[40, 20, 10, 10], models=_lane(0),
          mig_uuids=["MIG-0cfc69bb-d780-5095-9656-be2b83fb379d", "MIG-f6677aed-01af-56f3-83f3-91e511d24e6c", "MIG-4035a060-869a-58e6-9794-21dcff020348", "MIG-b2e8e895-ae5f-5e49-863d-35b4ad3bc0d5"]),  # NVIDIA A100-SXM4-80GB: 3g.40gb 2g.20gb 1g.10gb 1g.10gb
-    dict(gpu=1, slice_gb=[40, 20, 10, 10], models=[RUN[1]],
+    dict(gpu=1, slice_gb=[40, 20, 10, 10], models=_lane(1),
          mig_uuids=["MIG-3300dd9c-59a5-5978-866a-9a4b62713e56", "MIG-0c88400e-21c0-5b39-a698-dd1230d974b7", "MIG-18295ce0-0f18-520b-9ae0-1ff8980abd2c", "MIG-b42afb91-2f72-526f-b908-b4f956ecc0e8"]),  # NVIDIA A100-SXM4-80GB: 3g.40gb 2g.20gb 1g.10gb 1g.10gb
-    dict(gpu=2, slice_gb=[40, 20, 10, 10], models=[RUN[2]],
+    dict(gpu=2, slice_gb=[40, 20, 10, 10], models=_lane(2),
          mig_uuids=["MIG-a1190fb5-b8a0-57aa-9ad0-58dd183cae3b", "MIG-4b6fbb23-1c51-5293-b9b4-fd4964e7cded", "MIG-b9edd97b-d54e-56da-b43a-e252908cd96f", "MIG-8daa456f-0b2e-5d62-9608-c3d51797a857"]),  # NVIDIA A100-SXM4-80GB: 3g.40gb 2g.20gb 1g.10gb 1g.10gb
-    dict(gpu=3, slice_gb=[40, 20, 10, 10], models=[RUN[3]],
+    dict(gpu=3, slice_gb=[40, 20, 10, 10], models=_lane(3),
          mig_uuids=["MIG-13c176dc-1fb4-5e69-af95-14744f1a6dc1", "MIG-c325e781-a6cc-5d8e-bf85-074ad7ede982", "MIG-b22269c6-b770-5ecd-86a5-25c3901391ac", "MIG-7da53c6b-6132-5d50-a1e3-f2c991b4ffd0"]),  # NVIDIA A100-SXM4-80GB: 3g.40gb 2g.20gb 1g.10gb 1g.10gb
 ]
 

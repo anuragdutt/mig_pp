@@ -98,8 +98,7 @@ class Layout80GB(unittest.TestCase):
     def test_split_counts(self):
         # Changing a vector changes the run time: re-check the budget.
         counts = {k: len(self.splits(k)) for k in ll.LAYER_LIMITS["40_20_10_10"]}
-        self.assertEqual(counts, {"vicuna_13b": 46, "llama_13b": 46, "qwen_14b": 41, "mistral_24b": 41,
-                                  "llama_7b": 79, "vicuna_7b": 79, "mistral_7b": 79, "qwen_7b": 67})
+        self.assertEqual(counts, {"vicuna_13b": 46, "llama_13b": 46, "qwen_14b": 41, "mistral_24b": 41, "llama_7b": 89, "vicuna_7b": 89, "mistral_7b": 89, "qwen_7b": 106})
 
     def test_same_shape_models_share_a_split_set(self):
         self.assertEqual(self.splits("llama_13b"), self.splits("vicuna_13b"))
@@ -116,14 +115,13 @@ class Layout80GB(unittest.TestCase):
 
     def test_widened_vectors_keep_every_measured_split(self):
         # Widening never drops a split already measured, so skip_done covers them all.
-        # Qwen-7B is the exception by design: it moved to the region its sweep left out.
         done = ROOT / "done_configs.py"
         if not done.exists():
             self.skipTest("done_configs.py not present")
         measured = runpy.run_path(str(done))["DONE"]["40_20_10_10"]
         for key, splits in measured.items():
             if key == "qwen_7b":
-                continue
+                continue  # [20, 12, 6, 6] caps rank 2 below the 7-8 its earlier sweep used
             with self.subTest(model=key):
                 self.assertLessEqual(set(splits), {tuple(x) for x in self.splits(key)})
 

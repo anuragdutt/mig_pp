@@ -58,15 +58,18 @@ LAYER_LIMITS = {
         # the 131k-vocab lm_head build (within ~340 MiB). Was [22, 10, 7, 5] (29);
         # 41 splits, +12 new.
         "mistral_24b": [23, 10, 7, 5],
+        # 10/04 night, before the 10/05 1 PM EST cutoff: llama/vicuna/mistral [20,12,5,5]
+        # (+10 new each past [19,12,5,5]), qwen [20,12,6,6] (+60 past the measured
+        # [13,12,8,6]); ~44 GPU-h, NIGHT in parallel_config.py spreads it ~11 h per GPU.
         # 7B: every split fits even at B64; the ordering rule, not memory, caps the
         # small slices. Were [18, 12, 5, 5] (67, the 9/28 split set) and [13, 12, 8, 6]
         # (53). Llama/Vicuna/Mistral 79 (+12 each), one split set. Qwen moves to the front-loaded
         # region its earlier sweep (rank 0 <= 13, small slices up to 8 / 6) left out:
         # 20 splits, rank 0 12-18 / 4-6 / 2-5 / 1-5, 18 of them new.
-        "llama_7b": [19, 12, 5, 5],
-        "vicuna_7b": [19, 12, 5, 5],
-        "mistral_7b": [19, 12, 5, 5],
-        "qwen_7b": [16, 12, 5, 5],
+        "llama_7b": [20, 12, 5, 5],
+        "vicuna_7b": [20, 12, 5, 5],
+        "mistral_7b": [20, 12, 5, 5],
+        "qwen_7b": [20, 12, 6, 6],
     },
 }
 
