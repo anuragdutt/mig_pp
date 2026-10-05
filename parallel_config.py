@@ -37,13 +37,21 @@ HEAVY = ["vicuna_13b", "llama_13b", "qwen_14b", "mistral_24b"]
 SMALL = ["llama_7b", "mistral_7b", "vicuna_7b", "qwen_7b"]
 
 
+# The 14 batch pairs every split is swept at (as in SWEEP below).
+ALL_PAIRS = {(8, 4), (8, 2), (16, 8), (16, 4), (16, 2), (32, 16), (32, 8), (32, 4), (32, 2),
+             (64, 32), (64, 16), (64, 8), (64, 4), (64, 2)}
+
+
 def _qwen_chunks(sizes):
-    """Qwen-7B's splits within layer_limits.py not yet measured (done_configs.py),
-    dealt in turn to len(sizes) jobs until each holds its size (the last takes any rest)."""
+    """Qwen-7B's splits within layer_limits.py not yet measured at all 14 pairs
+    (done_configs.py), dealt in turn to len(sizes) jobs until each holds its size (the
+    last takes any rest). A split measured at only some pairs stays in, so its missing
+    pairs run (with skip_done the job re-runs it at all its pairs)."""
     import experiment_config as ec
     import layer_limits as ll
     from done_configs import DONE
-    measured = set(DONE["40_20_10_10"]["qwen_7b"])
+    measured = {sp for sp, pairs in DONE["40_20_10_10"]["qwen_7b"].items()
+                if {tuple(p) for p in pairs} >= ALL_PAIRS}
     every = ec.generate_layer_splits(28, ll.LAYER_LIMITS["40_20_10_10"]["qwen_7b"], [40, 20, 10, 10])
     rest = [s for s in every if tuple(s) not in measured]
     chunks = [[] for _ in sizes]
@@ -53,7 +61,7 @@ def _qwen_chunks(sizes):
             i += 1
         chunks[i % len(sizes)].append(sp)
         i += 1
-    return [dict(model="qwen_7b", splits=c) for c in chunks]
+    return [dict(model="qwen_7b", splits=c) if c else None for c in chunks]  # None: nothing left
 
 
 # 10/04 night: each GPU runs its jobs in order -- a 7B model's new splits (~4.9 h), then a
@@ -68,8 +76,8 @@ NIGHT = [
 
 RUN = NIGHT
 
-def _lane(i):  # RUN[i]: a model key, a job dict, or a list of them run in order
-    return RUN[i] if isinstance(RUN[i], list) else [RUN[i]]
+def _lane(i):  # RUN[i]: a model key, a job dict, or a list of them run in order; None is skipped
+    return [j for j in (RUN[i] if isinstance(RUN[i], list) else [RUN[i]]) if j is not None]
 
 
 # One entry per GPU. slice_gb and mig_uuids in RANK ORDER (largest slice first);
