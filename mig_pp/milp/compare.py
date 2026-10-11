@@ -1,64 +1,39 @@
 """
-Runs the PuLP optimizer and compares predicted vs measured latency.
-Exports results to a CSV file. No terminal output.
-
-EDIT THESE THREE LINES:
-    CSV_PATH        -- path to your benchmark CSV
-    PULP_MODULE_DIR -- folder containing pulp_layer_placement.py
-    OUT_PATH        -- where to save the results CSV
+Per-row CSV: the model's prediction for each measured split next to its measured
+latency, and the MILP's own pick for the row's (batch, microbatch).
+Edit the lines below and run:  python3 compare.py
 """
 
+import csv
 import sys
-import os
-import pandas as pd
 
-# ============================================================
-CSV_PATH = "../../oracle/40gb/20_10_10/vicuna_7B.csv"
-PULP_MODULE_DIR = "."
+sys.path.insert(0, ".")
+import pulp_layer_placement as plp  # noqa: E402
+from validate import load_rows, model_from_path  # noqa: E402
+
+CSV_PATH = "../../oracle/40gb/20_10_5_5/vicuna_7B.csv"
 OUT_PATH = "comparison_results.csv"
-# ============================================================
+CARD = "A100-40GB"
 
-sys.path.insert(0, PULP_MODULE_DIR)
-from pulp_layer_placement import optimize_placement, predict_latency_ms
+rows, slice_gb = load_rows(CSV_PATH)
+cfg = dict(model=model_from_path(CSV_PATH), slice_gb=slice_gb, card=CARD, seq_len=64,
+           max_new_tokens=512, samples=8, min_last_rank_layers=1,
+           constants=plp.DEFAULT_CONSTANTS)
 
-# ---- load data, skip non-ok rows ----
-df = pd.read_csv(CSV_PATH)
-valid = df[df["status"] == "ok"].copy()
-cols = list(valid.columns)
-valid.columns = ["layers_20gb", "layers_10gb_b", "layers_10gb_c"] + cols[3:]
+out, steps, pick = [], {}, {}
+for r in rows:
+    key = (r["batch"], r["mb"])
+    if key not in steps:
+        steps[key] = plp.prepare(cfg, *key, cfg["samples"])
+        pick[key] = plp.optimize_placement(cfg, *key)[0]
+    pred = plp.evaluate(r["split"], steps[key], cfg)
+    out.append(dict(split=list(r["split"]), batch_size=r["batch"], microbatch_size=r["mb"],
+                    predicted_ms=round(pred, 1), measured_ms=round(r["meas"], 1),
+                    error_pct=round((pred - r["meas"]) / r["meas"] * 100, 1),
+                    milp_pick=pick[key]))
 
-results = []
-cache = {}  # avoid re-solving same batch_size twice
-
-for _, row in valid.iterrows():
-    bs = int(row["batch_size"])
-    mb = int(row["microbatch_size"])
-    nmb = int(row["num_microbatches"])
-
-    if bs not in cache:
-        counts, limits = optimize_placement(batch_size=bs)
-        cache[bs] = (counts, limits)
-
-    counts, limits = cache[bs]
-    pred_ms = predict_latency_ms(counts, nmb, bs)
-    meas_ms = row["total_latency_ms"]
-    err_pct = (pred_ms - meas_ms) / meas_ms * 100
-
-    results.append(
-        {
-            "batch_size": bs,
-            "microbatch_size": mb,
-            "num_microbatches": nmb,
-            "pulp_split": f"{counts[0]}/{counts[1]}/{counts[2]}",
-            "mem_limits": f"{limits[0]}/{limits[1]}/{limits[2]}",
-            "data_split": f"{int(row['layers_20gb'])}/{int(row['layers_10gb_b'])}/{int(row['layers_10gb_c'])}",
-            "predicted_ms": round(pred_ms, 1),
-            "measured_ms": round(meas_ms, 1),
-            "error_pct": round(err_pct, 1),
-        }
-    )
-
-out = pd.DataFrame(results)
-os.makedirs(os.path.dirname(os.path.abspath(OUT_PATH)), exist_ok=True)
-out.to_csv(OUT_PATH, index=False)
+with open(OUT_PATH, "w", newline="") as f:
+    w = csv.DictWriter(f, fieldnames=list(out[0]))
+    w.writeheader()
+    w.writerows(out)
 print(f"Saved {len(out)} rows to {OUT_PATH}")
