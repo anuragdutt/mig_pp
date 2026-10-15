@@ -12,7 +12,7 @@
 # Output (diagnostics first, then the DEFAULT_CONSTANTS dict) lands in measure_constants_<jobid>.out.
 #
 # Before submitting, on the LOGIN node (compute nodes may have no internet):
-#   module load python/3.11 && source .venv/bin/activate
+#   module load python/3.11.2 && source .venv/bin/activate
 #   python -c "from transformers import AutoConfig; AutoConfig.from_pretrained('lmsys/vicuna-7b-v1.5')"
 # That fills the HF cache; the job then runs with HF_HUB_OFFLINE=1.
 
@@ -20,9 +20,12 @@ set -uo pipefail
 
 REPO=${REPO:-$SLURM_SUBMIT_DIR}   # repo root: must contain model_family.py and mig_pp/milp/
 VENV=${VENV:-$REPO/.venv}
-PY_MODULE=${PY_MODULE:-python/3.11}  # the module the venv was created with
+PY_MODULE=${PY_MODULE:-python/3.11.2}  # the module the venv was created with (milan tree)
 
-module load "$PY_MODULE"
+module load "$PY_MODULE" || echo "WARNING: module load $PY_MODULE failed on $(hostname)"
+module list 2>&1
+echo "venv base: $(grep '^home' "$VENV/pyvenv.cfg" 2>/dev/null)"
+ls -l "$VENV/bin/python" && readlink -f "$VENV/bin/python" && ls -l "$(readlink -f "$VENV/bin/python")"
 source "$VENV/bin/activate" || { echo "no venv at $VENV"; exit 1; }
 cd "$REPO" || exit 1
 
