@@ -7,6 +7,8 @@
 #SBATCH --time=01:00:00
 #SBATCH --output=measure_constants_%j.out
 #SBATCH --error=measure_constants_%j.out
+#SBATCH --mail-type=BEGIN,END,FAIL
+#SBATCH --mail-user=ldcunha@stonybrook.edu
 
 # One-shot: submit from the repo dir on the login node:  sbatch mig_pp/milp/run_measure_constants.sbatch
 # Output (diagnostics first, then the DEFAULT_CONSTANTS dict) lands in measure_constants_<jobid>.out.
@@ -33,6 +35,13 @@ ls -l "$VENV/bin/python" && readlink -f "$VENV/bin/python" && ls -l "$(readlink 
 source "$VENV/bin/activate" || { echo "no venv at $VENV"; exit 1; }
 cd "$REPO" || exit 1
 
+# Own email (notify_mail.py, Gmail SMTP) at start and on any exit; Slurm's --mail-* is the backup.
+OUT="$REPO/measure_constants_${SLURM_JOB_ID}.out"
+MAIL="python3 $REPO/mig_pp/milp/notify_mail.py"
+RC=1
+trap '$MAIL "measure_constants job $SLURM_JOB_ID ended, exit $RC" "$OUT" || echo "end mail failed"' EXIT
+$MAIL "measure_constants job $SLURM_JOB_ID started on $(hostname)" || echo "start mail failed"
+
 export HF_HUB_OFFLINE=1
 export TOKENIZERS_PARALLELISM=false
 
@@ -58,4 +67,5 @@ ls model_family.py mig_pp/milp/measure_constants.py || { echo "wrong REPO: $REPO
 
 echo "=== measure_constants ==="
 python mig_pp/milp/measure_constants.py
-echo "exit code $?"
+RC=$?
+echo "exit code $RC"
