@@ -1,129 +1,65 @@
 """
-Measures every empirical constant needed by pulp_layer_placement.py.
+Measures DEFAULT_CONSTANTS of pulp_layer_placement.py and prints them as a dict to
+paste over it. Edit CONFIG in main(), then on the box:
 
-TWO MODES. The split matters -- it is what makes the model predictive.
+    CUDA_VISIBLE_DEVICES=<gpu index> taskset -c <that GPU's NUMA CPUs> python3 measure_constants.py
 
-  FULL MODE  (--mode full, run on the WHOLE GPU, no MIG)
-      Measures hardware properties that do not depend on how the GPU is
-      partitioned: bandwidth efficiency in each access regime, kernel launch
-      overhead, kernel count, and the host-side transport costs. Every
-      efficiency is normalized by the FULL GPU's peak bandwidth (A100_BW), so
-      the numbers are pure properties of the hardware and the workload.
+WHERE TO RUN IT: one whole GPU with MIG disabled and nothing else on it. No sudo: the
+probes are ordinary CUDA, gloo on localhost, host memcpy and torch.profiler kernel
+tracing (tracing needs no admin rights; only hardware counters, e.g. ncu metrics, do).
+A GPU with MIG enabled only shows CUDA its slices, so the script refuses to run there.
 
-  SLICE MODE (--mode slice, run on ONE MIG slice)
-      Measures only one thing: what fraction of full-GPU bandwidth this slice
-      actually gets. That fraction is the scaling law the model needs, and it
-      is DERIVED here rather than assumed.
+Whole-GPU numbers only for now. Not measured: how fast each MIG slice is -- the ILP
+assumes card peak x GPCs/7 (3g -> 3/7). If the predictions are off, that is the first
+thing to measure on real slices.
 
-Why the split: if you measure efficiency on a slice and divide by an ASSUMED
-slice bandwidth, the two errors multiply and you cannot separate them --
-        EFF_measured = (true_efficiency * true_slice_BW) / (A100_BW * assumed_frac)
-A wrong assumed_frac silently corrupts EFF_WEIGHT, and you would have to
-re-measure everything for every new MIG geometry. Measuring efficiency once on
-the full GPU and calibrating the per-slice fraction separately means you can
-predict a MIG configuration you have never run.
-
-NOTE ON THE SCALING LAW: the model currently assumes bandwidth scales with GPC
-count (3/7 for a 3g.20gb slice). That is not obviously right -- MIG also
-partitions memory controllers, and on a 40GB A100 a 3g.20gb slice gets 2 of the
-4 HBM stacks, which would be 1/2. Slice mode settles this by measurement. Run it
-once per slice geometry and paste the measured fractions into SLICE_FRAC.
-
-Usage:
-    # once, on the unpartitioned GPU
-    python3 measure_constants.py --mode full
-
-    # once per slice geometry (MIG enabled)
-    CUDA_VISIBLE_DEVICES=<mig_uuid> python3 measure_constants.py --mode slice
-
-What FULL mode measures, and which constant it feeds:
-
-    EFF_WEIGHT          large contiguous weight reads      -> weight streaming
-    EFF_ACT(ctx)        single-token decode, SWEPT over    -> activation/KV traffic
-                        context length (see note below)
-    LAUNCH_US           per-kernel launch + dispatch       -> launch overhead
-    KERNELS_PER_LAYER   profiler kernel count per layer    -> launch overhead
-    PCIE_BW_PINNED      pinned host<->device DMA           -> transport send leg
-    PCIE_BW_UNPINNED    pageable host->device (bounced)    -> transport recv leg
-    MEMCPY_BW           host-to-host memcpy (SHM path)     -> transport both legs
-    HANDOFF_FIXED_US    cuda.sync drain + handshake        -> transport fixed cost
-    TOK_ROUNDTRIP_US    tiny blocking send/recv round-trip -> per-step feedback
-
-NOTE ON EFF_ACT:
-    Decode activation traffic is dominated by the KV-cache read, which grows
-    linearly with context. At ctx=64 it is a small scattered read (latency-bound,
-    low efficiency); by ctx=576 it is a ~9MB contiguous stream (much closer to
-    the efficient regime). A single scalar EFF_ACT is therefore wrong at one end
-    no matter what you measure. This script sweeps ctx and reports the whole
-    curve plus a traffic-weighted average, so you can either (a) paste the
-    weighted scalar, or (b) make EFF_ACT a function of ctx in the model.
-
-EDIT THIS:
+HOW EACH CONSTANT IS MEASURED, matching pulp_layer_placement.terms():
+  eff_weight         one layer's weight bytes / its decode GEMMs' time / card peak
+  eff_act            activation + KV bytes / (layer kernel time - weight time - launch
+                     term); the ILP adds kernels_per_layer x launch_us to a layer's GPU time
+  launch_us          CPU time to dispatch one decode layer call / its kernel count
+  kernels_per_layer, rotary_kernels   kernels counted by torch.profiler
+  pcie_bw, recv_h2d_bw                one activation's D2H / H2D as the transport does it
+  memcpy_bw, shm_to_pinned_bw         the transport's two host copies
+  handshake_ack_us, tok_roundtrip_us, barrier_us   gloo, CONFIG["world"] processes
+  token_staging_us, step_start_us     TokenExchange's two copies; the position_ids sync
+Layer kernel times are the profiler's summed kernel durations, so launch gaps are out.
 """
 
-A100_BW = 1555e9  # HBM2 bytes/s, full A100 40GB (spec sheet)
-
-# Slice mode only: which slice you are calibrating, and what the model currently
-# ASSUMES its bandwidth fraction is. Slice mode measures the real fraction and
-# tells you whether this assumption holds.
-MIG_UUID = "MIG-98f93df6-d522-5c00-9923-4326839cef2e"  # 3g.20gb slice
-SLICE_LABEL = "3g.20gb"
-SLICE_FRAC_ASSUMED = 3 / 7  # what pulp_layer_placement.py assumes today
-
-MODEL_NAME = "lmsys/vicuna-7b-v1.5"  # must match your pipeline
-
-# workload shape -- must match benchmark_pipeline_microbatching.py
-SEQ_LEN = 64
-MAX_NEW_TOKENS = 512
-MAX_SEQ = SEQ_LEN + MAX_NEW_TOKENS
-
-# context lengths at which to sample EFF_ACT
-EFF_ACT_CTXS = [64, 128, 192, 320, 448, 576]
-
-# microbatch size to use for the transport measurements (payload scale)
-TRANSPORT_MB = 16
-
-# ---- imports ----
 import os
-import time
 import statistics
-
-# NOTE: CUDA_VISIBLE_DEVICES is NOT set here. Full mode must see the whole
-# GPU; slice mode expects you to export the MIG UUID before running.
+import sys
+import time
 
 import numpy as np
 import torch
-from transformers import LlamaConfig, DynamicCache
-from transformers.models.llama.modeling_llama import (
-    LlamaDecoderLayer,
-    LlamaRotaryEmbedding,
-)
+import torch.nn.functional as F
+from torch.autograd import DeviceType
 
-HIDDEN, INTER, VOCAB = 4096, 11008, 32000
-WARMUP = 20
-REPEATS = 200
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 
-# Normalization basis for every efficiency constant. Full mode runs on the whole
-# GPU, so efficiencies are fractions of the FULL device's peak bandwidth. That is
-# what makes them hardware properties rather than slice-specific numbers, and it
-# is what lets the model predict a MIG geometry you have not run.
-PEAK_BW = A100_BW
+CARD_BW = {"A100-40GB": 1555e9, "A100-80GB": 2039e9,  # peak HBM bytes/s, as in the ILP
+           "A100-80GB-PCIe": 1935e9}  # efficiencies are fractions of the card actually measured
+
+# Architecture of the model being measured; load_model() sets them from config.json.
+HIDDEN, INTER, VOCAB, N_HEADS, N_KV_HEADS, HEAD_DIM = 4096, 11008, 32000, 32, 32, 128
 
 
 # ---------------------------------------------------------------------------
-# SHARED HELPERS
+# bytes -- the same counts as pulp_layer_placement.weight_bytes / act_bytes (its test
+# lifts these three functions out of this file and compares)
 # ---------------------------------------------------------------------------
+def kv_dim():
+    return N_KV_HEADS * HEAD_DIM
 
 
-def act_bytes_per_token(ctx: int) -> int:
-    """Activation + KV traffic per token per layer (bytes), flash-attn aware.
-
-    Must stay identical to act_bytes_per_token in pulp_layer_placement.py.
-    """
+def act_bytes_per_token(ctx):
     B = 2  # FP16
-    qkv = (HIDDEN + 3 * HIDDEN) * B
-    flash = (HIDDEN + 2 * ctx * HIDDEN + HIDDEN) * B  # K,V full ctx read
-    oproj = (HIDDEN + HIDDEN) * B
+    kvd = kv_dim()
+    q_out = N_HEADS * HEAD_DIM
+    qkv = (HIDDEN + q_out + 2 * kvd) * B  # read x, write Q,K,V
+    flash = (q_out + 2 * ctx * kvd + q_out) * B  # read Q + full-ctx K,V, write out
+    oproj = (q_out + HIDDEN) * B
     gate = (HIDDEN + INTER) * B
     up = (HIDDEN + INTER) * B
     swiglu = (2 * INTER + INTER) * B
@@ -132,603 +68,392 @@ def act_bytes_per_token(ctx: int) -> int:
     return qkv + flash + oproj + gate + up + swiglu + down + misc
 
 
-def sync_time() -> float:
-    torch.cuda.synchronize()
-    return time.perf_counter()
-
-
-def _build_layer(device):
-    config = LlamaConfig.from_pretrained(MODEL_NAME)
-    config._attn_implementation = "sdpa"  # flash attention, same as pipeline
-    layer = LlamaDecoderLayer(config, layer_idx=0).half().to(device)
-    layer.eval()
-    rotary = LlamaRotaryEmbedding(config=config, device=device)
-    return layer, rotary, config
+def weight_bytes_per_layer():
+    kvd = kv_dim()
+    q_out = N_HEADS * HEAD_DIM
+    return (HIDDEN * q_out + 2 * HIDDEN * kvd + q_out * HIDDEN + 3 * HIDDEN * INTER) * 2
 
 
 # ---------------------------------------------------------------------------
-# 1. EFF_WEIGHT
-#    How: allocate a tensor the size of one layer's weights (~400MB).
-#         Time repeated .sum() calls which force the whole tensor through HBM.
-#         achieved_bw = bytes_moved / time -> EFF_WEIGHT = achieved / peak.
+# model and timing helpers
 # ---------------------------------------------------------------------------
-def calculate_EFF_WEIGHT() -> float:
-    device = torch.device("cuda:0")
-    WEIGHT_BYTES = (4 * HIDDEN * HIDDEN + 3 * HIDDEN * INTER) * 2  # one layer, FP16
+def load_model(path):
+    """One decoder layer + rotary of the model at path, random weights (timing only)."""
+    global HIDDEN, INTER, VOCAB, N_HEADS, N_KV_HEADS, HEAD_DIM
+    from transformers import AutoConfig
+    import model_family
 
-    n_elements = WEIGHT_BYTES // 2  # float16 = 2 bytes
-    tensor = torch.randn(n_elements, dtype=torch.float16, device=device)
-
-    for _ in range(WARMUP):
-        _ = tensor.sum()
-    torch.cuda.synchronize()
-
-    t0 = sync_time()
-    for _ in range(REPEATS):
-        _ = tensor.sum()
-    t1 = sync_time()
-
-    elapsed_s = (t1 - t0) / REPEATS
-    achieved_bw = WEIGHT_BYTES / elapsed_s  # bytes/s
-    return achieved_bw / PEAK_BW
+    cfg = AutoConfig.from_pretrained(os.path.expanduser(path))
+    cfg._attn_implementation = "sdpa"  # as the benchmark
+    HIDDEN, INTER, VOCAB = cfg.hidden_size, cfg.intermediate_size, cfg.vocab_size
+    N_HEADS = cfg.num_attention_heads
+    N_KV_HEADS = getattr(cfg, "num_key_value_heads", None) or N_HEADS
+    HEAD_DIM = getattr(cfg, "head_dim", None) or HIDDEN // N_HEADS
+    fam = model_family.resolve(cfg.model_type)
+    layer = fam.decoder_layer(cfg, layer_idx=0).half().cuda().eval()
+    rotary = fam.rotary_embedding(config=cfg, device=torch.device("cuda"))
+    return layer, rotary
 
 
-# ---------------------------------------------------------------------------
-# 2. EFF_ACT -- SWEPT over context length.
-#    How: run ONE LlamaDecoderLayer decode step (1 new token) with the KV cache
-#         pre-filled to `ctx` tokens. Subtract the weight-streaming time (which
-#         is already accounted for by EFF_WEIGHT in the model) so what remains
-#         is the activation/KV traffic time, then compare against the ideal.
-#
-#         EFF_ACT(ctx) = ideal_act_time / (measured_time - weight_time - launch)
-# ---------------------------------------------------------------------------
-def calculate_EFF_ACT_curve(eff_weight: float, launch_ms_per_layer: float):
-    device = torch.device("cuda:0")
-    layer, rotary, _ = _build_layer(device)
-    WEIGHT_BYTES = (4 * HIDDEN * HIDDEN + 3 * HIDDEN * INTER) * 2
-
-    weight_s = WEIGHT_BYTES / (PEAK_BW * eff_weight)
-    launch_s = launch_ms_per_layer / 1000.0
-
-    results = []
-    for ctx in EFF_ACT_CTXS:
-        # pre-fill a KV cache to exactly `ctx` tokens
-        cache = DynamicCache()
-        prefill = torch.randn(1, ctx, HIDDEN, dtype=torch.float16, device=device)
-        pref_pos = torch.arange(ctx, device=device).unsqueeze(0)
-        pref_emb = rotary(prefill, pref_pos)
-        with torch.no_grad():
-            layer(prefill, position_embeddings=pref_emb, past_key_values=cache)
-
-        # one new token on top of that context
-        hidden = torch.randn(1, 1, HIDDEN, dtype=torch.float16, device=device)
-        pos = torch.tensor([[ctx]], dtype=torch.long, device=device)
-        emb = rotary(hidden, pos)
-
-        with torch.no_grad():
-            for _ in range(WARMUP):
-                _ = layer(hidden, position_embeddings=emb, past_key_values=cache)
-        torch.cuda.synchronize()
-
-        # NOTE: the cache grows by one token per call, so keep the repeat count
-        # small relative to ctx or the measured context drifts upward.
-        reps = 50
-        t0 = sync_time()
-        with torch.no_grad():
-            for _ in range(reps):
-                _ = layer(hidden, position_embeddings=emb, past_key_values=cache)
-        t1 = sync_time()
-
-        measured_s = (t1 - t0) / reps
-        act_only_s = measured_s - weight_s - launch_s
-        ideal_act_s = act_bytes_per_token(ctx) / PEAK_BW
-
-        eff = ideal_act_s / act_only_s if act_only_s > 0 else float("nan")
-        results.append((ctx, eff, measured_s, act_only_s))
-
-    return results
+def layer_forward(layer, h, emb, cache):
+    """forward_through_layers in benchmark_pipeline_microbatching.py, one layer."""
+    r = h
+    x = layer.self_attn(hidden_states=layer.input_layernorm(h), position_embeddings=emb,
+                        attention_mask=None, past_key_values=cache, use_cache=True)[0]
+    h = r + x
+    return h + layer.mlp(layer.post_attention_layernorm(h))
 
 
-def weighted_EFF_ACT(curve) -> float:
-    """Traffic-weighted average over the real decode trajectory.
-
-    The model runs ctx = SEQ_LEN .. SEQ_LEN+MAX_NEW_TOKENS. Weight each sampled
-    efficiency by how many bytes actually move at that context, so the scalar
-    is representative of where the time is really spent.
-    """
-    import bisect
-
-    ctxs = [c for c, _, _, _ in curve]
-    effs = [e for _, e, _, _ in curve]
-
-    num = 0.0
-    den = 0.0
-    for t in range(MAX_NEW_TOKENS):
-        ctx = SEQ_LEN + t
-        i = min(bisect.bisect_left(ctxs, ctx), len(ctxs) - 1)
-        w = act_bytes_per_token(ctx)
-        num += w * effs[i]
-        den += w
-    return num / den
-
-
-# ---------------------------------------------------------------------------
-# 3. LAUNCH_US
-#    How: launch an empty CUDA kernel many times and time the overhead.
-#         This isolates the per-kernel launch + framework dispatch cost
-#         with zero compute or memory work.
-# ---------------------------------------------------------------------------
-def calculate_LAUNCH_US() -> float:
-    device = torch.device("cuda:0")
-    tiny = torch.zeros(1, dtype=torch.float16, device=device)
-
-    for _ in range(WARMUP):
-        _ = tiny + 0
-    torch.cuda.synchronize()
-
-    t0 = sync_time()
-    for _ in range(REPEATS * 10):
-        _ = tiny + 0
-    t1 = sync_time()
-
-    return (t1 - t0) / (REPEATS * 10) * 1e6  # -> microseconds
-
-
-# ---------------------------------------------------------------------------
-# 4. KERNELS_PER_LAYER
-#    How: profile ONE decode forward through a single LlamaDecoderLayer and
-#         count distinct CUDA kernel launches. (kernel_measure.py does this for
-#         the full pipeline including transport; this is the single-layer core.)
-# ---------------------------------------------------------------------------
-def calculate_KERNELS_PER_LAYER() -> float:
-    from torch.autograd import DeviceType
-
-    device = torch.device("cuda:0")
-    layer, rotary, _ = _build_layer(device)
+def cache_at(layer, rotary, mb, ctx):
+    """A DynamicCache holding ctx tokens for mb sequences (what decode step ctx-63 sees)."""
+    from transformers import DynamicCache
 
     cache = DynamicCache()
-    prefill = torch.randn(1, SEQ_LEN, HIDDEN, dtype=torch.float16, device=device)
-    pref_pos = torch.arange(SEQ_LEN, device=device).unsqueeze(0)
-    pref_emb = rotary(prefill, pref_pos)
+    x = torch.randn(mb, ctx, HIDDEN, dtype=torch.float16, device="cuda")
+    pos = torch.arange(ctx, device="cuda").unsqueeze(0).expand(mb, -1)
     with torch.no_grad():
-        layer(prefill, position_embeddings=pref_emb, past_key_values=cache)
+        layer_forward(layer, x, rotary(x, pos), cache)
+    return cache
 
-    hidden = torch.randn(1, 1, HIDDEN, dtype=torch.float16, device=device)
-    pos = torch.tensor([[SEQ_LEN]], dtype=torch.long, device=device)
-    emb = rotary(hidden, pos)
 
-    with torch.no_grad():
-        _ = layer(hidden, position_embeddings=emb, past_key_values=cache)
+def decode_input(rotary, mb, ctx):
+    h = torch.randn(mb, 1, HIDDEN, dtype=torch.float16, device="cuda")
+    pos = torch.full((mb, 1), ctx, dtype=torch.long, device="cuda")
+    return h, rotary(h, pos), pos
+
+
+def kernels(fn):
+    """(kernel count, summed kernel time in us) of one call of fn, from torch.profiler."""
     torch.cuda.synchronize()
-
-    with torch.no_grad():
-        with torch.profiler.profile(
-            activities=[torch.profiler.ProfilerActivity.CUDA],
-            record_shapes=False,
-        ) as prof:
-            _ = layer(hidden, position_embeddings=emb, past_key_values=cache)
-
-    cuda_events = [e for e in prof.key_averages() if e.device_type == DeviceType.CUDA]
-    # count launches, not distinct kernel names
-    return float(sum(e.count for e in cuda_events))
-
-
-# ---------------------------------------------------------------------------
-# 5-7. TRANSPORT BANDWIDTHS
-#    Mirrors mig_transport_pipeline_non_blocking.py exactly:
-#      send: staging.copy_(tensor)        GPU -> pinned CPU   [PCIE_BW_PINNED]
-#            np_slot[:n] = raw            pinned -> SHM       [MEMCPY_BW]
-#      recv: peer_data.copy()             SHM -> heap         [MEMCPY_BW]
-#            src_tensor.to(device)        heap -> GPU         [PCIE_BW_UNPINNED]
-# ---------------------------------------------------------------------------
-def _transport_payload_bytes(mb=TRANSPORT_MB, tokens=1):
-    return mb * tokens * HIDDEN * 2  # FP16 hidden state
-
-
-def calculate_PCIE_BW_PINNED() -> float:
-    device = torch.device("cuda:0")
-    nbytes = _transport_payload_bytes()
-    numel = nbytes // 2
-
-    gpu_t = torch.randn(numel, dtype=torch.float16, device=device)
-    staging = torch.zeros(numel, dtype=torch.float16).pin_memory()
-
-    for _ in range(WARMUP):
-        staging.copy_(gpu_t, non_blocking=True)
-    torch.cuda.synchronize()
-
-    t0 = sync_time()
-    for _ in range(REPEATS):
-        staging.copy_(gpu_t, non_blocking=True)
+    with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof:
+        fn()
         torch.cuda.synchronize()
-    t1 = sync_time()
-
-    return nbytes / ((t1 - t0) / REPEATS)
-
-
-def calculate_PCIE_BW_UNPINNED() -> float:
-    """Pageable host->device, exactly as line 387 does it (heap numpy -> GPU)."""
-    device = torch.device("cuda:0")
-    nbytes = _transport_payload_bytes()
-    numel = nbytes // 2
-
-    heap = torch.from_numpy(np.zeros(numel, dtype=np.float16))  # NOT pinned
-    dst = torch.zeros(numel, dtype=torch.float16, device=device)
-
-    for _ in range(WARMUP):
-        dst.copy_(heap.to(device))
-    torch.cuda.synchronize()
-
-    t0 = sync_time()
-    for _ in range(REPEATS):
-        dst.copy_(heap.to(device))
-    t1 = sync_time()
-
-    return nbytes / ((t1 - t0) / REPEATS)
+    ks = [e for e in prof.events() if e.device_type == DeviceType.CUDA
+          and not e.name.startswith(("Memcpy", "Memset"))]
+    if not ks:
+        raise RuntimeError("torch.profiler recorded no CUDA kernels")
+    return len(ks), sum(e.time_range.elapsed_us() for e in ks)
 
 
-def calculate_MEMCPY_BW() -> float:
-    """Host-to-host: the pinned->SHM write and the SHM->heap .copy()."""
-    from multiprocessing.shared_memory import SharedMemory
-
-    nbytes = _transport_payload_bytes()
-    numel = nbytes // 2
-
-    shm_name = "mig_measure_memcpy_probe"
-    try:
-        if os.path.exists(f"/dev/shm/{shm_name}"):
-            os.unlink(f"/dev/shm/{shm_name}")
-    except Exception:
-        pass
-    shm = SharedMemory(name=shm_name, create=True, size=nbytes)
-    try:
-        np_slot = np.ndarray((nbytes,), dtype=np.uint8, buffer=shm.buf)
-        staging = torch.zeros(numel, dtype=torch.float16).pin_memory()
-        raw = staging.numpy().view(np.uint8)
-
-        for _ in range(WARMUP):
-            np_slot[:nbytes] = raw[:nbytes]
-
-        # leg 1: pinned -> SHM
-        t0 = time.perf_counter()
-        for _ in range(REPEATS):
-            np_slot[:nbytes] = raw[:nbytes]
-        t1 = time.perf_counter()
-        bw_write = nbytes / ((t1 - t0) / REPEATS)
-
-        # leg 2: SHM -> heap (np .copy())
-        view = np.frombuffer(np_slot[:nbytes], dtype=np.float16)
-        t0 = time.perf_counter()
-        for _ in range(REPEATS):
-            _ = view.copy()
-        t1 = time.perf_counter()
-        bw_read = nbytes / ((t1 - t0) / REPEATS)
-
-        # the model uses ONE constant for both legs -- report the harmonic mean
-        # (the two costs add, so the equivalent single bandwidth is harmonic)
-        return 2.0 / (1.0 / bw_write + 1.0 / bw_read), bw_write, bw_read
-    finally:
-        shm.close()
-        shm.unlink()
-
-
-# ---------------------------------------------------------------------------
-# 8. HANDOFF_FIXED_US
-#    The cuda.synchronize() drain at line 356 plus handshake dispatch. Measured
-#    as: full send-leg time minus the pure bandwidth terms. This is the residual
-#    fixed cost -- and it is a LOWER BOUND, because cuda.synchronize() drains
-#    whatever GPU work is outstanding, which in the real pipeline includes the
-#    layer compute that was just issued.
-# ---------------------------------------------------------------------------
-def calculate_HANDOFF_FIXED_US(pcie_pinned: float, memcpy_bw: float) -> float:
-    from multiprocessing.shared_memory import SharedMemory
-
-    device = torch.device("cuda:0")
-    nbytes = _transport_payload_bytes()
-    numel = nbytes // 2
-
-    gpu_t = torch.randn(numel, dtype=torch.float16, device=device)
-    staging = torch.zeros(numel, dtype=torch.float16).pin_memory()
-
-    shm_name = "mig_measure_handoff_probe"
-    try:
-        if os.path.exists(f"/dev/shm/{shm_name}"):
-            os.unlink(f"/dev/shm/{shm_name}")
-    except Exception:
-        pass
-    shm = SharedMemory(name=shm_name, create=True, size=nbytes)
-    try:
-        np_slot = np.ndarray((nbytes,), dtype=np.uint8, buffer=shm.buf)
-
-        def one_send():
-            staging.copy_(gpu_t, non_blocking=True)
-            torch.cuda.synchronize()
-            raw = staging.numpy().view(np.uint8)
-            np_slot[:nbytes] = raw[:nbytes]
-
-        for _ in range(WARMUP):
-            one_send()
-
-        t0 = time.perf_counter()
-        for _ in range(REPEATS):
-            one_send()
-        t1 = time.perf_counter()
-
-        measured_s = (t1 - t0) / REPEATS
-        bandwidth_s = nbytes / pcie_pinned + nbytes / memcpy_bw
-        residual_s = measured_s - bandwidth_s
-        return max(residual_s, 0.0) * 1e6
-    finally:
-        shm.close()
-        shm.unlink()
-
-
-# ---------------------------------------------------------------------------
-# 9. TOK_ROUNDTRIP_US
-#    The per-step next_tokens feedback: last rank -> rank 0, one small int
-#    tensor, blocking send/recv over gloo. Without a second process we can only
-#    measure the local dispatch+serialize cost of the same-size operation; the
-#    true value needs two ranks. Run measure_tok_roundtrip_distributed() for
-#    that (2-process version) when you have the cluster up.
-# ---------------------------------------------------------------------------
-def calculate_TOK_ROUNDTRIP_US_local(batch_size=32) -> float:
-    """Lower bound: CPU-side cost of preparing/copying the token tensor."""
-    tok = torch.zeros((batch_size, 1), dtype=torch.long)
-    dst = torch.zeros((batch_size, 1), dtype=torch.long)
-
-    for _ in range(WARMUP):
-        dst.copy_(tok)
-
+def wall_s(fn, reps=200, warmup=20):
+    """Mean wall time of fn (fn must wait for its own work, as the transport does)."""
+    for _ in range(warmup):
+        fn()
     t0 = time.perf_counter()
-    for _ in range(REPEATS * 10):
-        dst.copy_(tok)
-    t1 = time.perf_counter()
-
-    return (t1 - t0) / (REPEATS * 10) * 1e6
+    for _ in range(reps):
+        fn()
+    return (time.perf_counter() - t0) / reps
 
 
-def measure_tok_roundtrip_distributed(batch_size=32, port=29800):
-    """True 2-rank measurement of the blocking next_tokens round-trip.
+# ---------------------------------------------------------------------------
+# probes
+# ---------------------------------------------------------------------------
+def gemm_bytes_per_s(M, reps=50):
+    """Weight streaming rate of one layer's decode GEMMs for M tokens: q,k,v,gate,up
+    stacked in one matrix, then o and down. Big kernels, so launches do not show."""
+    q, kv = N_HEADS * HEAD_DIM, kv_dim()
+    wa = torch.randn(q + 2 * kv + 2 * INTER, HIDDEN, dtype=torch.float16, device="cuda")
+    wo = torch.randn(HIDDEN, q, dtype=torch.float16, device="cuda")
+    wd = torch.randn(HIDDEN, INTER, dtype=torch.float16, device="cuda")
+    x = torch.randn(M, HIDDEN, dtype=torch.float16, device="cuda")
+    y = torch.randn(M, q, dtype=torch.float16, device="cuda")
+    z = torch.randn(M, INTER, dtype=torch.float16, device="cuda")
 
-    Spawns two gloo processes on localhost and times send->recv->send->recv.
-    Run this on the real cluster for a representative number.
-    """
+    def fn():
+        F.linear(x, wa), F.linear(y, wo), F.linear(z, wd)
+
+    for _ in range(5):
+        fn()
+    start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+    start.record()
+    for _ in range(reps):
+        fn()
+    end.record()
+    torch.cuda.synchronize()
+    return weight_bytes_per_layer() / (start.elapsed_time(end) / reps * 1e-3)
+
+
+def layer_kernel_us(layer, rotary, mb, ctx, reps=5):
+    """(kernels, median kernel time in us) of one decode layer call at ctx cached tokens."""
+    h, emb, _ = decode_input(rotary, mb, ctx)
+    with torch.no_grad():
+        layer_forward(layer, h, emb, cache_at(layer, rotary, mb, ctx))  # warm this shape
+        runs = []
+        for _ in range(reps):
+            cache = cache_at(layer, rotary, mb, ctx)
+            runs.append(kernels(lambda: layer_forward(layer, h, emb, cache)))
+    return runs[0][0], statistics.median(us for _, us in runs)
+
+
+def layer_dispatch_us(layer, rotary, mb, ctx, reps=30):
+    """CPU time to queue one decode layer call (the GPU is idle at each start)."""
+    h, emb, _ = decode_input(rotary, mb, ctx)
+    cache = cache_at(layer, rotary, mb, ctx)
+    out = []
+    with torch.no_grad():
+        for _ in range(reps):
+            torch.cuda.synchronize()
+            t0 = time.perf_counter()
+            layer_forward(layer, h, emb, cache)
+            out.append(time.perf_counter() - t0)
+    return statistics.median(out) * 1e6
+
+
+def device_copies(nbytes):
+    """(D2H, H2D) bytes/s of one activation, as isend+FLUSH and RECV do them: a side
+    stream, then a wait on that copy's event."""
+    n = nbytes // 2
+    src = torch.randn(n, dtype=torch.float16, device="cuda")
+    dst = torch.empty(n, dtype=torch.float16, device="cuda")
+    pinned = torch.empty(n, dtype=torch.float16).pin_memory()
+    copy_stream, recv_stream = torch.cuda.Stream(), torch.cuda.Stream()
+    ev = torch.cuda.Event()
+
+    def d2h():
+        copy_stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(copy_stream):
+            pinned.copy_(src, non_blocking=True)
+        ev.record(copy_stream)
+        ev.synchronize()
+
+    def h2d():
+        with torch.cuda.stream(recv_stream):
+            dst.copy_(pinned, non_blocking=True)
+        ev.record(recv_stream)
+        ev.synchronize()
+
+    return nbytes / wall_s(d2h), nbytes / wall_s(h2d)
+
+
+def host_copies(nbytes):
+    """(pinned -> SHM, SHM -> pinned) bytes/s: _flush_staging_to_shm (numpy slice
+    assignment) and _queue_read_from_slot (torch copy_ from a numpy view of SHM)."""
+    from multiprocessing.shared_memory import SharedMemory
+
+    shm = SharedMemory(create=True, size=nbytes)
+    try:
+        return _host_copy_rates(shm.buf, nbytes)  # its views of SHM are gone on return
+    finally:
+        shm.close()
+        shm.unlink()
+
+
+def _host_copy_rates(buf, nbytes):
+    slot = np.ndarray((nbytes,), dtype=np.uint8, buffer=buf)
+    pinned = torch.empty(nbytes // 2, dtype=torch.float16).pin_memory()
+    raw = pinned.numpy().view(np.uint8)
+    peer = torch.from_numpy(slot.view(np.float16))
+
+    def send():
+        slot[:nbytes] = raw[:nbytes]
+
+    def recv():
+        pinned.copy_(peer)
+
+    return nbytes / wall_s(send), nbytes / wall_s(recv)
+
+
+def token_staging_us(batch):
+    """TokenExchange: D2H of next_tokens + stream sync, then H2D + stream sync."""
+    dev_tok = torch.zeros((batch, 1), dtype=torch.long, device="cuda")
+    host = torch.empty((batch, 1), dtype=torch.long).pin_memory()
+
+    def exchange():
+        host.copy_(dev_tok)
+        torch.cuda.current_stream().synchronize()
+        dev_tok.copy_(host)
+        torch.cuda.current_stream().synchronize()
+
+    return wall_s(exchange) * 1e6
+
+
+def step_start_us(mb, seq):
+    """Rank 0's work at a decode step start: position_ids built on the device (a pageable
+    H2D that waits for itself), expand().contiguous(), the step event's first record."""
+    def step():
+        torch.tensor([[seq]], dtype=torch.long, device="cuda").expand(mb, -1).contiguous()
+        torch.cuda.Event(enable_timing=True).record()
+
+    return wall_s(step) * 1e6
+
+
+def _gloo_worker(rank, world, port, batch, reps, q):
+    """handshake + ACK (ranks 0 and 1, as FLUSH/RECV), next_tokens (last rank -> 0),
+    barrier (all). Times are rank 0's. Second pass counts; the first is a warmup."""
     import torch.distributed as dist
-    import torch.multiprocessing as mp
 
-    def worker(rank, q):
-        os.environ["MASTER_ADDR"] = "127.0.0.1"
-        os.environ["MASTER_PORT"] = str(port)
-        dist.init_process_group("gloo", rank=rank, world_size=2)
-        tok = torch.zeros((batch_size, 1), dtype=torch.long)
-
-        for _ in range(WARMUP):
-            if rank == 1:
-                dist.send(tok, dst=0, tag=1)
-            else:
-                dist.recv(tok, src=1, tag=1)
+    os.environ.update(MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port))
+    dist.init_process_group("gloo", rank=rank, world_size=world)
+    hs, ack = torch.zeros(1, dtype=torch.int32), torch.zeros(1, dtype=torch.int32)
+    tok = torch.zeros((batch, 1), dtype=torch.long)
+    out = {}
+    for _ in range(2):
         dist.barrier()
-
         t0 = time.perf_counter()
-        for _ in range(REPEATS):
-            if rank == 1:
-                dist.send(tok, dst=0, tag=2)
-            else:
-                dist.recv(tok, src=1, tag=2)
-        t1 = time.perf_counter()
+        for i in range(reps):
+            if rank == 0:  # FLUSH: post the ACK irecv, send the handshake ... wait() later
+                r = dist.irecv(ack, src=1, tag=2 * i + 1)
+                dist.send(hs, dst=1, tag=2 * i)
+                r.wait()
+            elif rank == 1:  # RECV: handshake in, ACK out
+                dist.recv(hs, src=0, tag=2 * i)
+                dist.send(ack, dst=0, tag=2 * i + 1)
+        out["handshake_ack_us"] = (time.perf_counter() - t0) / reps * 1e6
+        dist.barrier()
+        t0 = time.perf_counter()
+        for i in range(reps):
+            if rank == world - 1:
+                dist.send(tok, dst=0, tag=100_000 + i)
+            elif rank == 0:
+                dist.recv(tok, src=world - 1, tag=100_000 + i)
+        out["tok_roundtrip_us"] = (time.perf_counter() - t0) / reps * 1e6
+        dist.barrier()
+        t0 = time.perf_counter()
+        for _ in range(reps):
+            dist.barrier()
+        out["barrier_us"] = (time.perf_counter() - t0) / reps * 1e6
+    if rank == 0:
+        q.put(out)
+    dist.destroy_process_group()
 
-        if rank == 0:
-            q.put((t1 - t0) / REPEATS * 1e6)
-        dist.destroy_process_group()
 
-    mp.set_start_method("spawn", force=True)
-    q = mp.Queue()
-    procs = [mp.Process(target=worker, args=(r, q)) for r in range(2)]
+def gloo_probes(world, port, batch, reps=200):
+    import multiprocessing as mp
+
+    ctx = mp.get_context("spawn")
+    q = ctx.Queue()
+    procs = [ctx.Process(target=_gloo_worker, args=(r, world, port, batch, reps, q))
+             for r in range(world)]
     for p in procs:
         p.start()
+    out = q.get(timeout=300)
     for p in procs:
-        p.join(timeout=120)
-    return q.get() if not q.empty() else float("nan")
+        p.join(timeout=60)
+    return out
+
+
+def detect_card(name):
+    if "A100" in name:
+        if torch.cuda.get_device_properties(0).total_memory < 45e9:
+            return "A100-40GB"
+        return "A100-80GB-PCIe" if "PCIe" in name else "A100-80GB"
+    raise SystemExit(f"{name}: unknown card; set CONFIG['card'] and add its peak to CARD_BW")
 
 
 # ---------------------------------------------------------------------------
-# SLICE CALIBRATION -- the only thing slice mode measures.
-#
-# Runs the same large contiguous read probe as calculate_EFF_WEIGHT, but on a
-# MIG slice, and reports achieved_bandwidth / A100_BW. Because the probe and the
-# access pattern are identical to the full-GPU run, the workload efficiency
-# cancels when you take the ratio:
-#
-#     frac = achieved_slice / achieved_full
-#
-# leaving the pure bandwidth scaling of the partition. That fraction is what
-# SLICE_FRAC in pulp_layer_placement.py should hold.
-#
-# Pass --full-achieved <GB/s> (printed by full mode) to get the cancelled ratio.
-# Without it, the raw achieved/A100_BW is reported, which still bounds the answer.
-# ---------------------------------------------------------------------------
-def calculate_slice_bandwidth() -> float:
-    """Achieved bandwidth (bytes/s) on whatever device is visible."""
-    device = torch.device("cuda:0")
-    WEIGHT_BYTES = (4 * HIDDEN * HIDDEN + 3 * HIDDEN * INTER) * 2
-
-    n_elements = WEIGHT_BYTES // 2
-    tensor = torch.randn(n_elements, dtype=torch.float16, device=device)
-
-    for _ in range(WARMUP):
-        _ = tensor.sum()
-    torch.cuda.synchronize()
-
-    t0 = sync_time()
-    for _ in range(REPEATS):
-        _ = tensor.sum()
-    t1 = sync_time()
-
-    return WEIGHT_BYTES / ((t1 - t0) / REPEATS)
-
-
-def run_slice_mode(full_achieved_bw=None):
-    torch.cuda.set_device(0)
-    print(f"Running on: {torch.cuda.get_device_name(0)}")
-    print(f"Slice label: {SLICE_LABEL}")
-    print(f"Full-GPU spec bandwidth: {A100_BW / 1e9:.1f} GB/s")
-    print()
-
-    print("Measuring achieved bandwidth on this slice (same probe as full mode)...")
-    achieved = calculate_slice_bandwidth()
-    print(f"  achieved = {achieved / 1e9:.1f} GB/s")
-    print()
-
-    frac_vs_spec = achieved / A100_BW
-    print(f"  achieved / A100_BW(spec)  = {frac_vs_spec:.4f}")
-
-    if full_achieved_bw:
-        frac = achieved / full_achieved_bw
-        print(f"  achieved / achieved_full  = {frac:.4f}   <-- USE THIS")
-        print("      (workload efficiency cancels: this is pure bandwidth scaling)")
-    else:
-        frac = None
-        print("  NOTE: pass --full-achieved <bytes/s> from the full-mode run to")
-        print("        cancel workload efficiency and get the clean fraction.")
-    print()
-
-    print("=" * 62)
-    print(f"Assumed fraction in the model : {SLICE_FRAC_ASSUMED:.4f}")
-    measured = frac if frac is not None else frac_vs_spec
-    print(f"Measured fraction             : {measured:.4f}")
-    delta = (measured - SLICE_FRAC_ASSUMED) / SLICE_FRAC_ASSUMED * 100
-    print(f"Difference                    : {delta:+.1f}%")
-    print()
-    # The two candidate scaling laws this distinguishes.
-    print("Candidate laws for reference:")
-    print(f"  GPC count      3/7 = {3 / 7:.4f}   (compute-slice proportional)")
-    print(f"  HBM stacks     1/2 = {0.5:.4f}   (2 of 4 stacks on a 40GB A100)")
-    print()
-    print("Paste the measured fraction into SLICE_FRAC in pulp_layer_placement.py")
-    print("for this slice geometry.")
-    print("=" * 62)
-
-
-# ---------------------------------------------------------------------------
-# MAIN
-# ---------------------------------------------------------------------------
-def run_full_mode():
-    torch.cuda.set_device(0)
-    print(f"Running on: {torch.cuda.get_device_name(0)}")
-    print(f"Normalizing by FULL-GPU peak: {PEAK_BW / 1e9:.1f} GB/s")
-    print("All efficiencies below are fractions of the WHOLE GPU's bandwidth,")
-    print("so they are hardware properties independent of MIG partitioning.")
-    print()
-
-    print("[1/8] EFF_WEIGHT (large contiguous weight reads)...")
-    eff_weight = calculate_EFF_WEIGHT()
-    achieved_full = eff_weight * PEAK_BW
-    print(f"      EFF_WEIGHT = {eff_weight:.3f}  ({eff_weight * 100:.1f}% of peak)")
-    print(f"      achieved   = {achieved_full / 1e9:.1f} GB/s")
-    print(f"      -> pass --full-achieved {achieved_full:.6e} to slice mode")
-    print()
-
-    print("[2/8] LAUNCH_US (per-kernel launch + dispatch overhead)...")
-    launch_us = calculate_LAUNCH_US()
-    print(f"      LAUNCH_US  = {launch_us:.1f} us/kernel")
-    print()
-
-    print("[3/8] KERNELS_PER_LAYER (profiler kernel count, one decode step)...")
-    kernels = calculate_KERNELS_PER_LAYER()
-    print(f"      KERNELS_PER_LAYER = {kernels:.0f}")
-    print()
-
-    launch_ms_per_layer = kernels * launch_us / 1000.0
-
-    print("[4/8] EFF_ACT sweep (single-token decode, varying context)...")
-    curve = calculate_EFF_ACT_curve(eff_weight, launch_ms_per_layer)
-    print(f"      {'ctx':>6} {'EFF_ACT':>9} {'measured_ms':>12} {'act_only_ms':>12}")
-    for ctx, eff, meas, act in curve:
-        print(f"      {ctx:6d} {eff:9.3f} {meas * 1e3:12.3f} {act * 1e3:12.3f}")
-    eff_act_w = weighted_EFF_ACT(curve)
-    print(f"      traffic-weighted scalar EFF_ACT = {eff_act_w:.3f}")
-    print()
-
-    print("[5/8] PCIE_BW_PINNED (pinned GPU->host DMA)...")
-    pcie_pinned = calculate_PCIE_BW_PINNED()
-    print(f"      PCIE_BW_PINNED   = {pcie_pinned / 1e9:.1f} GB/s")
-    print()
-
-    print("[6/8] PCIE_BW_UNPINNED (pageable host->GPU, bounce-buffered)...")
-    pcie_unpinned = calculate_PCIE_BW_UNPINNED()
-    print(f"      PCIE_BW_UNPINNED = {pcie_unpinned / 1e9:.1f} GB/s")
-    print()
-
-    print("[7/8] MEMCPY_BW (pinned->SHM write, SHM->heap read)...")
-    memcpy_bw, bw_w, bw_r = calculate_MEMCPY_BW()
-    print(f"      write pinned->SHM = {bw_w / 1e9:.1f} GB/s")
-    print(f"      read  SHM->heap   = {bw_r / 1e9:.1f} GB/s")
-    print(f"      MEMCPY_BW (harmonic mean) = {memcpy_bw / 1e9:.1f} GB/s")
-    print()
-
-    print("[8/8] HANDOFF_FIXED_US (cuda.sync drain + handshake residual)...")
-    handoff_us = calculate_HANDOFF_FIXED_US(pcie_pinned, memcpy_bw)
-    tok_local = calculate_TOK_ROUNDTRIP_US_local()
-    print(f"      HANDOFF_FIXED_US = {handoff_us:.1f} us")
-    print(f"      TOK_ROUNDTRIP_US (local lower bound) = {tok_local:.1f} us")
-    print("      NOTE: run measure_tok_roundtrip_distributed() on the cluster")
-    print("            for the true 2-rank gloo round-trip.")
-    print()
-
-    print("=" * 62)
-    print("Paste these into pulp_layer_placement.py:")
-    print(f"  EFF_WEIGHT        = {eff_weight:.3f}")
-    print(
-        f"  EFF_ACT           = {eff_act_w:.3f}   # traffic-weighted; see curve above"
-    )
-    print(f"  LAUNCH_US         = {launch_us:.1f}")
-    print(f"  KERNELS_PER_LAYER = {kernels:.0f}")
-    print(f"  PCIE_BW_PINNED    = {pcie_pinned:.3e}")
-    print(f"  PCIE_BW_UNPINNED  = {pcie_unpinned:.3e}")
-    print(f"  MEMCPY_BW         = {memcpy_bw:.3e}")
-    print(f"  HANDOFF_FIXED_US  = {handoff_us:.1f}")
-    print(f"  TOK_ROUNDTRIP_US  = <run distributed measurement>")
-    print()
-    print("SLICE_FRAC is NOT set from this run -- it is a property of the MIG")
-    print("partition, not of the hardware. Run slice mode once per geometry:")
-    print(f"  CUDA_VISIBLE_DEVICES=<uuid> python3 measure_constants.py \\")
-    print(f"      --mode slice --full-achieved {achieved_full:.6e}")
-    print("=" * 62)
-
-
 def main():
-    import argparse
+    CONFIG = dict(
+        model_path="lmsys/vicuna-7b-v1.5",  # HF id (only config.json is fetched) or a local model dir
+        card=None,  # None: from the device; or "A100-40GB" / "A100-80GB"
+        mbs=[1, 8, 32],  # microbatch sizes for the layer probes
+        ctxs=[64, 192, 320, 448, 575],  # cached tokens: decode steps 1 .. 512 with seq 64
+        transport_mb=8,  # activation of this microbatch for the copy probes (decode shape)
+        seq_len=64,
+        batch=32,  # next_tokens rows
+        world=4,  # ranks for the gloo probes
+        port=29900,
+    )
+    c = CONFIG
 
-    ap = argparse.ArgumentParser(
-        description="Measure the empirical constants for pulp_layer_placement.py"
-    )
-    ap.add_argument(
-        "--mode",
-        choices=["full", "slice"],
-        default="full",
-        help="full: hardware properties on the whole GPU (default). "
-        "slice: calibrate one MIG slice's bandwidth fraction.",
-    )
-    ap.add_argument(
-        "--full-achieved",
-        type=float,
-        default=None,
-        help="slice mode: achieved bandwidth (bytes/s) from the "
-        "full-mode run, so workload efficiency cancels.",
-    )
-    args = ap.parse_args()
+    name = torch.cuda.get_device_name(0)
+    if "MIG" in name:
+        raise SystemExit(f"{name} is a MIG slice: run on a whole GPU (MIG disabled), "
+                         "e.g. CUDA_VISIBLE_DEVICES=<index>")
+    card = c["card"] or detect_card(name)
+    peak = CARD_BW[card]
+    layer, rotary = load_model(c["model_path"])
+    import transformers
 
-    if args.mode == "full":
-        if "CUDA_VISIBLE_DEVICES" in os.environ and os.environ[
-            "CUDA_VISIBLE_DEVICES"
-        ].startswith("MIG-"):
-            print("WARNING: CUDA_VISIBLE_DEVICES points at a MIG slice, but full")
-            print("         mode expects the whole GPU. Efficiencies will be")
-            print("         normalized by A100_BW and come out ~slice_frac too low.")
-            print()
-        run_full_mode()
-    else:
-        run_slice_mode(full_achieved_bw=args.full_achieved)
+    print(f"{name} as {card} (peak {peak / 1e9:.0f} GB/s); {c['model_path']}: hidden {HIDDEN}, "
+          f"inter {INTER}, heads {N_HEADS}/{N_KV_HEADS} kv, head_dim {HEAD_DIM}; "
+          f"torch {torch.__version__}, transformers {transformers.__version__}")
+
+    # weight streaming
+    rates = {M: gemm_bytes_per_s(M) for M in c["mbs"]}
+    eff_weight = statistics.mean(rates.values()) / peak
+    print("\neff_weight (decode GEMMs, M tokens): " + ", ".join(
+        f"M={M}: {r / 1e9:.0f} GB/s = {r / peak:.3f}" for M, r in rates.items())
+        + f"  -> mean {eff_weight:.3f}")
+
+    # one layer: kernels, kernel time, CPU dispatch
+    kpl, _ = layer_kernel_us(layer, rotary, 1, c["seq_len"], reps=1)
+    dispatch = layer_dispatch_us(layer, rotary, c["transport_mb"], c["seq_len"])
+    launch_us = dispatch / kpl
+    with torch.no_grad():
+        h, _, pos = decode_input(rotary, c["transport_mb"], c["seq_len"])
+        rotary_kernels, _ = kernels(lambda: rotary(h, pos))
+    print(f"kernels_per_layer {kpl}, rotary_kernels {rotary_kernels}, launch_us {launch_us:.1f} "
+          f"(CPU {dispatch:.0f} us to queue one layer)")
+
+    # activation + KV traffic, both ways of charging the launch term
+    w_us = weight_bytes_per_layer() / (peak * eff_weight) * 1e6
+    launch_term = kpl * launch_us
+    print(f"\neff_act: one decode layer call; weight time {w_us:.0f} us, launch term "
+          f"(kernels x launch_us) {launch_term:.0f} us")
+    print(f"  {'mb':>3} {'ctx':>4} {'kernel us':>10} {'act ideal us':>13} {'ILP form':>9} {'no launch':>9}")
+    ideal, ilp, nolaunch = [], [], []
+    for mb in c["mbs"]:
+        for ctx in c["ctxs"]:
+            _, t = layer_kernel_us(layer, rotary, mb, ctx)
+            a = mb * act_bytes_per_token(ctx) / peak * 1e6
+            e1 = a / (t - w_us - launch_term) if t - w_us - launch_term > 0 else float("nan")
+            e2 = a / (t - w_us) if t - w_us > 0 else float("nan")
+            ideal.append(a), ilp.append(e1), nolaunch.append(e2)
+            print(f"  {mb:3d} {ctx:4d} {t:10.0f} {a:13.1f} {e1:9.3f} {e2:9.3f}")
+
+    def scalar(effs):  # time-equivalent: total ideal time / total measured time
+        ok = [(a, e) for a, e in zip(ideal, effs) if e == e]
+        return (sum(a for a, _ in ok) / sum(a / e for a, e in ok), len(ok)) if ok else (float("nan"), 0)
+
+    eff_act, n_ok = scalar(ilp)
+    eff_act_nl, n_nl = scalar(nolaunch)
+    print(f"  ILP form ({n_ok}/{len(ilp)} samples usable): eff_act {eff_act:.3f}")
+    print(f"  without the launch term in GPU time ({n_nl}/{len(ilp)}): eff_act {eff_act_nl:.3f}")
+
+    # transport
+    dec = c["transport_mb"] * HIDDEN * 2
+    pre = dec * c["seq_len"]
+    d2h, h2d = device_copies(dec)
+    send, recv = host_copies(dec)
+    d2h_p, h2d_p = device_copies(pre)
+    send_p, recv_p = host_copies(pre)
+    print(f"\ntransport, one activation of mb {c['transport_mb']} (GB/s)      decode {dec // 1024} KiB"
+          f"   prefill {pre // 1024} KiB")
+    for label, a, b in (("D2H (pcie_bw)", d2h, d2h_p), ("H2D (recv_h2d_bw)", h2d, h2d_p),
+                        ("pinned -> SHM (memcpy_bw)", send, send_p),
+                        ("SHM -> pinned (shm_to_pinned_bw)", recv, recv_p)):
+        print(f"  {label:34s} {a / 1e9:8.2f} {b / 1e9:12.2f}")
+
+    staging = token_staging_us(c["batch"])
+    step = step_start_us(c["transport_mb"], c["seq_len"])
+    g = gloo_probes(c["world"], c["port"], c["batch"])
+    print(f"\ntoken_staging_us {staging:.1f}, step_start_us {step:.1f}, handshake_ack_us "
+          f"{g['handshake_ack_us']:.1f}, tok_roundtrip_us {g['tok_roundtrip_us']:.1f}, "
+          f"barrier_us {g['barrier_us']:.1f}")
+
+    print("\n# measured on " + f"{name}, {os.path.basename(os.path.expanduser(c['model_path']))}"
+          + f", mb {c['transport_mb']} transport")
+    def num(x):  # a pasteable literal, also for a probe that came back NaN
+        return f"{x:.3f}" if x == x else 'float("nan")'
+
+    print(f"""DEFAULT_CONSTANTS = dict(
+    eff_weight={eff_weight:.3f},
+    eff_act={num(eff_act)},  # without the launch term in GPU time: {num(eff_act_nl)}
+    launch_us={launch_us:.1f},
+    kernels_per_layer={kpl},
+    pcie_bw={d2h:.3g},
+    recv_h2d_bw={h2d:.3g},
+    shm_to_pinned_bw={recv:.3g},
+    memcpy_bw={send:.3g},
+    handshake_ack_us={g['handshake_ack_us']:.1f},
+    tok_roundtrip_us={g['tok_roundtrip_us']:.1f},
+    token_staging_us={staging:.1f},
+    step_start_us={step:.1f},
+    barrier_us={g['barrier_us']:.1f},
+    rotary_kernels={rotary_kernels},
+    timing_event_calls=2,  # from the benchmark code, not measured
+    send_queue_calls=2,  # from the transport code, not measured
+)""")
 
 
 if __name__ == "__main__":
