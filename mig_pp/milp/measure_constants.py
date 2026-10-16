@@ -133,7 +133,8 @@ def kernels(fn, copies=False):
     ks = [e for e in prof.events() if e.device_type == DeviceType.CUDA
           and (copies or not e.name.startswith(("Memcpy", "Memset")))]
     if not ks:
-        raise RuntimeError("torch.profiler recorded no CUDA kernels")
+        seen = [f"{e.name} ({e.device_type})" for e in prof.events()][:20]
+        raise RuntimeError(f"torch.profiler recorded no CUDA kernels; events seen: {seen}")
     return len(ks), sum(e.time_range.elapsed_us() for e in ks)
 
 
@@ -391,7 +392,11 @@ def endpoint_us(layer, mb, prefill_seq=None):
         ):
             fn()
             copies = name in ("clone", "argmax")  # clone and the next_tokens write are memcpys
-            out[name] = statistics.median(kernels(fn, copies)[1] for _ in range(5))
+            try:
+                out[name] = statistics.median(kernels(fn, copies)[1] for _ in range(5))
+            except RuntimeError as err:  # report it and keep going: nan in that column
+                print(f"  [endpoint {name}, mb {mb}, tokens {t}] {err}", flush=True)
+                out[name] = float("nan")
     out["argmax"] -= out["lm_head"]  # the line above also ran lm_head to get logits
     return out
 
