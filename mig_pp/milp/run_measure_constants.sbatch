@@ -66,6 +66,6 @@ EOF
 ls model_family.py mig_pp/milp/measure_constants.py || { echo "wrong REPO: $REPO"; exit 1; }
 
 echo "=== measure_constants ==="
-python mig_pp/milp/measure_constants.py
+python -u mig_pp/milp/measure_constants.py  # -u: output survives a kill at the time limit
 RC=$?
 echo "exit code $RC"

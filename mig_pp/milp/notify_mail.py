@@ -33,7 +33,7 @@ def main():
         password_file="~/.mail_app_password",
         smtp_host="smtp.gmail.com",
         smtp_port=465,
-        tail_lines=60,
+        tail_lines=150,
     )
     c = CONFIG
 
