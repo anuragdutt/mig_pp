@@ -95,11 +95,11 @@ def load_model(path):
     return layer, rotary
 
 
-def layer_forward(layer, h, emb, cache):
+def layer_forward(layer, h, emb, cache, mask=None):
     """forward_through_layers in benchmark_pipeline_microbatching.py, one layer."""
     r = h
     x = layer.self_attn(hidden_states=layer.input_layernorm(h), position_embeddings=emb,
-                        attention_mask=None, past_key_values=cache, use_cache=True)[0]
+                        attention_mask=mask, past_key_values=cache, use_cache=True)[0]
     h = r + x
     return h + layer.mlp(layer.post_attention_layernorm(h))
 
@@ -332,6 +332,136 @@ def gloo_probes(world, port, batch, reps=200):
     return out
 
 
+# ---------------------------------------------------------------------------
+# extra probes: things DEFAULT_CONSTANTS does not cover yet
+# ---------------------------------------------------------------------------
+def fit_latency(sizes, times_s):
+    """Least-squares t = fixed + bytes / bw over the sizes: (fixed us, bytes/s)."""
+    n = len(sizes)
+    mx, my = sum(sizes) / n, sum(times_s) / n
+    slope = sum((x - mx) * (y - my) for x, y in zip(sizes, times_s)) / sum((x - mx) ** 2 for x in sizes)
+    return (my - slope * mx) * 1e6, (1 / slope if slope > 0 else float("nan"))
+
+
+def prefill_layer_us(layer, rotary, mb, seq, reps=5):
+    """Kernel time of one prefill layer call: mb sequences of seq tokens, empty cache,
+    the benchmark's causal mask (1, 1, seq, seq)."""
+    from transformers import DynamicCache
+
+    x = torch.randn(mb, seq, HIDDEN, dtype=torch.float16, device="cuda")
+    pos = torch.arange(seq, device="cuda").unsqueeze(0)
+    mask = torch.triu(torch.full((1, 1, seq, seq), torch.finfo(torch.float16).min,
+                                 device="cuda"), diagonal=1).half()
+    with torch.no_grad():
+        emb = rotary(x, pos)
+        layer_forward(layer, x, emb, DynamicCache(), mask)  # warm this shape
+        runs = [kernels(lambda: layer_forward(layer, x, emb, DynamicCache(), mask))[1]
+                for _ in range(reps)]
+    return statistics.median(runs)
+
+
+def layer_flops(mb, seq):
+    q, kv = N_HEADS * HEAD_DIM, kv_dim()
+    tokens = mb * seq
+    return (2 * tokens * (HIDDEN * q + 2 * HIDDEN * kv + q * HIDDEN + 3 * HIDDEN * INTER)
+            + 2 * mb * N_HEADS * seq * seq * HEAD_DIM * 2)
+
+
+def endpoint_us(layer, mb, prefill_seq=None):
+    """Kernel time (us) of each non-layer piece of one microbatch: embed gather (rank 0),
+    clone (sending ranks), and on the last rank norm, lm_head, argmax + next_tokens write.
+    prefill_seq=None is decode (1 token); else norm/embed/clone see mb x seq tokens."""
+    t = prefill_seq or 1
+    table = torch.randn(VOCAB, HIDDEN, dtype=torch.float16, device="cuda")
+    ids = torch.randint(0, VOCAB, (mb, t), device="cuda")
+    hid = torch.randn(mb, t, HIDDEN, dtype=torch.float16, device="cuda")
+    head = torch.randn(VOCAB, HIDDEN, dtype=torch.float16, device="cuda")
+    tok = torch.zeros(mb, 1, dtype=torch.long, device="cuda")
+    norm = layer.input_layernorm  # same RMSNorm class as the final norm
+    out = {}
+    with torch.no_grad():
+        for name, fn in (
+            ("embed", lambda: F.embedding(ids, table)),
+            ("clone", lambda: hid.clone()),
+            ("norm", lambda: norm(hid)),
+            ("lm_head", lambda: F.linear(hid[:, -1:, :], head)),
+            ("argmax", lambda: tok.copy_(torch.argmax(F.linear(hid[:, -1:, :], head), dim=-1))),
+        ):
+            fn()
+            out[name] = statistics.median(kernels(fn)[1] for _ in range(5))
+    out["argmax"] -= out["lm_head"]  # the line above also ran lm_head to get logits
+    return out
+
+
+def _import_transport():
+    """The real transport engine. Its module imports helpers.py, which needs the
+    `datasets` package for unrelated reasons; stub the one function it uses if absent."""
+    try:
+        import mig_transport_pipeline as mt
+    except ImportError:
+        import types
+
+        stub = types.ModuleType("helpers")
+        stub._compute_slot_size_mb = (
+            lambda hidden_size=5120, max_mb_size=32, max_seq_len=64:
+            max_mb_size * max_seq_len * hidden_size * 2 // (1024 * 1024) + 1)
+        sys.modules["helpers"] = stub
+        import mig_transport_pipeline as mt
+    return mt
+
+
+def _transport_worker(rank, port, hidden, mbs, tokens, reps, q):
+    """Two ranks on this one GPU, using the real SHM transport exactly as run_pipeline:
+    rank 0 isend -> flush -> wait (ACK), rank 1 irecv -> wait. Rank 0 times one
+    microbatch handed over and acknowledged, for each microbatch size."""
+    import torch.distributed as dist
+
+    os.environ.update(MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port),
+                      MIG_SHM_PREFIX=f"mcprobe{port}", MIG_LOG_LEVEL="off")
+    dist.init_process_group("gloo", rank=rank, world_size=2)
+    torch.cuda.set_device(0)
+    mt = _import_transport()
+    out = {}
+    for mb in mbs:
+        mt.register_hooks(mb_size=mb, seq_len=tokens, hidden_size=hidden, num_slots=16)
+        x = torch.randn(mb, tokens, hidden, dtype=torch.float16, device="cuda")
+        buf = torch.empty_like(x)
+        times = []
+        for i in range(reps + 20):
+            tag = 2000 + i
+            if rank == 0:
+                torch.cuda.synchronize()
+                t0 = time.perf_counter()
+                h = dist.isend(x.clone(), dst=1, tag=tag)
+                h.flush()
+                h.wait()
+                times.append(time.perf_counter() - t0)
+            else:
+                dist.irecv(buf, src=0, tag=tag).wait()
+        out[mb] = statistics.median(times[20:]) * 1e6 if rank == 0 else None
+        dist.barrier()
+        mt.cleanup()
+        dist.barrier()
+    if rank == 0:
+        q.put(out)
+    dist.destroy_process_group()
+
+
+def transport_handoff_us(port, mbs, tokens, reps=200):
+    import multiprocessing as mp
+
+    ctx = mp.get_context("spawn")
+    q = ctx.Queue()
+    procs = [ctx.Process(target=_transport_worker, args=(r, port, HIDDEN, mbs, tokens, reps, q))
+             for r in range(2)]
+    for p in procs:
+        p.start()
+    out = q.get(timeout=600)
+    for p in procs:
+        p.join(timeout=60)
+    return out
+
+
 def detect_card(name):
     if "A100" in name:
         if torch.cuda.get_device_properties(0).total_memory < 45e9:
@@ -352,6 +482,8 @@ def main():
         batch=32,  # next_tokens rows
         world=4,  # ranks for the gloo probes
         port=29900,
+        copy_mbs=[2, 8, 32],  # microbatch sizes for the copy / handoff size sweep
+        prefill_mbs=[1, 4, 16, 32],  # microbatch sizes for the prefill probe
     )
     c = CONFIG
 
@@ -430,6 +562,59 @@ def main():
     print(f"\ntoken_staging_us {staging:.1f}, step_start_us {step:.1f}, handshake_ack_us "
           f"{g['handshake_ack_us']:.1f}, tok_roundtrip_us {g['tok_roundtrip_us']:.1f}, "
           f"barrier_us {g['barrier_us']:.1f}")
+
+    # ---- extra measurements (not in DEFAULT_CONSTANTS yet) ----
+    print("\n==== EXTRA: not in DEFAULT_CONSTANTS yet ====")
+
+    # 1. copies at several sizes -> fixed latency + per-byte rate
+    sizes = [mb * HIDDEN * 2 for mb in c["copy_mbs"]] + [c["transport_mb"] * c["seq_len"] * HIDDEN * 2,
+                                                        32 * c["seq_len"] * HIDDEN * 2]
+    rows = []
+    for nb in sizes:
+        a, b = device_copies(nb)
+        s_, r_ = host_copies(nb)
+        rows.append((nb, nb / a, nb / b, nb / s_, nb / r_))
+    print("\ncopies vs size (us per copy):")
+    print(f"  {'KiB':>8} {'D2H':>8} {'H2D':>8} {'pin>SHM':>8} {'SHM>pin':>8}")
+    for nb, *ts in rows:
+        print(f"  {nb // 1024:8d} " + " ".join(f"{t * 1e6:8.1f}" for t in ts))
+    for i, label in enumerate(("D2H", "H2D", "pinned->SHM", "SHM->pinned")):
+        fixed, bw = fit_latency([r[0] for r in rows], [r[i + 1] for r in rows])
+        print(f"  fit {label:12s}: fixed {fixed:6.1f} us + bytes / {bw / 1e9:6.2f} GB/s")
+
+    # 2. the real transport, one microbatch handed over and ACKed (2 ranks, this GPU)
+    dec = transport_handoff_us(c["port"] + 1, c["copy_mbs"], 1)
+    pre = transport_handoff_us(c["port"] + 2, [c["transport_mb"]], c["seq_len"])
+    print("\nreal SHM transport, isend -> flush -> wait (ACK), median us per microbatch:")
+    for mb, us in dec.items():
+        print(f"  decode mb {mb:2d} ({mb * HIDDEN * 2 // 1024:5d} KiB): {us:8.1f}")
+    for mb, us in pre.items():
+        print(f"  prefill mb {mb:2d} ({mb * c['seq_len'] * HIDDEN * 2 // 1024:5d} KiB): {us:8.1f}")
+
+    # 3. prefill layer
+    print(f"\nprefill, one layer, seq {c['seq_len']} (kernel time):")
+    print(f"  {'mb':>3} {'us':>9} {'bytes eff':>10} {'TFLOP/s':>8}")
+    for mb in c["prefill_mbs"]:
+        t = prefill_layer_us(layer, rotary, mb, c["seq_len"])
+        tokens = mb * c["seq_len"]
+        bw_eff = (weight_bytes_per_layer() + tokens * act_bytes_per_token(c["seq_len"])) / (t * 1e-6) / peak
+        print(f"  {mb:3d} {t:9.0f} {bw_eff:10.3f} {layer_flops(mb, c['seq_len']) / (t * 1e-6) / 1e12:8.1f}")
+
+    # 4. endpoints (embed, clone, norm, lm_head, argmax)
+    print("\nendpoint kernels per microbatch (us):")
+    names = ("embed", "clone", "norm", "lm_head", "argmax")
+    print(f"  {'':12s} " + " ".join(f"{n:>8}" for n in names))
+    for mb in c["copy_mbs"]:
+        e = endpoint_us(layer, mb)
+        print(f"  decode mb{mb:<3d} " + " ".join(f"{e[n]:8.1f}" for n in names))
+    e = endpoint_us(layer, c["transport_mb"], c["seq_len"])
+    print(f"  prefill mb{c['transport_mb']:<2d} " + " ".join(f"{e[n]:8.1f}" for n in names))
+
+    # 5. GPU time of small kernels (the ILP charges launch_us each)
+    with torch.no_grad():
+        n_rot, us_rot = kernels(lambda: rotary(h, pos))
+    print(f"\nsmall kernels: rotary {n_rot} kernels, {us_rot:.1f} us GPU total, "
+          f"{us_rot / n_rot:.1f} us each (vs launch_us {launch_us:.1f} CPU)")
 
     print("\n# measured on " + f"{name}, {os.path.basename(os.path.expanduser(c['model_path']))}"
           + f", mb {c['transport_mb']} transport")
