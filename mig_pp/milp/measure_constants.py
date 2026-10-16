@@ -122,14 +122,16 @@ def decode_input(rotary, mb, ctx):
     return h, rotary(h, pos), pos
 
 
-def kernels(fn):
-    """(kernel count, summed kernel time in us) of one call of fn, from torch.profiler."""
+def kernels(fn, copies=False):
+    """(kernel count, summed kernel time in us) of one call of fn, from torch.profiler.
+    copies=True also counts Memcpy/Memset: a contiguous clone() or copy_() on the device
+    is one DtoD memcpy, not a kernel."""
     torch.cuda.synchronize()
     with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof:
         fn()
         torch.cuda.synchronize()
     ks = [e for e in prof.events() if e.device_type == DeviceType.CUDA
-          and not e.name.startswith(("Memcpy", "Memset"))]
+          and (copies or not e.name.startswith(("Memcpy", "Memset")))]
     if not ks:
         raise RuntimeError("torch.profiler recorded no CUDA kernels")
     return len(ks), sum(e.time_range.elapsed_us() for e in ks)
@@ -388,7 +390,8 @@ def endpoint_us(layer, mb, prefill_seq=None):
             ("argmax", lambda: tok.copy_(torch.argmax(F.linear(hid[:, -1:, :], head), dim=-1))),
         ):
             fn()
-            out[name] = statistics.median(kernels(fn)[1] for _ in range(5))
+            copies = name in ("clone", "argmax")  # clone and the next_tokens write are memcpys
+            out[name] = statistics.median(kernels(fn, copies)[1] for _ in range(5))
     out["argmax"] -= out["lm_head"]  # the line above also ran lm_head to get logits
     return out
 
@@ -563,6 +566,31 @@ def main():
           f"{g['handshake_ack_us']:.1f}, tok_roundtrip_us {g['tok_roundtrip_us']:.1f}, "
           f"barrier_us {g['barrier_us']:.1f}")
 
+    # printed before the extras, so a failing extra probe cannot lose it
+    print("\n# measured on " + f"{name}, {os.path.basename(os.path.expanduser(c['model_path']))}"
+          + f", mb {c['transport_mb']} transport")
+    def num(x):  # a pasteable literal, also for a probe that came back NaN
+        return f"{x:.3f}" if x == x else 'float("nan")'
+
+    print(f"""DEFAULT_CONSTANTS = dict(
+    eff_weight={eff_weight:.3f},
+    eff_act={num(eff_act)},  # without the launch term in GPU time: {num(eff_act_nl)}
+    launch_us={launch_us:.1f},
+    kernels_per_layer={kpl},
+    pcie_bw={d2h:.3g},
+    recv_h2d_bw={h2d:.3g},
+    shm_to_pinned_bw={recv:.3g},
+    memcpy_bw={send:.3g},
+    handshake_ack_us={g['handshake_ack_us']:.1f},
+    tok_roundtrip_us={g['tok_roundtrip_us']:.1f},
+    token_staging_us={staging:.1f},
+    step_start_us={step:.1f},
+    barrier_us={g['barrier_us']:.1f},
+    rotary_kernels={rotary_kernels},
+    timing_event_calls=2,  # from the benchmark code, not measured
+    send_queue_calls=2,  # from the transport code, not measured
+)""")
+
     # ---- extra measurements (not in DEFAULT_CONSTANTS yet) ----
     print("\n==== EXTRA: not in DEFAULT_CONSTANTS yet ====")
 
@@ -615,30 +643,6 @@ def main():
         n_rot, us_rot = kernels(lambda: rotary(h, pos))
     print(f"\nsmall kernels: rotary {n_rot} kernels, {us_rot:.1f} us GPU total, "
           f"{us_rot / n_rot:.1f} us each (vs launch_us {launch_us:.1f} CPU)")
-
-    print("\n# measured on " + f"{name}, {os.path.basename(os.path.expanduser(c['model_path']))}"
-          + f", mb {c['transport_mb']} transport")
-    def num(x):  # a pasteable literal, also for a probe that came back NaN
-        return f"{x:.3f}" if x == x else 'float("nan")'
-
-    print(f"""DEFAULT_CONSTANTS = dict(
-    eff_weight={eff_weight:.3f},
-    eff_act={num(eff_act)},  # without the launch term in GPU time: {num(eff_act_nl)}
-    launch_us={launch_us:.1f},
-    kernels_per_layer={kpl},
-    pcie_bw={d2h:.3g},
-    recv_h2d_bw={h2d:.3g},
-    shm_to_pinned_bw={recv:.3g},
-    memcpy_bw={send:.3g},
-    handshake_ack_us={g['handshake_ack_us']:.1f},
-    tok_roundtrip_us={g['tok_roundtrip_us']:.1f},
-    token_staging_us={staging:.1f},
-    step_start_us={step:.1f},
-    barrier_us={g['barrier_us']:.1f},
-    rotary_kernels={rotary_kernels},
-    timing_event_calls=2,  # from the benchmark code, not measured
-    send_queue_calls=2,  # from the transport code, not measured
-)""")
 
 
 if __name__ == "__main__":
