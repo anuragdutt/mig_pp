@@ -189,14 +189,14 @@ class Latency(unittest.TestCase):
 
     def test_layers_scale_gpu_and_cpu_terms_only(self):
         shape = ml.REFERENCE_SHAPES["vicuna_7b"]
-        bw = plp.validate_layout([20, 10, 5, 5], "A100-40GB")
+        bw = plp.slice_peak_memory_bandwidths([20, 10, 5, 5], "A100-40GB")
         tm = plp.terms(shape, bw, plp.DEFAULT_CONSTANTS, 4, 64.0, False, 64)
         for name, (per_layer, _) in tm.items():
             self.assertEqual(per_layer != 0, name[:2] in ("Cg", "Lc"), name)
 
     def test_prefill_moves_the_whole_prompt(self):
         shape = ml.REFERENCE_SHAPES["vicuna_7b"]
-        bw = plp.validate_layout([20, 10, 5, 5], "A100-40GB")
+        bw = plp.slice_peak_memory_bandwidths([20, 10, 5, 5], "A100-40GB")
         pre = plp.terms(shape, bw, plp.DEFAULT_CONSTANTS, 4, 64, True, 64)
         dec = plp.terms(shape, bw, plp.DEFAULT_CONSTANTS, 4, 64, False, 64)
         self.assertAlmostEqual(pre["D0"][1], 64 * dec["D0"][1])
@@ -206,11 +206,11 @@ class Latency(unittest.TestCase):
 
 class Space(unittest.TestCase):
     def test_validate_layout(self):
-        bw = plp.validate_layout([40, 20, 10, 10], "A100-80GB")
-        self.assertAlmostEqual(bw[0], 2039e9 * 3 / 7)
-        self.assertAlmostEqual(bw[3], 2039e9 / 7)
+        bw = plp.slice_peak_memory_bandwidths([40, 20, 10, 10], "A100-80GB")
+        self.assertAlmostEqual(bw[0], 2039e9 * 4 / 8)
+        self.assertAlmostEqual(bw[3], 2039e9 / 8)
         with self.assertRaises(KeyError):
-            plp.validate_layout([20, 10, 5, 5], "A100-80GB")  # no 5GB slice on the 80GB card
+            plp.slice_peak_memory_bandwidths([20, 10, 5, 5], "A100-80GB")  # no 5GB slice on the 80GB card
 
     def test_bounds_are_memory_limits(self):
         for gb, card in (((20, 10, 5, 5), "A100-40GB"), ((40, 20, 10, 10), "A100-80GB")):
@@ -222,7 +222,7 @@ class Space(unittest.TestCase):
                     except ValueError:
                         continue
                     mm = ml.MemoryModel(s, 64, 512)
-                    want = [min(s["L"], mm.max_layers(r, 4, b, mb, cap))
+                    want = [min(s["L"], mm.max_layers_that_can_fit(r, 4, b, mb, cap))
                             for r, cap in enumerate(ml.slice_mibs(list(gb)))]
                     self.assertEqual(upper, want)
                     self.assertEqual(lower, [1, 1, 1, 1])

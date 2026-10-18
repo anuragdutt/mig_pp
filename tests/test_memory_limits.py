@@ -205,7 +205,7 @@ class Calibration(unittest.TestCase):
     def test_rule_reproduces_the_vicuna_vector(self):
         mm = ml.MemoryModel(ml.REFERENCE_SHAPES["vicuna_7b"])
         caps = {
-            b: [mm.max_layers(r, 4, b, b // 2, ml.slice_mib_for(LAYOUT[r])) for r in range(4)]
+            b: [mm.max_layers_that_can_fit(r, 4, b, b // 2, ml.slice_mib_for(LAYOUT[r])) for r in range(4)]
             for b in (32, 64)
         }
         self.assertEqual([caps[64][0] - 1] + [c - 1 for c in caps[32][1:]], [18, 12, 5, 5])
@@ -214,13 +214,13 @@ class Calibration(unittest.TestCase):
         for key, cap in (("qwen_7b", 3), ("qwen_14b", 0)):
             mm = ml.MemoryModel(ml.REFERENCE_SHAPES[key])
             for b in (8, 64):
-                self.assertEqual(mm.max_layers(3, 4, b, 2, ml.slice_mib_for(5)), cap, (key, b))
+                self.assertEqual(mm.max_layers_that_can_fit(3, 4, b, 2, ml.slice_mib_for(5)), cap, (key, b))
 
     def test_13b_cannot_fit_at_batch_32(self):
         mm = ml.MemoryModel(ml.REFERENCE_SHAPES["vicuna_13b"])
-        caps = [mm.max_layers(r, 4, 32, 2, ml.slice_mib_for(LAYOUT[r])) for r in range(4)]
+        caps = [mm.max_layers_that_can_fit(r, 4, 32, 2, ml.slice_mib_for(LAYOUT[r])) for r in range(4)]
         self.assertLess(sum(caps), 40)
-        caps16 = [mm.max_layers(r, 4, 16, 2, ml.slice_mib_for(LAYOUT[r])) for r in range(4)]
+        caps16 = [mm.max_layers_that_can_fit(r, 4, 16, 2, ml.slice_mib_for(LAYOUT[r])) for r in range(4)]
         self.assertGreaterEqual(sum(caps16), 40)
 
 
