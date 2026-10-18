@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import experiment_config as ec  # noqa: E402
 import parallel_plan as pp  # noqa: E402
+from test_experiment_config import two_node_job  # noqa: E402
 from test_run_parallel import FakeBox  # noqa: E402
 
 # Every shape nvidia-smi -L prints: a 40GB GPU listed out of rank order, an
@@ -246,6 +247,78 @@ class RunDir(_Box):
         for key, check in (("llama_7b", "weights"), ("mistral_7b", "shm_prefix"),
                            ("qwen_7b", "shm_leftover"), ("vicuna_13b", "results")):
             self.assertIn(f"FAIL  {jobs[key]['job_id']}  {check}:", out)
+
+
+class TwoNodePlanning(_Box):
+    def plan2(self, edit=lambda text: text, **kw):
+        cfg = self.box.two_node_config()
+        cfg.write_text(edit(cfg.read_text()))
+        return pp.build_plan(str(cfg), **kw)
+
+    def problems2(self, edit=lambda text: text, **kw):
+        with self.assertRaises(pp.PlanError) as cm:
+            self.plan2(edit, **kw)
+        return str(cm.exception)
+
+    def test_each_node_plans_its_own_lane(self):
+        for node, gpu in (("A", 0), ("B", 1)):
+            plan = self.plan2(node=node)
+            (lane,) = plan["lanes"]
+            self.assertEqual((lane["lane"], lane["gpu"], plan["node"]), (f"pipe_{node}", gpu, node))
+            job = lane["jobs"][0]["job"]
+            ec.validate_job(job)
+            self.assertEqual((job["node"], job["rank_nodes"], job["placement"]),
+                             (node, ["A", "A", "B", "B"], "A20,A10,B5,B5"))
+            self.assertTrue(plan["run_id"].endswith(f"_{node}"))
+            self.assertEqual(job["splits"], ec.generate_layer_splits(
+                32, [18, 12, 5, 5], [20, 10, 5, 5], True, 1, ["A", "A", "B", "B"]))
+        # check without --node: config-level checks only.
+        self.assertEqual(self.plan2()["node"], "A")
+
+    def test_plan_needs_node_and_rejects_mixed_forms(self):
+        self.assertIn("pass --node A or --node B", self.problems2(need_node=True))
+        self.assertIn("--node 'C' is not in NODES", self.problems2(node="C"))
+        self.assertIn("both GPUS (one node) and PLACEMENT", self.problems2(lambda t: t + "GPUS = []\n"))
+        self.assertIn("--gpus does not apply", self.problems2(gpus=[0]))
+        cfg = self.box.config({0: ["llama_7b"]})
+        with self.assertRaises(pp.PlanError) as cm:
+            pp.build_plan(str(cfg), node="A")
+        self.assertIn("--node needs a two-node config", str(cm.exception))
+
+    def test_config_checks(self):
+        u10 = FakeBox.uuid(0, 1)
+        msgs = {
+            "inventory": self.problems2(lambda t: t.replace(repr(u10), repr(FakeBox.uuid(0, 2))), node="A"),
+            "layer_limits": self.problems2(lambda t: t.replace("layer_limits=[18, 12, 5, 5], ", "")),
+            "dcgm": self.problems2(lambda t: t.replace("RUNNER = {", "RUNNER = {'mem_monitor': 'dcgm', ")),
+            "placeholder": self.problems2(lambda t: t.replace('"127.0.0.1"', '"PASTE-IP"', 1)),
+            "third node": self.problems2(lambda t: t.replace("('B', " + repr(FakeBox.uuid(1, 3)),
+                                                             "('C', " + repr(FakeBox.uuid(1, 3)))),
+        }
+        self.assertIn(f"node A rank 1: {FakeBox.uuid(0, 2)} expected 10gb on GPU 0, got 1g.5gb", msgs["inventory"])
+        self.assertIn("layer_limits=[...] is required for two nodes", msgs["layer_limits"])
+        self.assertIn("'nvml' or 'off' for two nodes", msgs["dcgm"])
+        self.assertIn("PASTE placeholders", msgs["placeholder"])
+        self.assertIn("exactly 2 nodes", msgs["third node"])
+        # Node B checks only its own slices: A's are on another machine.
+        self.plan2(lambda t: t.replace(repr(u10), repr("MIG-elsewhere")), node="B")
+
+
+class TwoNodeSplits(unittest.TestCase):
+    def test_finish_job_sweeps_the_cross_node_rule(self):
+        # On A40,A20,B40,B20 the neighbour rule shares no split with the
+        # cross-node rule, and both nodes would compute the same wrong list,
+        # so nothing at run time would notice.
+        nodes, gb, limits = ["A", "A", "B", "B"], [40, 20, 40, 20], [22, 11, 22, 11]
+        want = ec.generate_layer_splits(40, limits, gb, True, 1, nodes)
+        legacy = ec.generate_layer_splits(40, limits, gb, True, 1)
+        self.assertFalse({tuple(s) for s in want} & {tuple(s) for s in legacy})
+        for smoke, expect in ((False, want), (True, [want[-1]])):
+            with self.subTest(smoke=smoke):
+                job, problems = pp._finish_job(two_node_job(), {"layer_limits": limits},
+                                               "vicuna_13b", smoke)
+                self.assertEqual(problems, [])
+                self.assertEqual(job["splits"], expect)
 
 
 if __name__ == "__main__":

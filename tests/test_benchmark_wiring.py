@@ -42,6 +42,8 @@ CONSTANTS = [
     "MAX_NEW_TOKENS", "MAX_RUNS", "BATCH_MB_PAIRS", "MIG_UUIDS", "SLICE_GB",
     "LAYER_LIMITS", "ENFORCE_SLICE_ORDERING", "MIN_LAST_RANK_LAYERS", "SPLITS",
     "MASTER_PORT", "MEM_MONITOR", "WORLD_SIZE",
+    "RANK_NODES", "THIS_NODE", "NODE_ADDRS", "GLOO_IFNAME", "CONTROL_PORT",
+    "PEER_TIMEOUT_S", "PLACEMENT", "MASTER_ADDR", "LOCAL_RANKS", "IS_LEAD",
 ]
 
 
@@ -126,6 +128,43 @@ class StandaloneUnchanged(unittest.TestCase):
         self.assertIs(g["monitor"], g["_fakes"][0])
         self.assertIsNone(g["SPLITS"])
         self.assertEqual(g["MIN_LAST_RANK_LAYERS"], 1)
+        # One box: rendezvous on loopback, every rank local, this parent writes the CSV.
+        self.assertEqual((g["MASTER_ADDR"], g["RANK_NODES"], g["GLOO_IFNAME"]), ("127.0.0.1", None, None))
+        self.assertEqual((g["LOCAL_RANKS"], g["IS_LEAD"]), (list(range(g["WORLD_SIZE"])), True))
+
+
+class TwoNodeOverride(unittest.TestCase):
+    BLOCK = dict(
+        slice_gb=[20, 10, 5, 5], rank_nodes=["A", "A", "B", "B"],
+        node_addrs={"A": "10.0.0.1", "B": "10.0.0.2"}, gloo_ifname="eno1",
+        control_port=29900, peer_timeout_s=1800, placement="A20,A10,B5,B5",
+    )
+
+    def test_each_node_gets_its_ranks_and_the_leads_rendezvous(self):
+        for node, local, lead in (("A", [0, 1], True), ("B", [2, 3], False)):
+            with tempfile.TemporaryDirectory() as d:
+                _, p = qwen_job(d, node=node, **self.BLOCK)
+                g = exec_config({experiment_config.JOB_ENV_VAR: p})
+            self.assertEqual(g["RANK_NODES"], ["A", "A", "B", "B"])
+            self.assertEqual(g["THIS_NODE"], node)
+            self.assertEqual(g["MASTER_ADDR"], "10.0.0.1", "rank 0's node hosts the store")
+            self.assertEqual((g["GLOO_IFNAME"], g["CONTROL_PORT"], g["PLACEMENT"]),
+                             ("eno1", 29900, "A20,A10,B5,B5"))
+            self.assertEqual((g["LOCAL_RANKS"], g["IS_LEAD"]), (local, lead), node)
+
+    def test_override_reads_every_two_node_key(self):
+        block = config_section()
+        block = block[block.index(OVERRIDE_START): block.index(OVERRIDE_END)]
+        for key in experiment_config.TWO_NODE_KEYS:
+            self.assertIn(f'"{key}"', block, key)
+
+    def test_benchmark_passes_rank_nodes_and_peer_protocol(self):
+        # The pieces the stub's end-to-end test stands in for, present in the real source.
+        for needle in ("rank_nodes=RANK_NODES", 'os.environ["MASTER_ADDR"] = MASTER_ADDR',
+                       'os.environ["GLOO_SOCKET_IFNAME"] = GLOO_IFNAME', "for rank in LOCAL_RANKS:",
+                       "tc.agree_on_resume(", "tc.sync_ready(", "tc.finish(", "tc.recv_result(", "tc.send_result(",
+                       'f"weights_rank{rank}"', 'base_row["placement"] = PLACEMENT'):
+            self.assertIn(needle, BENCH, needle)
 
 
 class JobOverride(unittest.TestCase):

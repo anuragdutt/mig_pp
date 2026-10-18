@@ -50,6 +50,10 @@ import torch.distributed as dist
 #   T29   VERDICT: overlap working
 #   T30   VERDICT: D2H not hidden — async misuse OR saturated GPU  (warn)
 #   T32   decode step boundary marker (emitted by the benchmark, not here)
+#   T33   summary: cross-node send completion wait   (only ranks with a remote hop)
+#   T34   summary: cross-node recv wait = upstream compute + wire  (same)
+#   T35   cross-node isend posted (per microbatch)
+#   T36   cross-node recv landed (per microbatch)
 #
 # Quick triage after a run:
 #   grep -E 'T29|T30' logs/transport_*.log     # the verdict, one per rank
@@ -133,12 +137,28 @@ _TORCH_TO_NUMPY = {
 # names exist above.
 from async_handle_send import AsyncHandleSend
 from async_handle_recv import AsyncHandleRecv
+from async_handle_net import AsyncHandleSendNet, AsyncHandleRecvNet
 
 
 class MIGPipelineTransport:
-    def __init__(self, rank, world_size, buffer_size_mb=128, num_slots=NUM_SLOTS):
+    def __init__(
+        self,
+        rank,
+        world_size,
+        buffer_size_mb=128,
+        num_slots=NUM_SLOTS,
+        rank_nodes=None,
+    ):
         # GPU id allocation
         self.rank = rank
+        # Node name of every rank, or None when the whole pipeline is on one
+        # node (every hop is then shared memory, exactly as before). A hop to
+        # a rank on another node cannot use /dev/shm and goes over gloo.
+        if rank_nodes is not None and len(rank_nodes) != world_size:
+            raise ValueError(
+                f"rank_nodes has {len(rank_nodes)} entries for world_size {world_size}"
+            )
+        self.rank_nodes = list(rank_nodes) if rank_nodes is not None else None
         # Total no of GPU's working together
         self.world_size = world_size
         self.num_slots = num_slots
@@ -243,6 +263,10 @@ class MIGPipelineTransport:
         # indices. Entry holds the event still gating that staging buffer,
         # or None if free.
         self._recv_slot_pending: List[Optional[torch.cuda.Event]] = [None] * num_slots
+        # A cross-node receive posts its irecv straight into a staging slot, so
+        # the slot is taken from the post until its H2D lands (the SHM path only
+        # picks one at wait time). Reserved slots are never handed out.
+        self._recv_slot_reserved = [False] * num_slots
 
         # --- INSTRUMENTATION COUNTERS ---
         # Aggregated by log_summary(); these are what tell you whether the
@@ -256,6 +280,11 @@ class MIGPipelineTransport:
         self.stat_h2d_block_s = 0.0  # time blocked waiting on H2D events
         self.stat_h2d_count = 0
         self.stat_slot_spins = 0  # times _get_free_slot had to spin
+        # Cross-node hops only (async_handle_net).
+        self.stat_net_send_wait_s = 0.0  # waiting for gloo to finish sends
+        self.stat_net_send_count = 0
+        self.stat_net_recv_wait_s = 0.0  # waiting for data: upstream compute + wire
+        self.stat_net_recv_count = 0
 
         # Wait for all the peers to be done with Memory slot creation
         # This has to be done before moving on to next step where we check for peer connections
@@ -263,13 +292,33 @@ class MIGPipelineTransport:
         dist.barrier()
 
         # --- CONNECT TO PEER SLOTS ---
+        self._connect_peer_slots()
+
+        _tlog.info(
+            "[T04][rank%d] transport ready: connected to %d peers, %d slots",
+            rank,
+            len(self.peer_slots),
+            num_slots,
+        )
+        print(f"[MIG-Pipe] Rank {rank} connected to all peers. Ready.", flush=True)
+
+        # Nobody is allowed to start the actual workday (sending boxes) until everyone has finished mapping the building!
+        dist.barrier()
+
+    def _is_remote(self, peer: int) -> bool:
+        """True when `peer` runs on another node: no shared /dev/shm with it."""
+        return self.rank_nodes is not None and self.rank_nodes[peer] != self.rank_nodes[self.rank]
+
+    def _connect_peer_slots(self) -> None:
+        """Attach to the /dev/shm slots of every SAME-NODE peer. A peer on
+        another node has none here and would only time out."""
         self.peer_slots: Dict[int, List[np.ndarray]] = {}
-        for peer_rank in range(world_size):
-            if peer_rank == rank:
+        for peer_rank in range(self.world_size):
+            if peer_rank == self.rank or self._is_remote(peer_rank):
                 continue
 
             self.peer_slots[peer_rank] = []
-            for slot in range(num_slots):
+            for slot in range(self.num_slots):
                 peer_name = _slot_name(self.shm_prefix, peer_rank, slot)
                 connected = False
                 attempts = 0
@@ -292,20 +341,9 @@ class MIGPipelineTransport:
 
                 if not connected:
                     raise RuntimeError(
-                        f"Rank {rank} failed to connect to {peer_name} "
+                        f"Rank {self.rank} failed to connect to {peer_name} "
                         f"after {attempts} attempts"
                     )
-
-        _tlog.info(
-            "[T04][rank%d] transport ready: connected to %d peers, %d slots",
-            rank,
-            len(self.peer_slots),
-            num_slots,
-        )
-        print(f"[MIG-Pipe] Rank {rank} connected to all peers. Ready.", flush=True)
-
-        # Nobody is allowed to start the actual workday (sending boxes) until everyone has finished mapping the building!
-        dist.barrier()
 
     def _get_free_slot(self) -> int:
         for attempt in range(10000):
@@ -346,6 +384,8 @@ class MIGPipelineTransport:
         """
         for _ in range(10000):
             for slot in range(self.num_slots):
+                if self._recv_slot_reserved[slot]:
+                    continue
                 pending = self._recv_slot_pending[slot]
                 if pending is None or pending.query():
                     self._recv_slot_pending[slot] = None
@@ -440,6 +480,12 @@ class MIGPipelineTransport:
           - handle.wait() flushes if needed, then waits for ACK completion
             before reclaiming the slot.
         """
+        remote = self._is_remote(dst)
+        if remote and tensor.dtype != torch.float16:
+            raise TypeError(
+                f"cross-node hop rank{self.rank}->rank{dst} carries fp16 "
+                f"activations only, got {tensor.dtype}"
+            )
         slot = self._get_free_slot()
         _t0 = time.perf_counter()
         numel = self._queue_copy_to_staging(tensor, slot)
@@ -460,6 +506,10 @@ class MIGPipelineTransport:
             _fmt_ms(_queue_t),
         )
 
+        if remote:
+            return AsyncHandleSendNet(
+                slot, self, dst=dst, tag=tag, group=group, numel=numel
+            )
         return AsyncHandleSend(slot, self, dst=dst, tag=tag, group=group, numel=numel)
 
     def irecv(self, tensor, src, group=None, tag: int = 0) -> AsyncHandleRecv:
@@ -468,6 +518,8 @@ class MIGPipelineTransport:
           - irecv handshake(slot)
           - handle.wait() reads SHM into tensor and sends ACK
         """
+        if self._is_remote(src):
+            return self._irecv_net(tensor, src, group, tag)
         handshake = torch.tensor([0], dtype=torch.int32, device="cpu")
         dist_handle = _ORIGINAL_IRECV(handshake, src=src, group=group, tag=tag)
         _tlog.debug(
@@ -480,6 +532,63 @@ class MIGPipelineTransport:
         return AsyncHandleRecv(
             dist_handle, handshake, tensor, src, self, tag=tag, group=group
         )
+
+    def _irecv_net(self, tensor, src, group, tag) -> AsyncHandleRecvNet:
+        """
+        Cross-node receive: reserve a pinned staging slot and post the gloo
+        irecv straight into it. The sender sends exactly tensor.numel() fp16
+        elements, so the sizes match. The slot stays reserved until the H2D
+        copy out of it has landed (AsyncHandleRecvNet.wait).
+        """
+        if tensor.dtype != torch.float16:
+            raise TypeError(
+                f"cross-node hop rank{src}->rank{self.rank} carries fp16 "
+                f"activations only, got {tensor.dtype}"
+            )
+        numel = tensor.numel()
+        if numel * 2 > self.slot_size:
+            raise ValueError(
+                f"Tensor {numel * 2} bytes exceeds slot size {self.slot_size} "
+                f"bytes. Increase buffer_size_mb."
+            )
+        rslot = self._get_free_recv_slot()
+        self._recv_slot_reserved[rslot] = True
+        buf = self.recv_pinned_staging[rslot][:numel]
+        try:
+            work = _ORIGINAL_IRECV(buf, src=src, group=group, tag=tag)
+        except BaseException:
+            self._recv_slot_reserved[rslot] = False
+            raise
+        _tlog.debug(
+            "[T12][rank%d] net irecv posted tag=%d <- rank%d, staging slot=%d",
+            self.rank,
+            tag,
+            src,
+            rslot,
+        )
+        return AsyncHandleRecvNet(work, buf, rslot, tensor, src, self, tag=tag, group=group)
+
+    def _queue_h2d_from_staging(self, tensor: torch.Tensor, rslot: int):
+        """
+        Queue the H2D copy of a cross-node receive out of its staging slot on
+        recv_stream; returns the event to wait on. The SHM path does the same
+        in _queue_read_from_slot after its SHM->pinned memcpy.
+        """
+        numel = tensor.numel()
+        evt = self.recv_events[rslot]
+        with torch.cuda.stream(self.recv_stream):
+            tensor.copy_(
+                self.recv_pinned_staging[rslot][:numel].view(tensor.shape),
+                non_blocking=True,
+            )
+        tensor.record_stream(self.recv_stream)
+        evt.record(self.recv_stream)
+        return evt
+
+    def _release_recv_slot(self, rslot: int) -> None:
+        """Called once the slot's H2D has landed: the staging may be reused."""
+        self._recv_slot_pending[rslot] = None
+        self._recv_slot_reserved[rslot] = False
 
     def _queue_copy_to_staging(self, tensor: torch.Tensor, slot: int) -> int:
         """
@@ -667,6 +776,16 @@ class MIGPipelineTransport:
             "ack_wait_mean_ms": _mean(self.stat_ack_wait_s, self.stat_ack_count),
             "ack_count": self.stat_ack_count,
             "slot_spins": self.stat_slot_spins,
+            "net_send_wait_mean_ms": _mean(
+                self.stat_net_send_wait_s, self.stat_net_send_count
+            ),
+            "net_send_wait_total_ms": self.stat_net_send_wait_s * 1000.0,
+            "net_send_count": self.stat_net_send_count,
+            "net_recv_wait_mean_ms": _mean(
+                self.stat_net_recv_wait_s, self.stat_net_recv_count
+            ),
+            "net_recv_wait_total_ms": self.stat_net_recv_wait_s * 1000.0,
+            "net_recv_count": self.stat_net_recv_count,
         }
 
         _tlog.warning(
@@ -705,6 +824,23 @@ class MIGPipelineTransport:
             self.rank,
             stats["slot_spins"],
         )
+        if stats["net_send_count"]:
+            _tlog.warning(
+                "[T33][rank%d] cross-node send wait: mean=%.2fms total=%.1fms over %d sends",
+                self.rank,
+                stats["net_send_wait_mean_ms"],
+                stats["net_send_wait_total_ms"],
+                stats["net_send_count"],
+            )
+        if stats["net_recv_count"]:
+            _tlog.warning(
+                "[T34][rank%d] cross-node recv wait: mean=%.2fms total=%.1fms over %d recvs "
+                "(upstream compute + wire time)",
+                self.rank,
+                stats["net_recv_wait_mean_ms"],
+                stats["net_recv_wait_total_ms"],
+                stats["net_recv_count"],
+            )
 
         # Verdict line — the one thing to grep for.
         if self.stat_flush_count == 0:
@@ -857,7 +993,9 @@ def cleanup():
     _tlog.info("[T31] transport cleanup done, SHM segments released")
 
 
-def register_hooks(mb_size=32, seq_len=64, hidden_size=5120, num_slots=None):
+def register_hooks(
+    mb_size=32, seq_len=64, hidden_size=5120, num_slots=None, rank_nodes=None
+):
     global _MIG_PIPE_ENGINE
 
     rank = dist.get_rank()
@@ -875,6 +1013,7 @@ def register_hooks(mb_size=32, seq_len=64, hidden_size=5120, num_slots=None):
                 hidden_size=hidden_size, max_mb_size=mb_size, max_seq_len=seq_len
             ),
             num_slots=num_slots if num_slots is not None else NUM_SLOTS,
+            rank_nodes=rank_nodes,
         )
 
     dist.send = patched_send

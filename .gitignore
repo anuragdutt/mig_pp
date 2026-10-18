@@ -4,3 +4,4 @@ __pycache__/
 *$py.class
 # run_parallel.sh output: per-job logs, CSVs, transport logs (GBs over a sweep)
 runs/
+20260930_222502/

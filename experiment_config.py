@@ -37,6 +37,42 @@ MEM_MONITORS = ("dcgm", "nvml", "off")
 
 _SHM_PREFIX_RE = re.compile(r"^[A-Za-z0-9_]{1,64}$")
 
+# Optional two-node block of a job.json: one pipeline whose ranks sit on MIG
+# slices of GPUs in different nodes. All-or-nothing; absent => single node.
+TWO_NODE_KEYS = (
+    "rank_nodes",
+    "node",
+    "node_addrs",
+    "gloo_ifname",
+    "control_port",
+    "peer_timeout_s",
+    "placement",
+)
+
+
+def placement_label(rank_nodes: Sequence[str], slice_gb: Sequence[int]) -> str:
+    """'A40,A20,B40,B20': node name + slice size of each rank, pipeline order."""
+    return ",".join(f"{n}{g}" for n, g in zip(rank_nodes, slice_gb))
+
+
+# Node names go into /dev/shm prefixes and placement labels: no digits, so
+# "A4" + 40 GB and "A" + 440 GB cannot both read "A440".
+_NODE_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z_]*$")
+
+
+def rank_nodes_problems(rank_nodes: Sequence[str]) -> List[str]:
+    """Why rank_nodes cannot describe a two-node pipeline ([] if it can).
+    Exactly two nodes: the control channel pairs the lead with one peer, so a
+    third node's ranks would never join."""
+    problems = []
+    bad = [n for n in rank_nodes if not (isinstance(n, str) and _NODE_NAME_RE.match(n))]
+    if bad:
+        problems.append(f"node names must be letters and underscores, starting with a letter: {bad!r}")
+    nodes = sorted({str(n) for n in rank_nodes})
+    if len(nodes) != 2:
+        problems.append(f"ranks must sit on exactly 2 nodes, got {nodes}")
+    return problems
+
 
 class JobConfigError(ValueError):
     """job.json is missing a field or holds a value the benchmark cannot run."""
@@ -171,8 +207,58 @@ def validate_job(job: dict) -> None:
                         f"{job['num_layers']} layers"
                     )
 
+    present = [k for k in TWO_NODE_KEYS if k in job]
+    if present:
+        absent = [k for k in TWO_NODE_KEYS if k not in job]
+        if absent:
+            problems.append(
+                f"two-node block is all-or-nothing: has {present}, missing {absent}"
+            )
+        else:
+            _check_two_node(job, world, problems)
+
     if problems:
         raise JobConfigError("invalid job config:\n  - " + "\n  - ".join(problems))
+
+
+def _check_two_node(job: dict, world: Optional[int], problems: List[str]) -> None:
+    rn, addrs, node = job["rank_nodes"], job["node_addrs"], job["node"]
+
+    def name(v):
+        return isinstance(v, str) and bool(v)
+
+    if not (isinstance(rn, list) and rn and all(name(n) for n in rn)):
+        problems.append(f"'rank_nodes' must be a non-empty list of node names, got {rn!r}")
+        return
+    if world is not None and len(rn) != world:
+        problems.append(f"'rank_nodes' has {len(rn)} entries but mig_uuids has {world}")
+    problems += [f"'rank_nodes': {p}" for p in rank_nodes_problems(rn)]
+    if not (
+        isinstance(addrs, dict)
+        and addrs
+        and all(name(k) and name(v) for k, v in addrs.items())
+    ):
+        problems.append(f"'node_addrs' must map node name -> address, got {addrs!r}")
+        return
+    unknown = sorted({n for n in rn if n not in addrs})
+    if unknown:
+        problems.append(f"'rank_nodes' names {unknown} that are not in node_addrs")
+    if node not in rn:
+        problems.append(f"'node' {node!r} holds no rank: rank_nodes is {rn}")
+    if not name(job["gloo_ifname"]):
+        problems.append(f"'gloo_ifname' must be a non-empty string, got {job['gloo_ifname']!r}")
+    port = job["control_port"]
+    if not (_is_int(port) and 1024 <= port <= 65535):
+        problems.append(f"'control_port' must be an int in 1024..65535, got {port!r}")
+    elif port == job.get("master_port"):
+        problems.append("'control_port' must differ from 'master_port'")
+    if not (_is_int(job["peer_timeout_s"]) and job["peer_timeout_s"] > 0):
+        problems.append(f"'peer_timeout_s' must be a positive int, got {job['peer_timeout_s']!r}")
+    gb = job.get("slice_gb")
+    if isinstance(gb, list) and len(gb) == len(rn):
+        want = placement_label(rn, gb)
+        if job["placement"] != want:
+            problems.append(f"'placement' is {job['placement']!r}, rank_nodes + slice_gb give {want!r}")
 
 
 def generate_layer_splits(
@@ -181,6 +267,7 @@ def generate_layer_splits(
     slice_gb: Sequence[int],
     enforce_ordering: bool = True,
     min_last_rank_layers: int = 1,
+    rank_nodes: Optional[Sequence[str]] = None,
 ) -> List[List[int]]:
     """
     Every way to distribute total_layers across the slices, subject to the
@@ -192,9 +279,19 @@ def generate_layer_splits(
     tests/test_experiment_config.py checks equivalence against a frozen copy
     of the original.
 
-    Ordering rule (enforce_ordering=True): between neighbouring ranks, equal
-    slices need prev >= next (permuting layers between identical slices only
-    duplicates configurations), a bigger slice needs prev > next.
+    Ordering rule (enforce_ordering=True), rank_nodes=None (one GPU, slices in
+    descending size): between neighbouring ranks, equal slices need
+    prev >= next (permuting layers between identical slices only duplicates
+    configurations), a bigger slice needs prev > next.
+
+    rank_nodes (the node name of each rank) switches to the cross-node rule,
+    because a neighbour check no longer implies the rest once slices are not
+    in descending order (A40, A20, B40, B20). Each count is checked against
+    EVERY earlier rank: a bigger slice holds strictly more layers than any
+    smaller one, wherever each sits; equal slices that are neighbours on the
+    same node keep prev >= next; equal slices anywhere else are unconstrained
+    (a network hop makes them different). On a descending layout all on one
+    node this gives exactly the neighbour rule's splits in the same order.
 
     min_last_rank_layers=0 lets the last rank hold no decoder layers — only
     the final norm + lm_head. That is how the qwen-14b-4mig branch swept
@@ -204,6 +301,8 @@ def generate_layer_splits(
     """
     valid_splits: List[List[int]] = []
     n = len(layer_limits)
+    if rank_nodes is not None and len(rank_nodes) != n:
+        raise ValueError(f"rank_nodes has {len(rank_nodes)} entries for {n} ranks")
 
     def _ok(prev_idx, prev_layers, layers):
         if not enforce_ordering:
@@ -212,12 +311,34 @@ def generate_layer_splits(
             return prev_layers >= layers
         return prev_layers > layers
 
+    def _ok_all(assigned, layers):
+        j = len(assigned)
+        for i, prev in enumerate(assigned):
+            if slice_gb[i] > slice_gb[j]:
+                good = prev > layers
+            elif slice_gb[i] < slice_gb[j]:
+                good = prev < layers
+            elif j == i + 1 and rank_nodes[i] == rank_nodes[j]:
+                good = prev >= layers
+            else:
+                good = True
+            if not good:
+                return False
+        return True
+
+    def _allowed(assigned, layers):
+        if not assigned:
+            return True
+        if rank_nodes is None:
+            return _ok(len(assigned) - 1, assigned[-1], layers)
+        return not enforce_ordering or _ok_all(assigned, layers)
+
     def _recurse(rank, assigned, remaining):
         # Last rank takes whatever is left — no need to enumerate it.
         if rank == n - 1:
             if not (min_last_rank_layers <= remaining <= layer_limits[rank]):
                 return
-            if assigned and not _ok(rank - 1, assigned[-1], remaining):
+            if not _allowed(assigned, remaining):
                 return
             valid_splits.append(assigned + [remaining])
             return
@@ -228,7 +349,7 @@ def generate_layer_splits(
             layer_limits[rank], remaining - (n - rank - 2) - min_last_rank_layers
         )
         for count in range(1, max_here + 1):
-            if assigned and not _ok(rank - 1, assigned[-1], count):
+            if not _allowed(assigned, count):
                 continue
             _recurse(rank + 1, assigned + [count], remaining - count)
 
@@ -246,6 +367,7 @@ def job_splits(job: dict) -> List[List[int]]:
         job["slice_gb"],
         job["enforce_slice_ordering"],
         job.get("min_last_rank_layers", 1),
+        job.get("rank_nodes"),
     )
 
 
@@ -263,6 +385,7 @@ def front_loaded_split(
     slice_gb: Sequence[int],
     enforce_ordering: bool = True,
     min_last_rank_layers: int = 1,
+    rank_nodes: Optional[Sequence[str]] = None,
 ) -> Optional[List[int]]:
     """
     The last split in enumeration order: the most layers on rank 0, then rank
@@ -271,6 +394,11 @@ def front_loaded_split(
     limits admit no split at all.
     """
     splits = generate_layer_splits(
-        total_layers, layer_limits, slice_gb, enforce_ordering, min_last_rank_layers
+        total_layers,
+        layer_limits,
+        slice_gb,
+        enforce_ordering,
+        min_last_rank_layers,
+        rank_nodes,
     )
     return splits[-1] if splits else None

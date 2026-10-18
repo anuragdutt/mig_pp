@@ -23,6 +23,7 @@ from transformers.utils import hub
 import mig_transport_pipeline as mig_transport
 import experiment_config
 import model_family
+import two_node_control as tc
 from token_exchange import TokenExchange
 
 # ---------------------------------------------------------------------------
@@ -101,6 +102,17 @@ MASTER_PORT = 29500
 # (nvml_mem_monitor, per MIG UUID) or "off".
 MEM_MONITOR = "dcgm"
 
+# Two-node pipeline (set from job.json's two-node block; see
+# two_node_control.py). None = every rank on this box, exactly as before.
+RANK_NODES = None  # node name of each rank, e.g. ["A", "A", "B", "B"]
+THIS_NODE = None  # the node this parent runs on; it spawns only its ranks
+NODE_ADDRS = None  # node -> private address; rank 0's node hosts the rendezvous
+GLOO_IFNAME = None  # NIC gloo binds to (GLOO_SOCKET_IFNAME); None = gloo's default
+CONTROL_PORT = None  # where the two parents meet
+PEER_TIMEOUT_S = 1800  # how long a parent waits for the other to show up
+PLACEMENT = None  # e.g. "A20,A10,B5,B5": a column of the results CSV
+MASTER_ADDR = "127.0.0.1"
+
 # --- PARALLEL-RUN OVERRIDE ---
 # run_parallel.sh launches this script once per (GPU, model) job with
 # MIG_EXP_CONFIG pointing at that job's job.json (written by
@@ -132,6 +144,15 @@ if _JOB is not None:
     # rank builds its engine). Unique per job, so two pipelines on one box
     # cannot attach to, or unlink, each other's slots.
     os.environ[experiment_config.SHM_PREFIX_ENV_VAR] = _JOB["shm_prefix"]
+    if "rank_nodes" in _JOB:  # validate_job checked the block is complete
+        RANK_NODES = list(_JOB["rank_nodes"])
+        THIS_NODE = _JOB["node"]
+        NODE_ADDRS = dict(_JOB["node_addrs"])
+        GLOO_IFNAME = _JOB["gloo_ifname"]
+        CONTROL_PORT = _JOB["control_port"]
+        PEER_TIMEOUT_S = _JOB["peer_timeout_s"]
+        PLACEMENT = _JOB["placement"]
+        MASTER_ADDR = NODE_ADDRS[RANK_NODES[0]]
 
 # The DCGM monitor pkills every `dcgmi dmon` on the box and hardcodes GPU 0,
 # so it is only safe for a single run on GPU 0; parallel jobs use NVML, which
@@ -145,6 +166,9 @@ else:
         monitor.disable()
 
 WORLD_SIZE = len(MIG_UUIDS)
+# The ranks this parent spawns, and whether it writes the results CSV.
+LOCAL_RANKS = [r for r in range(WORLD_SIZE) if RANK_NODES is None or RANK_NODES[r] == THIS_NODE]
+IS_LEAD = RANK_NODES is None or RANK_NODES[0] == THIS_NODE
 
 assert len(SLICE_GB) == WORLD_SIZE, "SLICE_GB must have one entry per rank"
 assert len(LAYER_LIMITS) == WORLD_SIZE, "LAYER_LIMITS must have one entry per rank"
@@ -249,7 +273,12 @@ def run_pipeline(
     try:
         os.environ["CUDA_VISIBLE_DEVICES"] = device_uuid
         os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
-        os.environ["MASTER_ADDR"] = "127.0.0.1"
+        # One box: 127.0.0.1. Two nodes: rank 0's node hosts the rendezvous,
+        # and gloo must bind the private NIC (the hostname often resolves to
+        # 127.0.1.1, which the other node cannot reach).
+        os.environ["MASTER_ADDR"] = MASTER_ADDR
+        if GLOO_IFNAME:
+            os.environ["GLOO_SOCKET_IFNAME"] = GLOO_IFNAME
         # Per job under run_parallel.sh, so eight pipelines rendezvous on
         # eight ports instead of all joining the first one's store.
         os.environ["MASTER_PORT"] = str(MASTER_PORT)
@@ -281,6 +310,7 @@ def run_pipeline(
             seq_len=SEQ_LEN,
             hidden_size=HIDDEN_SIZE,
             num_slots=_num_mb + 8,
+            rank_nodes=RANK_NODES,  # None: every hop is shared memory, as before
         )
 
         # Getting model dimensions. AutoConfig + model_family rather than the
@@ -357,7 +387,7 @@ def run_pipeline(
         # reason a naive nsys capture is mostly this phase. Timed so the log
         # says so outright instead of leaving it to be inferred.
         _wl_t0 = time.perf_counter()
-        load_specific_weights(
+        _wstats = load_specific_weights(
             rank,
             world_size,
             MODEL_NAME,
@@ -370,6 +400,15 @@ def run_pipeline(
         log.info(
             f"[B01][Rank {rank}] weight load: {_wl_s:.1f}s "
             f"({len(my_layer_indices)} layers)"
+        )
+        # The B08 coverage line lands in this node's log only; on two nodes the
+        # lead re-logs the other node's ranks from this, for the smoke verdict.
+        result_queue.put(
+            (
+                f"weights_rank{rank}",
+                {k: _wstats.get(k) for k in ("loaded", "expected", "format", "files")}
+                | {"missing": len(_wstats.get("missing") or [])},
+            )
         )
 
         # Deep clean after weight loading
@@ -864,6 +903,21 @@ def generate_layer_splits():
 # ---------------------------------------------------------------------------
 
 
+def connect_peer():
+    """Two nodes: meet the other parent and compare code, versions and job
+    (two_node_control). Raises PeerLost / Mismatch. -> the control socket."""
+    lead = RANK_NODES[0]
+    if THIS_NODE == lead:
+        sock = tc.listen_for_peer(NODE_ADDRS[lead], CONTROL_PORT, PEER_TIMEOUT_S)
+    else:
+        sock = tc.connect_to_lead(NODE_ADDRS[lead], CONTROL_PORT, PEER_TIMEOUT_S)
+    repo = os.path.dirname(os.path.abspath(__file__))
+    mine = tc.make_hello(THIS_NODE, _JOB["run_id"], repo, _JOB)
+    theirs = tc.exchange_hello(sock, mine)
+    log.info(tc.hello_line(mine, theirs))
+    return sock
+
+
 def main():
     setup_logging()
 
@@ -880,10 +934,34 @@ def main():
             f"shm prefix {_JOB['shm_prefix']}"
         )
 
+    # Two nodes: meet the other parent before anything runs. A mismatch (code,
+    # versions, job) or no peer ends both nodes here, before any rank starts.
+    sock = None
+    if RANK_NODES is not None:
+        log.info(f"Two-node job: node {THIS_NODE}, placement {PLACEMENT}, local ranks {LOCAL_RANKS}")
+        try:
+            sock = connect_peer()
+            # Resume: skip a job only if the other node finished it too.
+            if tc.agree_on_resume(sock, os.environ.get("MIG_JOB_ALREADY_OK") == "1", PEER_TIMEOUT_S):
+                log.info("[B10] both nodes finished this job already: skipped")
+                sock.close()
+                return
+        except (tc.PeerLost, tc.Mismatch) as e:
+            log.error(f"Two-node job cannot start: {type(e).__name__}: {e}")
+            raise SystemExit(1)
+
     log.info(f"Setting up memory monitor ({MEM_MONITOR})...")
     # Pass the topology so the monitor can map DCGM entities to the right
-    # ranks by MIG UUID, rather than a hardcoded entity->rank table.
-    monitor.setup_dcgm_group(mig_uuids=MIG_UUIDS, slice_gb=SLICE_GB)
+    # ranks by MIG UUID, rather than a hardcoded entity->rank table. Two nodes:
+    # this node's slices only, columns labelled with global rank numbers.
+    if RANK_NODES is None:
+        monitor.setup_dcgm_group(mig_uuids=MIG_UUIDS, slice_gb=SLICE_GB)
+    else:
+        monitor.setup_dcgm_group(
+            mig_uuids=[MIG_UUIDS[r] for r in LOCAL_RANKS],
+            slice_gb=[SLICE_GB[r] for r in LOCAL_RANKS],
+            ranks=LOCAL_RANKS,
+        )
 
     # An explicit split list (job.json "splits" — e.g. a smoke run's single
     # front-loaded split) replaces the enumeration.
@@ -919,6 +997,9 @@ def main():
     # configuration — the summary table stays readable, the curve lives here.
     step_latency_rows = []
     current_run = 1
+    peer_lost = False  # two nodes: the other parent vanished; stop and keep what we have
+    JOIN_TIMEOUT_S = 1200
+    CONTROL_WAIT_S = JOIN_TIMEOUT_S + 300  # every ready / result wait, two nodes only
 
     for split, batch_size, mb_size in run_plan:
         log.info(
@@ -927,9 +1008,18 @@ def main():
             f"Microbatches: {batch_size // mb_size}"
         )
 
+        # Ranks on the non-lead node use only the shape of input_ids (rank 0,
+        # on the lead, embeds the values), and padding to SEQ_LEN fixes it.
         input_ids_seed = get_wiki_sample(batch_size, SEQ_LEN, MODEL_NAME)
 
         label = f"s{'_'.join(map(str, split))}_b{batch_size}_mb{mb_size}"
+        if sock is not None:
+            try:  # lockstep: both nodes spawn configuration i together
+                tc.sync_ready(sock, current_run - 1, label, CONTROL_WAIT_S)
+            except (tc.PeerLost, tc.Mismatch) as e:
+                log.error(f"Two-node sweep stops at config {current_run}: {type(e).__name__}: {e}")
+                peer_lost = True
+                break
         monitor.set_label(label)
         monitor.clear()
         monitor.start()
@@ -938,7 +1028,7 @@ def main():
         procs: list[mp.Process] = []
 
         try:
-            for rank in range(WORLD_SIZE):
+            for rank in LOCAL_RANKS:  # every rank on one box; this node's on two
                 p = mp.Process(
                     target=run_pipeline,
                     args=(
@@ -954,7 +1044,6 @@ def main():
                 p.start()
                 procs.append(p)
 
-            JOIN_TIMEOUT_S = 1200
             for p in procs:
                 p.join(timeout=JOIN_TIMEOUT_S)
 
@@ -962,7 +1051,7 @@ def main():
             if hung:
                 log.error(
                     "Hang detected: ranks still alive after timeout: "
-                    + ", ".join(str(procs.index(p)) for p in hung)
+                    + ", ".join(str(LOCAL_RANKS[procs.index(p)]) for p in hung)
                 )
                 for p in hung:
                     p.terminate()
@@ -972,23 +1061,22 @@ def main():
             monitor.stop()
 
             # Sample row: (timestamp, label, gpu_mb, gi0_mb, gi1_mb, ...)
-            # One gi<N>_mb column per MIG slice, in MIG_UUIDS order.
+            # One column per sampled MIG slice, in LOCAL_RANKS order (every
+            # rank on one box).
             run_samples = list(monitor._samples)
-            # print("rum samples", run_samples)
-            peak_per_rank = [
-                max((row[3 + r] for row in run_samples), default=0)
-                for r in range(WORLD_SIZE)
-            ]
-            avg_per_rank = [
-                (
-                    (sum(row[3 + r] for row in run_samples) / len(run_samples))
-                    if run_samples
-                    else 0
-                )
-                for r in range(WORLD_SIZE)
-            ]
+            peaks = {
+                r: max((row[3 + i] for row in run_samples), default=0)
+                for i, r in enumerate(LOCAL_RANKS)
+            }
+            avgs = {
+                r: (sum(row[3 + i] for row in run_samples) / len(run_samples))
+                if run_samples
+                else 0
+                for i, r in enumerate(LOCAL_RANKS)
+            }
 
             exit_codes = [p.exitcode for p in procs]
+            any_hung = bool(hung)
             queue_items = {}
             try:
                 while True:
@@ -996,6 +1084,40 @@ def main():
                     queue_items[key] = val
             except queue.Empty:
                 pass
+
+            # Two nodes: the non-lead ships what its ranks produced; the lead
+            # merges it. Queue keys carry the global rank, so the merge is a
+            # union (only "oom" can collide; the lead's wins).
+            if sock is not None:
+                try:
+                    if IS_LEAD:
+                        other = tc.recv_result(sock, CONTROL_WAIT_S)
+                        queue_items = tc.merge_queue_items(queue_items, other["queue_items"])
+                        exit_codes += other["exit_codes"]
+                        any_hung = any_hung or bool(other["hung"])
+                        peaks.update({int(r): v for r, v in other["peaks"].items()})
+                        avgs.update({int(r): v for r, v in other["avgs"].items()})
+                        for r in range(WORLD_SIZE):
+                            w = queue_items.get(f"weights_rank{r}")
+                            if w and r not in LOCAL_RANKS:
+                                log.info(
+                                    f"[B08][Rank {r}] weights: loaded={w['loaded']}/{w['expected']} "
+                                    f"missing={w['missing']} format={w['format']} files={w['files']} "
+                                    f"(node {RANK_NODES[r]})"
+                                )
+                    else:
+                        tc.send_result(sock, {
+                            "queue_items": queue_items, "exit_codes": exit_codes,
+                            "hung": any_hung,
+                            "peaks": {str(r): v for r, v in peaks.items()},
+                            "avgs": {str(r): v for r, v in avgs.items()},
+                        })
+                except (tc.PeerLost, tc.Mismatch) as e:
+                    log.error(f"Two-node sweep stops at config {current_run}: {type(e).__name__}: {e}")
+                    peer_lost = True
+
+            peak_per_rank = [peaks.get(r, 0) for r in range(WORLD_SIZE)]
+            avg_per_rank = [avgs.get(r, 0) for r in range(WORLD_SIZE)]
 
             # Harvest per-step curves before branching on run outcome, so a
             # partial run still yields whatever steps completed.
@@ -1077,7 +1199,13 @@ def main():
                 },
             }
 
-            if hung:
+            if PLACEMENT is not None:
+                base_row["placement"] = PLACEMENT
+
+            if peer_lost:  # the other node's half of this config never arrived
+                base_row["status"] = "peer_lost"
+
+            elif any_hung:
                 base_row["status"] = "hang"
 
             elif "oom" in queue_items:
@@ -1126,7 +1254,45 @@ def main():
                 p.terminate()
 
         current_run += 1
+        if peer_lost:
+            break
 
+    # Write this node's outputs, then trade outcomes: a job is ok only if both
+    # nodes finished cleanly, so a failure on either fails it on both.
+    ok = not peer_lost
+    try:
+        if IS_LEAD:
+            if results:
+                write_results(results, step_latency_rows)
+            else:
+                log.error("No configuration finished: no CSV written.")
+        else:
+            # The lead writes the results and per-step CSVs for every rank (this
+            # node's rows went over in each result); this node keeps its trace.
+            monitor.save_csv("mig_memory_trace.csv")
+            log.info("Done (non-lead node: results are in the lead's job dir).")
+    except Exception:
+        if sock is None:
+            raise  # one box: exactly as before
+        log.error(f"Writing this node's outputs failed:\n{traceback.format_exc()}")
+        ok = False
+    if sock is not None:
+        if not peer_lost:
+            try:
+                both_ok = tc.finish(sock, ok, CONTROL_WAIT_S)
+                if ok and not both_ok:
+                    log.error("The other node failed this job: failing it here too.")
+                ok = both_ok
+            except (tc.PeerLost, tc.Mismatch) as e:
+                log.error(f"No outcome from the other node: {type(e).__name__}: {e}")
+                ok = False
+        sock.close()
+    if not ok:
+        raise SystemExit(1)
+
+
+def write_results(results, step_latency_rows):
+    """The lead's (or the one box's) results CSV, per-step CSV, memory trace and summary."""
     df = pd.DataFrame(results)
     df.to_csv("mig_benchmark_results.csv", index=False)
 

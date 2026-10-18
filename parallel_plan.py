@@ -8,9 +8,16 @@ own directory, port and /dev/shm prefix, a job.json the benchmark reads
 through MIG_EXP_CONFIG, and a job.env the lane sources. Stdlib only.
 
   discover [--smi-l FILE]                  paste-ready GPUS block from nvidia-smi -L
-  check [-c CONFIG]                        validate; one row per job with its sweep size
+  check [-c CONFIG] [--node X]             validate; one row per job with its sweep size
   plan [-c CONFIG] [--smoke] [--gpus 0,3]  check, then write the run dir (last line: its path)
+       [--node X]
   report RUN_DIR [--verdict]               status table; --verdict adds the smoke checks
+
+A config that defines PLACEMENT (two_node_config.py) is the two-node form: one
+pipeline whose ranks sit on MIG slices of one GPU in each of two nodes. Each
+node plans its own run dir (`plan --node X`): one lane, pipe_<X>, with one job
+per MODELS entry, and a job.json carrying the two-node block. `check` without
+--node runs the config-level checks only.
 """
 
 import argparse
@@ -47,6 +54,12 @@ GPU_KEYS = {"gpu", "slice_gb", "mig_uuids", "models"}
 MODEL_FIELDS = ("model_type", "num_layers", "hidden_size", "num_heads", "tie_word_embeddings")
 # plan.json carries only these per job; the full settings are in each job.json.
 PLAN_JOB_KEYS = ("job_id", "job_dir", "model_key", "shm_prefix", "n_configs")
+# Two-node form. Ports default outside the single-node lanes' 29500-29570, so
+# both kinds of run can share a box. Job k: master base_port + 10k, control
+# control_port + k. DCGM is refused: it is one-box only.
+TWO_NODE_RUNNER_DEFAULTS = dict(base_port=29600, control_port=29900, peer_timeout_s=1800,
+                                mem_monitor="nvml", env={})
+NODE_KEYS = {"addr", "ifname", "gpu"}
 
 
 class PlanError(Exception):
@@ -227,8 +240,10 @@ def _finish_job(job, s, key, smoke):
         ec.validate_job(job)
     except ec.JobConfigError as e:
         return None, [line.strip()[2:] for line in str(e).splitlines()[1:]]  # drop "  - "
+    # rank_nodes: absent (None) on one GPU; a two-node job needs the cross-node
+    # rule, which the neighbour rule gets wrong on A40,A20,B40,B20.
     args = (job["num_layers"], job["layer_limits"], job["slice_gb"],
-            job["enforce_slice_ordering"], job["min_last_rank_layers"])
+            job["enforce_slice_ordering"], job["min_last_rank_layers"], job.get("rank_nodes"))
     if smoke:  # the split least likely to OOM a small slice
         front = ec.front_loaded_split(*args)
         job["splits"] = [front] if front else []
@@ -240,14 +255,206 @@ def _finish_job(job, s, key, smoke):
     return job, []
 
 
-def build_plan(config_path, smoke=False, gpus=None):
+def _check_models(models, problems):
+    """MODELS keys whose entry is usable; problems for the rest."""
+    good = set()
+    for key, entry in models.items():
+        if isinstance(entry, dict) and entry.get("path"):
+            good.add(key)
+            problems += _unknown(entry, OVERRIDE_KEYS | {"path"}, f"MODELS[{key!r}]")
+        else:
+            problems.append(f"MODELS[{key!r}] needs path=<model dir, or cached HF repo id>")
+    return good
+
+
+def _model_info(keys, models, problems):
+    """model key -> (model dir, config.json fields), for the keys that load."""
+    info = {}
+    for key in keys:
+        try:
+            model_dir = mf.resolve_model_path(str(models[key]["path"]))
+            mc = mf.read_model_config(model_dir)
+            mf.family_spec(mc["model_type"])
+            mf.find_weight_files(model_dir)
+            info[key] = (model_dir, mc)
+        except (OSError, ValueError) as e:  # model_family's errors subclass these, as does bad JSON
+            problems.append(f"model {key}: {e}")
+    return info
+
+
+def _new_run_id(smoke, suffix=""):
+    """(runs dir, a run id no existing run dir has)."""
+    runs_dir = os.path.abspath(os.environ.get("MIG_PARALLEL_RUNS_DIR") or f"{REPO}/runs")
+    run_id = base = time.strftime("%Y%m%d_%H%M%S") + ("_smoke" if smoke else "") + suffix
+    n = 1
+    while os.path.exists(os.path.join(runs_dir, run_id)):
+        n += 1
+        run_id = f"{base}_{n}"
+    return runs_dir, run_id
+
+
+def _check_two_node_config(nodes, placement, runner, problems):
+    """NODES / PLACEMENT / RUNNER of the two-node form. -> (rank_nodes, uuids, slice_gb)"""
+    for name, entry in nodes.items():
+        where = f"NODES[{name!r}]"
+        if not isinstance(entry, dict):
+            problems.append(f"{where} must be dict(addr=, ifname=, gpu=)")
+            continue
+        problems += _unknown(entry, NODE_KEYS, where)
+        problems += [f"{where}: missing '{k}'" for k in sorted(NODE_KEYS - set(entry))]
+        if "gpu" in entry and not (ec._is_int(entry["gpu"]) and entry["gpu"] >= 0):
+            problems.append(f"{where}: gpu must be the GPU index (an int), got {entry['gpu']!r}")
+        if any("PASTE" in str(entry.get(k, "")) for k in ("addr", "ifname")):
+            problems.append(f"{where}: addr / ifname still hold PASTE placeholders")
+    rank_nodes = [p[0] for p in placement]
+    uuids = [p[1] for p in placement]
+    slice_gb = [p[2] for p in placement]
+    problems += [f"PLACEMENT: {p}" for p in ec.rank_nodes_problems(rank_nodes)]
+    problems += [f"PLACEMENT rank {r}: node {n!r} is not in NODES"
+                 for r, n in enumerate(rank_nodes) if isinstance(n, str) and n not in nodes]
+    problems += [f"PLACEMENT rank {r}: slice GB must be a positive int, got {g!r}"
+                 for r, g in enumerate(slice_gb) if not (ec._is_int(g) and g > 0)]
+    if any("PASTE" in str(u) for u in uuids):
+        problems.append("PLACEMENT: MIG UUIDs still hold PASTE placeholders; "
+                        "paste them from `nvidia-smi -L` on each node")
+    else:
+        dup = sorted({str(u) for u in uuids if uuids.count(u) > 1})
+        if dup:
+            problems.append(f"PLACEMENT: MIG UUID(s) listed twice: {dup}")
+    if runner["mem_monitor"] not in ("nvml", "off"):
+        problems.append(f"RUNNER.mem_monitor must be 'nvml' or 'off' for two nodes "
+                        f"(DCGM is one-box only), got {runner['mem_monitor']!r}")
+        runner["mem_monitor"] = "nvml"  # reported once here, not again for every job
+    return rank_nodes, uuids, slice_gb
+
+
+def _check_node_inventory(uuids, slice_gb, local, gpu, node, problems, warnings):
+    """This node's UUIDs must be on its GPU with the right size (the other node checks its own)."""
+    smi_l = _smi(["-L"], os.environ.get("MIG_PARALLEL_SMI_L"))
+    if smi_l is None:
+        warnings.append("nvidia-smi not found: MIG UUIDs not cross-checked against the inventory")
+        return
+    inventory = {m["uuid"]: (g["index"], m)
+                 for g in parse_nvidia_smi_l(smi_l) for m in g["migs"]}
+    for r in local:
+        on_gpu, mig = inventory.get(uuids[r], (None, None))
+        if on_gpu != gpu or mig["gb"] != slice_gb[r]:
+            got = f"{mig['profile']} on GPU {on_gpu}" if mig else "not in nvidia-smi -L"
+            problems.append(f"node {node} rank {r}: {uuids[r]} expected {slice_gb[r]}gb on "
+                            f"GPU {gpu}, got {got}")
+
+
+def _build_two_node(ns, config_path, smoke, node):
+    """build_plan() for a PLACEMENT config: this node's one lane, pipe_<node>."""
+    models, nodes, placement = ns.get("MODELS"), ns.get("NODES"), ns.get("PLACEMENT")
+    sweep, runner = ns.get("SWEEP", {}), ns.get("RUNNER", {})
+    problems, warnings = [], []
+    if not (isinstance(models, dict) and models):
+        problems.append("MODELS must be a non-empty dict of key: dict(path=..., layer_limits=[...])")
+    if not (isinstance(nodes, dict) and nodes):
+        problems.append("NODES must be a dict of name: dict(addr=, ifname=, gpu=)")
+    if not (isinstance(placement, list) and placement
+            and all(isinstance(p, (list, tuple)) and len(p) == 3 for p in placement)):
+        problems.append("PLACEMENT must be a non-empty list of (node, MIG UUID, slice GB)")
+    problems += [f"{name} must be a dict"
+                 for name, d in (("SWEEP", sweep), ("RUNNER", runner)) if not isinstance(d, dict)]
+    if problems:
+        _fail(problems)  # nothing else can be checked without these
+
+    problems += _unknown(sweep, SWEEP_DEFAULTS, "SWEEP")
+    problems += _unknown(runner, TWO_NODE_RUNNER_DEFAULTS, "RUNNER")
+    sweep, runner = {**SWEEP_DEFAULTS, **sweep}, {**TWO_NODE_RUNNER_DEFAULTS, **runner}
+    rank_nodes, uuids, slice_gb = _check_two_node_config(nodes, placement, runner, problems)
+    if node is not None and node not in nodes:
+        problems.append(f"--node {node!r} is not in NODES {sorted(nodes)}")
+    if problems:
+        _fail(problems)
+
+    # Without --node (check only), the jobs are built as the lead's, with no inventory check.
+    this = node if node is not None else rank_nodes[0]
+    local = [r for r, n in enumerate(rank_nodes) if n == this]
+    if not local:
+        problems.append(f"no rank of PLACEMENT is on node {this}")
+    gpu = nodes[this]["gpu"]
+    if node is not None:
+        _check_node_inventory(uuids, slice_gb, local, gpu, this, problems, warnings)
+    good = _check_models(models, problems)
+    for key in sorted(good):
+        if "layer_limits" not in models[key]:
+            problems.append(f"MODELS[{key!r}]: layer_limits=[...] is required for two nodes, "
+                            f"one cap per rank ({len(placement)} ranks)")
+    info = _model_info([k for k in models if k in good], models, problems)
+
+    keys = list(models)
+    masters = [runner["base_port"] + 10 * k for k in range(len(keys))]
+    controls = [runner["control_port"] + k for k in range(len(keys))]
+    clash = sorted(set(masters) & set(controls))
+    if clash:
+        problems.append(f"RUNNER: master and control ports collide at {clash}; "
+                        "move control_port away from base_port")
+
+    runs_dir, run_id = _new_run_id(smoke, f"_{this}")
+    run_dir, safe_id = os.path.join(runs_dir, run_id), re.sub(r"[^A-Za-z0-9_]", "_", run_id)
+    cpus = _numa_cpus([gpu], warnings)
+    lane_id, jobs = f"pipe_{this}", []
+    addrs = {n: nodes[n]["addr"] for n in sorted(set(rank_nodes))}
+    for nn, key in enumerate(keys, 1):
+        if key not in info:
+            continue  # the model's problem is already reported
+        job_id = f"{lane_id}/{nn:02d}_{key}"
+        prefix = f"migpp_{safe_id}j{nn:02d}"  # run id ends in _<node>: the nodes never share one
+        s = {**sweep, **models[key]}  # SWEEP < MODELS[key]
+        model_dir, mc = info[key]
+        job = dict(
+            {k: s[k] for k in SWEEP_DEFAULTS}, **{k: mc[k] for k in MODEL_FIELDS},
+            schema=ec.JOB_SCHEMA_VERSION, model_path=model_dir, mig_uuids=uuids,
+            slice_gb=slice_gb, splits=s.get("splits"), master_port=masters[nn - 1],
+            shm_prefix=prefix, mem_monitor=runner["mem_monitor"], run_id=run_id, lane=lane_id,
+            gpu_index=gpu, job_id=job_id, model_key=key, smoke=smoke,
+            rank_nodes=rank_nodes, node=this, node_addrs=addrs,
+            gloo_ifname=nodes[this]["ifname"], control_port=controls[nn - 1],
+            peer_timeout_s=runner["peer_timeout_s"],
+            placement=ec.placement_label(rank_nodes, slice_gb),
+        )
+        job.update({f"stub_{k}": v for k, v in s.get("stub", {}).items()})  # for the test stub
+        if smoke:  # one tiny configuration per job
+            job.update(max_new_tokens=8, batch_mb_pairs=[[8, 4]], max_runs=1)
+        job, errors = _finish_job(job, s, key, smoke)
+        problems += [f"{job_id}: {e}" for e in errors]
+        if job:
+            total = len(job["splits"]) * len(job["batch_mb_pairs"])
+            jobs.append({"job_id": job_id, "job_dir": os.path.join(run_dir, job_id),
+                         "model_key": key, "shm_prefix": prefix, "job": job,
+                         "n_configs": min(total, job["max_runs"] or total)})
+    if problems:
+        _fail(problems)
+    lanes = [{"lane": lane_id, "gpu": gpu, "port": masters[0], "cpus": cpus[gpu],
+              "slice_gb": slice_gb, "jobs": jobs}]
+    env = [(str(k), str(v)) for k, v in runner["env"].items()]
+    return {"run_id": run_id, "smoke": smoke, "config": config_path, "lanes": lanes,
+            "run_dir": run_dir, "env": env, "warnings": warnings, "node": this}
+
+
+def build_plan(config_path, smoke=False, gpus=None, node=None, need_node=False):
     """Validate the config and lay out every job for write_run_dir(). Raises PlanError
-    listing every problem, having written nothing. gpus: keep only these GPU indices."""
+    listing every problem, having written nothing. gpus: keep only these GPU indices.
+    node: this node of a two-node (PLACEMENT) config; need_node: refuse one without it
+    (a run dir is per node, so `plan` needs it; `check` does not)."""
     config_path = os.path.abspath(config_path)
     try:
         ns = runpy.run_path(config_path)
     except Exception as e:  # the config is user code: report it, do not crash
         _fail([f"cannot load {config_path}: {type(e).__name__}: {e}"])
+    if "PLACEMENT" in ns:
+        if "GPUS" in ns:
+            _fail(["the config defines both GPUS (one node) and PLACEMENT (two nodes); keep one"])
+        if gpus is not None:
+            _fail(["--gpus does not apply to a two-node config: its GPU is NODES[node]['gpu']"])
+        if need_node and node is None:
+            _fail(["a two-node config is planned per node: pass --node A or --node B"])
+        return _build_two_node(ns, config_path, smoke, node)
+    if node is not None:
+        _fail(["--node needs a two-node config (one that defines PLACEMENT)"])
     # Only these four names are read; helpers such as LAYOUT or _gpu() are ignored.
     models, gpu_cfg = ns.get("MODELS"), ns.get("GPUS")
     sweep, runner = ns.get("SWEEP", {}), ns.get("RUNNER", {})
@@ -268,13 +475,7 @@ def build_plan(config_path, smoke=False, gpus=None):
         problems.append(f"RUNNER.mem_monitor must be one of {', '.join(ec.MEM_MONITORS)}, "
                         f"got {runner['mem_monitor']!r}")
         runner["mem_monitor"] = "nvml"  # reported once here, not again for every job
-    good = set()  # MODELS keys whose entry is usable
-    for key, entry in models.items():
-        if isinstance(entry, dict) and entry.get("path"):
-            good.add(key)
-            problems += _unknown(entry, OVERRIDE_KEYS | {"path"}, f"MODELS[{key!r}]")
-        else:
-            problems.append(f"MODELS[{key!r}] needs path=<model dir, or cached HF repo id>")
+    good = _check_models(models, problems)
     if gpus is not None:
         known = [g.get("gpu") for g in gpu_cfg]
         problems += [f"--gpus {i}: no such gpu in GPUS" for i in gpus if i not in known]
@@ -289,23 +490,9 @@ def build_plan(config_path, smoke=False, gpus=None):
     unused = [str(k) for k in models if k not in used]
     if unused:
         warnings.append(f"MODELS not run on any GPU: {', '.join(unused)}")
-    info = {}  # model key -> (model dir, config.json fields)
-    for key in (k for k in used if k in good):
-        try:
-            model_dir = mf.resolve_model_path(str(models[key]["path"]))
-            mc = mf.read_model_config(model_dir)
-            mf.family_spec(mc["model_type"])
-            mf.find_weight_files(model_dir)
-            info[key] = (model_dir, mc)
-        except (OSError, ValueError) as e:  # model_family's errors subclass these, as does bad JSON
-            problems.append(f"model {key}: {e}")
+    info = _model_info([k for k in used if k in good], models, problems)
 
-    runs_dir = os.path.abspath(os.environ.get("MIG_PARALLEL_RUNS_DIR") or f"{REPO}/runs")
-    run_id = base = time.strftime("%Y%m%d_%H%M%S") + ("_smoke" if smoke else "")
-    n = 1
-    while os.path.exists(os.path.join(runs_dir, run_id)):
-        n += 1
-        run_id = f"{base}_{n}"
+    runs_dir, run_id = _new_run_id(smoke)
     run_dir, safe_id = os.path.join(runs_dir, run_id), re.sub(r"[^A-Za-z0-9_]", "_", run_id)
     cpus = _numa_cpus([lane[0] for lane in lanes], warnings)
     plan_lanes = []
@@ -349,6 +536,8 @@ def write_run_dir(plan):
     run_dir = plan["run_dir"]
     os.makedirs(run_dir)  # never exist_ok: two runs must not share a directory
     public = {k: plan[k] for k in ("run_id", "smoke", "config")}
+    if plan.get("node"):
+        public["node"] = plan["node"]
     public["lanes"] = [dict(lane, jobs=[{k: j[k] for k in PLAN_JOB_KEYS} for j in lane["jobs"]])
                        for lane in plan["lanes"]]
     _write(os.path.join(run_dir, "plan.json"), json.dumps(public, indent=2))
@@ -369,6 +558,8 @@ def write_run_dir(plan):
             _write(os.path.join(j["job_dir"], "job.env"),
                    "\n".join(f"export {k}={shlex.quote(v)}" for k, v in env))
             _write(os.path.join(j["job_dir"], "shm_prefix"), j["shm_prefix"])
+            if j["job"].get("rank_nodes"):  # tells the lane: resume skips are agreed with the peer
+                _write(os.path.join(j["job_dir"], "node"), j["job"]["node"])
             _write(os.path.join(j["job_dir"], "state"), "pending")
     return run_dir
 
@@ -388,6 +579,7 @@ def _summary(plan):
 _PROGRESS = re.compile(r"\[(\d+)/(\d+)\] Split")
 _B08 = re.compile(r"\[B08\]\[Rank (\d+)\] weights: loaded=\d+/\d+ missing=(\d+)")
 _T01 = re.compile(r"\[T01\]\[rank(\d+)\] .*shm_prefix=(\S+)")
+_B09 = re.compile(r"\[B09\] peer \S+ matched")
 
 
 def _report(plan, run_dir):
@@ -422,20 +614,38 @@ def _report(plan, run_dir):
 
 
 def _job_checks(d, prefix, shm_dir):
-    """[(ok, check, detail)] for one job of a finished smoke run; ok None means SKIP."""
+    """[(ok, check, detail)] for one job of a finished smoke run; ok None means SKIP.
+    Two-node job: this node checks its own ranks; the lead also checks the CSV it
+    wrote (every rank) and the remote ranks' B08 lines it logged."""
     job, out = _load_json(os.path.join(d, "job.json")), []
     world = len(job["mig_uuids"])
+    rank_nodes, node = job.get("rank_nodes"), job.get("node")
+    local = [r for r in range(world) if rank_nodes is None or rank_nodes[r] == node]
+    lead = rank_nodes is None or rank_nodes[0] == node
     state, code = (_read(os.path.join(d, name)) or "-" for name in ("state", "exit_code"))
     out.append((state == "ok" and code == "0", "exit", f"state {state}, exit_code {code}"))
-    rows = (_csv(os.path.join(d, "mig_benchmark_results.csv")) or ([], []))[1]
-    not_ok = [r.get("status") for r in rows if r.get("status") != "ok"]
-    out.append((bool(rows) and not not_ok, "results", f"{len(rows)} rows, not ok: {not_ok or '-'}"))
+    table = _csv(os.path.join(d, "mig_benchmark_results.csv")) or ([], [])
+    if lead:
+        rows = table[1]
+        not_ok = [r.get("status") for r in rows if r.get("status") != "ok"]
+        detail = f"{len(rows)} rows, not ok: {not_ok or '-'}"
+        ok = bool(rows) and not not_ok
+        if rank_nodes is not None:
+            ok = ok and "placement" in table[0]
+            detail += f", placement column {'present' if 'placement' in table[0] else 'MISSING'}"
+        out.append((ok, "results", detail))
+    else:
+        out.append((None, "results", f"the lead ({rank_nodes[0]}) writes the results CSV"))
+    log = _read(os.path.join(d, "benchmark.log"))
     # Every rank loaded every tensor; a rank's worst B08 line counts.
     missing = {}
-    for r, z in _B08.findall(_read(os.path.join(d, "benchmark.log"))):
+    for r, z in _B08.findall(log):
         missing[int(r)] = max(missing.get(int(r), 0), int(z))
-    bad = [r for r in range(world) if missing.get(r) != 0]
+    bad = [r for r in (range(world) if lead else local) if missing.get(r) != 0]
     out.append((not bad, "weights", f"ranks without a missing=0 B08 line: {bad or '-'}"))
+    if rank_nodes is not None:
+        found = _B09.search(log)
+        out.append((bool(found), "peer", found.group(0) if found else "no [B09] peer ... matched line"))
     # T01 prints the prefix the transport really used: proof MIG_SHM_PREFIX got through.
     level = re.search(r"^export MIG_LOG_LEVEL=(.*)$", _read(os.path.join(d, "job.env")), re.M)
     level = shlex.split(level.group(1))[0].strip().lower() if level else ""
@@ -444,7 +654,7 @@ def _job_checks(d, prefix, shm_dir):
     else:
         seen = {(int(r), p) for path in glob.glob(os.path.join(d, "logs", "transport_*.log"))
                 for r, p in _T01.findall(_read(path))}
-        bad = [r for r in range(world) if (r, prefix) not in seen]
+        bad = [r for r in local if (r, prefix) not in seen]
         shows = f"; T01 shows {sorted({p for _, p in seen})}" if bad else ""
         out.append((not bad, "shm_prefix", f"ranks without T01 for {prefix}: {bad or '-'}{shows}"))
     if job.get("mem_monitor") != "nvml":
@@ -452,8 +662,13 @@ def _job_checks(d, prefix, shm_dir):
     else:
         rows, bad = (_csv(os.path.join(d, "mig_memory_trace.csv")) or ([], []))[1], []
         for r, gb in enumerate(job["slice_gb"]):
-            col = f"rank{r}_{gb}gb_mb"
-            peak = max([float(row[col]) for row in rows if row.get(col)] or [0.0])
+            if r in local:  # this node's trace, columns labelled with global ranks
+                col, src = f"rank{r}_{gb}gb_mb", rows
+            elif lead:  # a remote rank: its peak came back in the lead's results CSV
+                col, src = f"peak_rank{r}_{gb}gb_mb", table[1]
+            else:
+                continue
+            peak = max([float(row[col]) for row in src if row.get(col)] or [0.0])
             # 0: the slice was never read. Above the slice's size: some other device was.
             if not 0 < peak <= gb * 1024 * 1.02:
                 bad.append(f"{col} max {peak:g}")
@@ -485,11 +700,13 @@ def main(argv=None):
     p.add_argument("--smi-l", metavar="FILE", help="saved `nvidia-smi -L` output to read instead")
     p = sub.add_parser("check", help="validate the config and show every job's sweep")
     p.add_argument("-c", "--config", default=DEFAULT_CONFIG)
+    p.add_argument("--node", help="this node of a two-node config (adds its inventory check)")
     p = sub.add_parser("plan", help="check, then write a run directory; the last line is its path")
     p.add_argument("-c", "--config", default=DEFAULT_CONFIG)
     p.add_argument("--smoke", action="store_true", help="one tiny config per job")
     p.add_argument("--gpus", type=lambda s: [int(x) for x in s.split(",")], metavar="0,3",
                    help="only these GPU indices")
+    p.add_argument("--node", help="this node of a two-node config (required for one)")
     p = sub.add_parser("report", help="status of every job in a run directory")
     p.add_argument("run_dir")
     p.add_argument("--verdict", action="store_true", help="add the smoke checks; exit 1 on a FAIL")
@@ -501,9 +718,10 @@ def main(argv=None):
                 _fail(["nvidia-smi not found; pass --smi-l FILE with saved `nvidia-smi -L` output"])
             print(_discover_block(parse_nvidia_smi_l(text)))
         elif args.cmd == "check":
-            print("\n".join(_summary(build_plan(args.config)) + ["check: OK"]))
+            print("\n".join(_summary(build_plan(args.config, node=args.node)) + ["check: OK"]))
         elif args.cmd == "plan":
-            plan = build_plan(args.config, smoke=args.smoke, gpus=args.gpus)
+            plan = build_plan(args.config, smoke=args.smoke, gpus=args.gpus, node=args.node,
+                              need_node=True)
             run_dir = write_run_dir(plan)
             print("\n".join(_summary(plan) + [run_dir]))  # run_parallel.sh takes the last line
         else:

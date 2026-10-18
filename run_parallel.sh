@@ -14,6 +14,7 @@
 #   ./run_parallel.sh stop [RUN_DIR]       abort early only (a finished run exits by itself):
 #                                          TERM every lane, KILL after a grace period
 #   options: -c CONFIG, --gpus 0,3, --resume RUN_DIR (start: skip jobs already ok)
+#   two nodes: -c two_node_config.py --node A on node A, --node B on node B (any order)
 #
 # Runs on bash 3.2 (the Mac tests) and 5 (the box): no associative arrays or
 # `wait -n`, and empty arrays expand as ${a[@]+"${a[@]}"} under `set -u`.
@@ -35,6 +36,28 @@ LOCK="${MIG_PARALLEL_LOCK:-/tmp/mig_pp_run_parallel.lock}"
 log() { printf '%s %s\n' "$(date '+%H:%M:%S')" "$*"; }
 die() { printf 'run_parallel.sh: %s\n' "$*" >&2; exit 1; }
 first_line() { local l=""; [ -f "$1" ] && IFS= read -r l < "$1"; printf '%s' "$l"; }
+
+# --node X (any subcommand): this node of a two-node config. It gets its own
+# lock and its own runs/latest_X, so a two-node run and single-node lanes on one
+# box do not refuse each other (and both "nodes" of the Mac tests can run at
+# once). Exported, so the detached manager inherits the same lock.
+NODE=""
+ARGS=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --node) [ $# -ge 2 ] || die "--node needs a node name"; NODE="$2"; shift 2 ;;
+        *) ARGS+=("$1"); shift ;;
+    esac
+done
+set -- ${ARGS[@]+"${ARGS[@]}"}
+if [ -n "$NODE" ]; then
+    case "$NODE" in *[!A-Za-z_]* | [!A-Za-z]*) die "--node '$NODE': letters and underscores only" ;; esac
+    LOCK="$LOCK.node_$NODE"
+    export MIG_PARALLEL_LOCK="$LOCK"
+fi
+LATEST="latest${NODE:+_$NODE}"
+NODE_ARGS=()
+[ -n "$NODE" ] && NODE_ARGS=(--node "$NODE")
 
 # Runs its arguments as the leader of a new session, so a lane (bash, the
 # benchmark parent and its rank processes) is one process group that can be
@@ -92,7 +115,7 @@ lock_drop() { [ "$(first_line "$LOCK/run_dir")" = "$1" ] && rm -rf "$LOCK"; retu
 
 # --- lane: run one GPU's jobs in order ------------------------------------
 lane_main() { # run_dir lane
-    local run_dir="$1" dir="$1/lanes/$2" cpus job prefix rc state
+    local run_dir="$1" dir="$1/lanes/$2" cpus job prefix rc state already_ok
     ps -o pgid= -p $$ | tr -d ' ' > "$dir/pgid"
     cpus=$(first_line "$dir/cpus")
     local pin=()
@@ -100,7 +123,13 @@ lane_main() { # run_dir lane
     while IFS= read -r job; do
         [ -n "$job" ] || continue
         [ -f "$run_dir/STOP" ] && break
-        [ "$(first_line "$job/state")" = ok ] && continue
+        already_ok=0
+        if [ "$(first_line "$job/state")" = ok ]; then
+            # A two-node job is skipped only if the other node finished it too:
+            # the benchmark asks it (agree_on_resume) and both skip or both rerun.
+            [ -f "$job/node" ] || continue
+            already_ok=1
+        fi
         prefix=$(first_line "$job/shm_prefix")
         echo running > "$job/state"
         date +%s > "$job/started_at"
@@ -108,7 +137,8 @@ lane_main() { # run_dir lane
         printf '===== attempt %s =====\n' "$(date)" >> "$job/stdout.log"
         # CWD = job dir keeps every relative output of the benchmark apart.
         # shellcheck disable=SC1091
-        ( cd "$job" && . ./job.env && exec ${pin[@]+"${pin[@]}"} "$PYTHON" "$BENCH" ) >> "$job/stdout.log" 2>&1
+        ( cd "$job" && . ./job.env && export MIG_JOB_ALREADY_OK="$already_ok" &&
+          exec ${pin[@]+"${pin[@]}"} "$PYTHON" "$BENCH" ) >> "$job/stdout.log" 2>&1
         rc=$?
         shm_cleanup "$prefix"
         echo "$rc" > "$job/exit_code"
@@ -187,7 +217,7 @@ cmd_start() { # smoke(0|1) args...
         done
         log "resuming $run_dir (jobs already ok are skipped)"
     else
-        local args=(plan -c "$config")
+        local args=(plan -c "$config" ${NODE_ARGS[@]+"${NODE_ARGS[@]}"})
         [ "$smoke" -eq 1 ] && args+=(--smoke)
         [ -n "$gpus" ] && args+=(--gpus "$gpus")
         if ! out=$(MIG_PARALLEL_RUNS_DIR="$RUNS_DIR" "$PYTHON" "$PLANNER" "${args[@]}"); then
@@ -199,7 +229,7 @@ cmd_start() { # smoke(0|1) args...
         run_dir=$(printf '%s\n' "$out" | tail -n 1)
     fi
     lock_owner $$ "$run_dir"
-    ln -sfn "$(basename "$run_dir")" "$(dirname "$run_dir")/latest"
+    ln -sfn "$(basename "$run_dir")" "$(dirname "$run_dir")/$LATEST"
     if [ "$detach" -eq 1 ]; then
         nohup "${NEW_SESSION[@]}" bash "$SELF" __manager "$run_dir" "$smoke" > "$run_dir/manager.log" 2>&1 < /dev/null &
         local i=0
@@ -214,7 +244,7 @@ cmd_start() { # smoke(0|1) args...
 run_dir_arg() { # [dir] -> run dir (default: the active run, else runs/latest)
     local d="${1:-}"
     [ -n "$d" ] || d=$(first_line "$LOCK/run_dir")
-    [ -n "$d" ] && [ -d "$d" ] || d="$RUNS_DIR/latest"
+    [ -n "$d" ] && [ -d "$d" ] || d="$RUNS_DIR/$LATEST"
     [ -f "$d/lanes.txt" ] || die "no run directory at '$d'"
     (cd -P "$d" && pwd)
 }
@@ -235,8 +265,9 @@ case "${1:-help}" in
     smoke) shift; cmd_start 1 "$@" ;;
     status) "$PYTHON" "$PLANNER" report "$(run_dir_arg "${2:-}")" ;;
     stop) cmd_stop "${2:-}" ;;
-    check | discover) cmd="$1"; shift; "$PYTHON" "$PLANNER" "$cmd" "$@" ;;
+    check) shift; "$PYTHON" "$PLANNER" check "$@" ${NODE_ARGS[@]+"${NODE_ARGS[@]}"} ;;
+    discover) shift; "$PYTHON" "$PLANNER" discover "$@" ;;
     __lane) lane_main "$2" "$3" ;;
     __manager) manager_main "$2" "$3" ;;
-    *) sed -n '2,19p' "$SELF" | sed 's/^# \{0,1\}//' ;;
+    *) sed -n '2,20p' "$SELF" | sed 's/^# \{0,1\}//' ;;
 esac

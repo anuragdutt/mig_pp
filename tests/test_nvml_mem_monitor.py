@@ -218,6 +218,42 @@ class NvmlMemMonitorTest(unittest.TestCase):
             self.csv_rows(self.mon)[0][3:], ["rank0_mb", "rank1_mb", "rank2_mb", "rank3_mb"]
         )
 
+    def test_ranks_label_the_columns_with_global_rank_numbers(self):
+        # Node B of a two-node pipeline samples ranks 2 and 3 only.
+        self.mon.setup_dcgm_group(
+            mig_uuids=UUIDS[2:], slice_gb=[40, 20], ranks=[2, 3]
+        )
+        self.assertEqual(
+            self.csv_rows(self.mon)[0], ["timestamp", "label", "gpu_mb", "rank2_40gb_mb", "rank3_20gb_mb"]
+        )
+        self.mon.setup_dcgm_group(mig_uuids=UUIDS[2:], slice_gb=None, ranks=[2, 3])
+        self.assertEqual(self.csv_rows(self.mon)[0][3:], ["rank2_mb", "rank3_mb"])
+        # Values still follow mig_uuids order, whatever the labels say.
+        self.mon.setup_dcgm_group(mig_uuids=UUIDS[2:], slice_gb=[40, 20], ranks=[2, 3])
+        for _ts, _label, _gpu, *vals in self.sample():
+            self.assertEqual(vals, [USED[UUIDS[2]], USED[UUIDS[3]]])
+
+    def test_ranks_that_do_not_line_up_disable_without_crashing(self):
+        # One label per sampled slice, or save_csv would index past the end.
+        cases = [
+            (UUIDS[2:], [40, 20, 10, 10], [2, 3]),  # every rank's slice_gb, local uuids
+            (UUIDS[2:], [40, 20], [2]),
+            (UUIDS[2:], None, [2, 3, 4]),
+        ]
+        for uuids, gb, ranks in cases:
+            with self.subTest(gb=gb, ranks=ranks):
+                self.mon.setup_dcgm_group(mig_uuids=uuids, slice_gb=gb, ranks=ranks)
+                self.assertFalse(self.mon._enabled)
+                want = [f"rank{r}_{g}gb_mb" for r, g in enumerate(gb or [])]
+                self.assertEqual(self.csv_rows(self.mon)[0][3:], want)
+        self.assertEqual(self.out.getvalue().count("DISABLED — ranks"), len(cases))
+        # mem_monitor="off": silent, and save_csv still writes the header.
+        mon = self.fresh(FakePynvml())
+        mon.disable()
+        mon.setup_dcgm_group(mig_uuids=UUIDS[2:], slice_gb=[40, 20, 10, 10], ranks=[2, 3])
+        self.assertEqual(len(self.csv_rows(mon)[0]), 7)
+        self.assertEqual(self.out.getvalue().count("DISABLED — ranks"), len(cases))
+
     def test_disable_makes_every_later_call_a_no_op(self):
         # The benchmark's order for mem_monitor="off": disable() at import, then
         # the usual setup, per-config calls and save_csv.

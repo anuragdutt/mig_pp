@@ -16,6 +16,7 @@ import os
 import re
 import shutil
 import signal
+import socket
 import struct
 import subprocess
 import sys
@@ -102,6 +103,35 @@ class FakeBox:
             f"MODELS = {{\n{models},\n}}\nGPUS = [\n{gpus},\n]\n"
             f"SWEEP = dict(batch_mb_pairs=[(8, 4), (16, 2)])\n"
             f"RUNNER = dict()\n"
+        )
+        p = self.root / f"config_{len(list(self.root.glob('config_*.py')))}.py"
+        p.write_text(text)
+        return p
+
+    def two_node_config(self, models=("vicuna_7b",), stubs=None, runner=None):
+        """The user's layout: node A = gpu 0's 20GB + 10GB slices (ranks 0, 1),
+        node B = gpu 1's two 5GB slices (ranks 2, 3). Both "nodes" are this Mac."""
+        stubs = stubs or {}
+        with socket.socket() as s:  # a free control port, so parallel test runs do not meet
+            s.bind(("127.0.0.1", 0))
+            control = s.getsockname()[1]
+        runner = {"control_port": control, "peer_timeout_s": 30, **(runner or {})}
+        entries = ",\n".join(
+            f'    "{k}": dict(path="{self.root / "models" / k}", layer_limits=[18, 12, 5, 5], '
+            f'stub={stubs.get(k, {"sleep": 1})!r})'
+            for k in models
+        )
+        placement = [("A", self.uuid(0, 0), 20), ("A", self.uuid(0, 1), 10),
+                     ("B", self.uuid(1, 2), 5), ("B", self.uuid(1, 3), 5)]
+        text = (
+            'NODES = {\n'
+            '    "A": dict(addr="127.0.0.1", ifname="lo0", gpu=0),\n'
+            '    "B": dict(addr="127.0.0.1", ifname="lo0", gpu=1),\n'
+            '}\n'
+            f"PLACEMENT = {placement!r}\n"
+            f"MODELS = {{\n{entries},\n}}\n"
+            "SWEEP = dict(batch_mb_pairs=[(8, 4), (16, 2)])\n"
+            f"RUNNER = {runner!r}\n"
         )
         p = self.root / f"config_{len(list(self.root.glob('config_*.py')))}.py"
         p.write_text(text)
@@ -290,6 +320,112 @@ class RunParallel(unittest.TestCase):
         self.assertNotEqual(p.returncode, 0)
         self.assertIn("planning failed", p.stderr)
         self.assertFalse((self.tmp / "lock").exists())
+
+    def start_two_nodes(self, cmd, cfg, timeout=90):
+        """Both "nodes" at once, B first (start order must not matter)."""
+        procs = {n: subprocess.Popen(["bash", str(SCRIPT), cmd, "-c", str(cfg), "--node", n],
+                                     env=self.box.env(), stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE, text=True)
+                 for n in ("B", "A")}
+        out = {}
+        try:
+            for n, p in procs.items():
+                stdout, stderr = p.communicate(timeout=timeout)
+                out[n] = (p.returncode, stdout, stderr)
+        finally:
+            for p in procs.values():
+                if p.poll() is None:
+                    p.kill()
+        return out
+
+    def test_two_node_smoke_passes_on_both_nodes(self):
+        cfg = self.box.two_node_config()
+        out = self.start_two_nodes("smoke", cfg)
+        for n in ("A", "B"):
+            rc, stdout, stderr = out[n]
+            self.assertEqual(rc, 0, f"node {n}\n{stdout}\n{stderr}")
+            self.assertIn("VERDICT: PASS", stdout, n)
+            self.assertRegex(stdout, rf"PASS\s+pipe_{n}/01_vicuna_7b\s+peer: \[B09\] peer "
+                                     f"{'B' if n == 'A' else 'A'} matched")
+        self.assertRegex(out["B"][1], r"SKIP\s+pipe_B/01_vicuna_7b\s+results: the lead \(A\)")
+        runs = self.tmp / "runs"
+        lead, other = (Path(os.path.realpath(runs / f"latest_{n}")) for n in ("A", "B"))
+        self.assertNotEqual(lead, other)
+        self.assertTrue(lead.name.endswith("_smoke_A") and other.name.endswith("_smoke_B"))
+        a, b = lead / "pipe_A/01_vicuna_7b", other / "pipe_B/01_vicuna_7b"
+        # The lead's CSV covers all four ranks, remote peaks included, plus placement.
+        with open(a / "mig_benchmark_results.csv") as f:
+            header, row = f.read().strip().splitlines()
+        self.assertIn("peak_rank2_5gb_mb", header)
+        self.assertTrue(header.endswith("status,placement"), header)
+        self.assertTrue(row.endswith("ok,\"A20,A10,B5,B5\""), row)
+        self.assertFalse((b / "mig_benchmark_results.csv").exists(), "the non-lead writes no CSV")
+        # Each node ran only its own ranks, traced under global rank numbers.
+        self.assertEqual(len(json.loads((a / "stub_record.json").read_text())["children"]), 2)
+        self.assertIn("rank2_5gb_mb,rank3_5gb_mb", (b / "mig_memory_trace.csv").read_text())
+        jb = json.loads((b / "job.json").read_text())
+        self.assertEqual((jb["node"], jb["placement"], jb["gloo_ifname"]), ("B", "A20,A10,B5,B5", "lo0"))
+        self.assertNotEqual(jb["shm_prefix"], json.loads((a / "job.json").read_text())["shm_prefix"])
+        self.assertEqual(list(self.box.shm.iterdir()), [])
+        self.assertFalse(any(self.tmp.glob("lock*")), "a node lock was not released")
+
+    def test_two_node_resume_reruns_on_both_nodes_when_one_failed(self):
+        # The review's repro: B fails at the end of a job that A finished. The
+        # job fails on BOTH (their outcomes are traded in the last message), so
+        # a resume reruns it on both. A second resume skips it on both.
+        cfg = self.box.two_node_config(stubs={"vicuna_7b": {"sleep": 1, "rc": 3, "rc_node": "B"}})
+        out = self.start_two_nodes("start", cfg)
+        self.assertEqual((out["A"][0], out["B"][0]), (1, 1), out)
+        runs = self.tmp / "runs"
+        dirs = {n: Path(os.path.realpath(runs / f"latest_{n}")) / f"pipe_{n}/01_vicuna_7b" for n in "AB"}
+        self.assertEqual((read(dirs["A"] / "state"), read(dirs["B"] / "state")), ("failed", "failed"))
+        # Even if one node did end ok (it died after the last message, say),
+        # a resume must not let it skip alone.
+        (dirs["A"] / "state").write_text("ok\n")
+        jb = json.loads((dirs["B"] / "job.json").read_text())
+        jb.pop("stub_rc")  # B succeeds this time
+        (dirs["B"] / "job.json").write_text(json.dumps(jb))
+
+        def resume():
+            procs = {n: subprocess.Popen(["bash", str(SCRIPT), "start", "--resume", str(dirs[n].parents[1]),
+                                          "--node", n], env=self.box.env(), stdout=subprocess.PIPE,
+                                         stderr=subprocess.PIPE, text=True) for n in "BA"}
+            return {n: (p.communicate(timeout=90), p.returncode) for n, p in procs.items()}
+
+        res = resume()
+        for n in "AB":
+            self.assertEqual(res[n][1], 0, res[n])
+            self.assertEqual(read(dirs[n] / "state"), "ok", n)
+            self.assertEqual(read(dirs[n] / "stdout.log").count("===== attempt"), 2, n)
+            self.assertNotIn("[B10]", read(dirs[n] / "benchmark.log"), "rerun, not skipped")
+        res = resume()  # both ok now: both skip
+        for n in "AB":
+            self.assertEqual(res[n][1], 0, res[n])
+            self.assertIn("[B10] both nodes finished this job already: skipped",
+                          read(dirs[n] / "benchmark.log"), n)
+
+    def test_two_node_lock_is_per_node_and_apart_from_single_node(self):
+        cfg = self.box.two_node_config(stubs={"vicuna_7b": {"sleep": 60}})
+        single = self.box.config({3: ["llama_7b"]}, stubs={"llama_7b": {"sleep": 60}})
+        self.box.run("start", "-c", single, "--detach", check=True, timeout=30)
+        try:
+            # A two-node start is not refused by the single-node run on this box...
+            p = subprocess.Popen(["bash", str(SCRIPT), "start", "-c", str(cfg), "--node", "A"],
+                                 env=self.box.env(), stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL)
+            deadline = time.time() + 20
+            while not (self.tmp / "lock.node_A").exists() and time.time() < deadline:
+                time.sleep(0.2)
+            self.assertTrue((self.tmp / "lock.node_A").exists(), "node A took no lock")
+            # ...but a second node-A start is.
+            again = self.box.run("start", "-c", cfg, "--node", "A", timeout=30)
+            self.assertNotEqual(again.returncode, 0)
+            self.assertIn("another run is active", again.stderr)
+            self.box.run("stop", "--node", "A", check=True, timeout=60)
+            p.wait(timeout=60)
+        finally:
+            self.box.run("stop", timeout=60)
+        self.assertFalse(any(self.tmp.glob("lock*")))
 
     def test_shellcheck_clean(self):
         sc = shutil.which("shellcheck")

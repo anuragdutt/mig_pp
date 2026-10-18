@@ -294,6 +294,173 @@ class LoadJob(unittest.TestCase):
         self.assertEqual(ec.count_configs(valid_job(splits=[[18, 12, 1, 1]])), 2)
 
 
+def cross_node_oracle(total, limits, gb, nodes, min_last):
+    """Brute force of the cross-node rule, written pairwise and independently of
+    the enumerator's recursion: every split of `total` with 1 <= l_r <= limit_r
+    (last rank min_last..limit), accepted iff every pair of ranks is consistent."""
+    n = len(limits)
+
+    def pair_ok(i, j, li, lj):
+        if gb[i] > gb[j]:
+            return li > lj
+        if gb[i] < gb[j]:
+            return li < lj
+        if j == i + 1 and nodes[i] == nodes[j]:
+            return li >= lj
+        return True
+
+    out = []
+    ranges = [range(1, limits[r] + 1) for r in range(n - 1)]
+    for head in itertools.product(*ranges):
+        last = total - sum(head)
+        if not (min_last <= last <= limits[-1]):
+            continue
+        split = list(head) + [last]
+        if all(pair_ok(i, j, split[i], split[j]) for i in range(n) for j in range(i + 1, n)):
+            out.append(split)
+    return out
+
+
+class CrossNodeSplits(unittest.TestCase):
+    def test_one_node_descending_layouts_equal_the_neighbour_rule(self):
+        # Passing rank_nodes on a single node must change nothing.
+        gb_layouts = [[20, 10, 5, 5], [10, 10, 10], [20, 10], [5, 5, 5, 5], [40, 20, 10, 10]]
+        for gb in gb_layouts:
+            nodes = ["A"] * len(gb)
+            for limits in itertools.product(range(0, 6), repeat=len(gb)):
+                for total in range(1, 12):
+                    for last in (0, 1):
+                        self.assertEqual(
+                            ec.generate_layer_splits(total, limits, gb, True, last, nodes),
+                            ec.generate_layer_splits(total, limits, gb, True, last),
+                            msg=f"total={total} limits={limits} gb={gb} last={last}",
+                        )
+
+    def test_real_layouts_unchanged_with_rank_nodes(self):
+        for total, limits, gb in SplitEquivalence.REAL:
+            with self.subTest(total=total, limits=limits):
+                self.assertEqual(
+                    ec.generate_layer_splits(total, limits, gb, True, 1, ["A"] * len(gb)),
+                    ec.generate_layer_splits(total, limits, gb, True, 1),
+                )
+
+    def test_cross_node_matches_brute_force(self):
+        cases = [
+            ([40, 20, 40, 20], ["A", "A", "B", "B"]),  # contiguous
+            ([40, 40, 20, 20], ["A", "B", "A", "B"]),  # interleaved
+            ([40, 20, 20, 40], ["A", "A", "B", "B"]),
+            ([40, 20, 10, 10], ["A", "A", "B", "B"]),  # equal slices across the boundary
+            ([20, 20, 20, 20], ["A", "A", "B", "B"]),
+            ([40, 20, 40], ["A", "A", "B"]),
+            ([40, 40], ["A", "B"]),
+        ]
+        for gb, nodes in cases:
+            n = len(gb)
+            for limits in itertools.product(range(1, 6), repeat=n):
+                for total in (n, n + 3, 9, 13):
+                    for last in (0, 1):
+                        self.assertEqual(
+                            ec.generate_layer_splits(total, limits, gb, True, last, nodes),
+                            cross_node_oracle(total, limits, gb, nodes, last),
+                            msg=f"total={total} limits={limits} gb={gb} nodes={nodes} last={last}",
+                        )
+
+    def test_small_slice_never_outweighs_a_big_one_across_the_node_boundary(self):
+        # 40,20 | 40,20: the neighbour rule alone would let rank 3 (20GB)
+        # outweigh rank 0's 40GB neighbour... the all-pairs rule must not.
+        splits = ec.generate_layer_splits(30, [20, 12, 20, 12], [40, 20, 40, 20], True, 1,
+                                          ["A", "A", "B", "B"])
+        self.assertTrue(splits)
+        for l0, l1, l2, l3 in splits:
+            self.assertTrue(l0 > l1 and l0 > l3 and l2 > l1 and l2 > l3, (l0, l1, l2, l3))
+        # Equal slices on different nodes are free either way round.
+        self.assertTrue(any(s[0] < s[2] for s in splits))
+        self.assertTrue(any(s[0] > s[2] for s in splits))
+
+    def test_unordered_ignores_the_rule(self):
+        splits = ec.generate_layer_splits(6, [4, 4, 4], [10, 20, 10], False, 1, ["A", "B", "B"])
+        self.assertIn([1, 4, 1], splits)
+
+    def test_rank_nodes_length_must_match(self):
+        with self.assertRaises(ValueError):
+            ec.generate_layer_splits(8, [4, 4, 4], [10, 10, 10], True, 1, ["A", "B"])
+
+    def test_front_loaded_and_job_splits_follow_rank_nodes(self):
+        gb, nodes, limits = [40, 20, 40, 20], ["A", "A", "B", "B"], [22, 11, 22, 11]
+        all_splits = ec.generate_layer_splits(40, limits, gb, True, 1, nodes)
+        self.assertEqual(ec.front_loaded_split(40, limits, gb, True, 1, nodes), all_splits[-1])
+        job = two_node_job()
+        self.assertEqual(ec.job_splits(job), all_splits)
+
+
+def two_node_job(**over):
+    job = valid_job(
+        num_layers=40, slice_gb=[40, 20, 40, 20], layer_limits=[22, 11, 22, 11],
+        master_port=29600,
+        rank_nodes=["A", "A", "B", "B"], node="A",
+        node_addrs={"A": "10.0.0.1", "B": "10.0.0.2"}, gloo_ifname="eno1",
+        control_port=29900, peer_timeout_s=1800, placement="A40,A20,B40,B20",
+    )
+    job.update(over)
+    return job
+
+
+class TwoNodeJobBlock(unittest.TestCase):
+    def test_valid_block_passes_and_single_node_still_does(self):
+        ec.validate_job(two_node_job())
+        ec.validate_job(valid_job())  # no block: single node
+
+    def test_placement_label(self):
+        self.assertEqual(ec.placement_label(["A", "A", "B", "B"], [40, 20, 40, 20]), "A40,A20,B40,B20")
+
+    def test_block_is_all_or_nothing(self):
+        job = two_node_job()
+        del job["control_port"]
+        with self.assertRaises(ec.JobConfigError) as cm:
+            ec.validate_job(job)
+        self.assertIn("all-or-nothing", str(cm.exception))
+        job = valid_job(node="A")  # a stray key without rank_nodes
+        with self.assertRaises(ec.JobConfigError):
+            ec.validate_job(job)
+
+    def test_each_check(self):
+        bad = {
+            "rank_nodes length": two_node_job(rank_nodes=["A", "B"]),
+            "unknown node": two_node_job(rank_nodes=["A", "A", "B", "C"], placement="A40,A20,B40,C20"),
+            "node holds no rank": two_node_job(node="C", node_addrs={"A": "x", "B": "y", "C": "z"}),
+            "node not in addrs": two_node_job(node_addrs={"A": "10.0.0.1"}),
+            "ifname": two_node_job(gloo_ifname=""),
+            "control port range": two_node_job(control_port=80),
+            "control == master": two_node_job(control_port=29600),
+            "timeout": two_node_job(peer_timeout_s=0),
+            "placement mismatch": two_node_job(placement="A40,A20,B40,B40"),
+            # The control channel pairs the lead with ONE peer: a third node's
+            # ranks would never join gloo.
+            "three nodes": two_node_job(
+                rank_nodes=["A", "B", "C", "C"], node_addrs={"A": "x", "B": "y", "C": "z"},
+                placement="A40,B20,C40,C20",
+            ),
+            "one node": two_node_job(rank_nodes=["A"] * 4, placement="A40,A20,A40,A20"),
+            "digit in a node name": two_node_job(
+                rank_nodes=["A4", "A4", "B", "B"], node="A4", node_addrs={"A4": "x", "B": "y"},
+                placement="A440,A420,B40,B20",
+            ),
+        }
+        for name, job in bad.items():
+            with self.subTest(name):
+                with self.assertRaises(ec.JobConfigError):
+                    ec.validate_job(job)
+
+    def test_rank_nodes_problems(self):
+        self.assertEqual(ec.rank_nodes_problems(["A", "A", "B", "B"]), [])
+        self.assertEqual(ec.rank_nodes_problems(["node_a", "node_b"]), [])
+        for rn in (["A", "A"], ["A", "B", "C"]):
+            self.assertIn("exactly 2 nodes", " ".join(ec.rank_nodes_problems(rn)), rn)
+        # Names reach /dev/shm prefixes and placement labels ("A4"+40 = "A"+440).
+        for rn in (["A4", "B"], ["A,B", "C"], ["a/b", "B"], ["", "B"], [1, "B"]):
+            self.assertIn("letters and underscores", " ".join(ec.rank_nodes_problems(rn)), rn)
+
+
 def _write_safetensors(path, names):
     header = {n: {"dtype": "F16", "shape": [1], "data_offsets": [0, 2]} for n in names}
     header["__metadata__"] = {"format": "pt"}

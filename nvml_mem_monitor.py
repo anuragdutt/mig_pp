@@ -20,6 +20,7 @@ SAMPLE_INTERVAL_MS = 500
 NUM_MIG_INSTANCES = 0  # slices being sampled; 0 while disabled
 _samples = []  # (timestamp, label, gpu_mb, rank0_mb, ...), ranks in mig_uuids order
 _slice_gb = []  # names the CSV rank columns, nothing else
+_rank_ids = []  # global rank number of each sampled slice; [] means 0..n-1
 _label = "idle"
 _enabled = False  # setup succeeded, so start() will produce rows
 
@@ -48,11 +49,26 @@ def _used_mib(handle):
     return _nvml.nvmlDeviceGetMemoryInfo(handle).used // 2**20
 
 
-def setup_dcgm_group(mig_uuids=None, slice_gb=None):
-    """Resolve each rank's slice by MIG UUID. DCGM's name, so either module fits."""
-    global NUM_MIG_INSTANCES, _slice_gb, _enabled, _nvml, _handles, _parent
+def setup_dcgm_group(mig_uuids=None, slice_gb=None, ranks=None):
+    """
+    Resolve each rank's slice by MIG UUID. DCGM's name, so either module fits.
+
+    ranks: the global rank number of each given slice, for a node that samples
+    only its own slices of a two-node pipeline (node B's columns are then
+    rank2_..., rank3_...). None numbers them 0..n-1, as before.
+    """
+    global NUM_MIG_INSTANCES, _slice_gb, _rank_ids, _enabled, _nvml, _handles, _parent
     _slice_gb = list(slice_gb or [])  # first: save_csv's header needs it regardless
+    _rank_ids = list(ranks or [])
     _enabled, NUM_MIG_INSTANCES = False, 0
+    n = len(mig_uuids or [])
+    if _rank_ids and (len(_rank_ids) != n or (_slice_gb and len(_slice_gb) != n)):
+        # One label per sampled slice, or save_csv would index past the end.
+        if not _off:
+            _say(f"DISABLED — ranks {_rank_ids} do not line up with {n} mig_uuids "
+                 f"and slice_gb {_slice_gb}")
+        _rank_ids = []
+        return
     if _off:
         return
     if not mig_uuids:
@@ -146,8 +162,11 @@ def clear():
 
 def save_csv(path):
     # The header follows setup's topology, so a disabled monitor writes it too.
-    ranks = [f"rank{r}_{gb}gb_mb" for r, gb in enumerate(_slice_gb)]
-    ranks = ranks or [f"rank{r}_mb" for r in range(NUM_MIG_INSTANCES)]
+    ids = _rank_ids or range(max(len(_slice_gb), NUM_MIG_INSTANCES))
+    if _slice_gb:
+        ranks = [f"rank{ids[i]}_{gb}gb_mb" for i, gb in enumerate(_slice_gb)]
+    else:
+        ranks = [f"rank{ids[i]}_mb" for i in range(NUM_MIG_INSTANCES)]
     rows = list(_samples)
     with open(path, "w", newline="") as f:
         w = csv.writer(f)
