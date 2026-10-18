@@ -24,16 +24,16 @@ MODEL_ROOT = os.path.expanduser("~/models")
 # ifname: the NIC carrying addr (exported to every rank as GLOO_SOCKET_IFNAME)
 # gpu:    physical GPU index holding this node's slices
 NODES = {
-    "A": dict(addr="PASTE-IP-OF-MIG1", ifname="PASTE-NIC", gpu=0),
-    "B": dict(addr="PASTE-IP-OF-MIG2", ifname="PASTE-NIC", gpu=0),
+    "A": dict(addr="10.191.130.144", ifname="enp161s0f0", gpu=0),
+    "B": dict(addr="10.191.130.240", ifname="enp161s0f0", gpu=0),
 }
 
 # Pipeline order: (node, MIG UUID, slice GB). The node holding rank 0 is the lead.
 PLACEMENT = [
-    ("A", "MIG-PASTE-3g.20gb-from-mig1", 20),
-    ("A", "MIG-PASTE-2g.10gb-from-mig1", 10),
-    ("B", "MIG-PASTE-1g.5gb-from-mig2", 5),
-    ("B", "MIG-PASTE-1g.5gb-from-mig2-second", 5),
+    ("A", "MIG-6dd23494-5fab-5507-9b31-70197c7ffce2", 20),
+    ("A", "MIG-160ce58f-ba42-5f9c-93f2-4cab3d5f326c", 10),
+    ("B", "MIG-134663e4-f8ee-52a6-9095-5cf2d50cf878", 5),
+    ("B", "MIG-bb1664d7-33af-50a1-9bb4-8e24765d807b", 5),
 ]
 
 # Run in this order (one model at a time). layer_limits: one cap per rank,
