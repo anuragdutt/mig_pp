@@ -19,8 +19,8 @@ reuse Vicuna's vector so they sweep the same splits.
 LAYER_LIMITS = {
     # 3g.20gb + 2g.10gb + 1g.5gb + 1g.5gb on A100-40GB
     "20_10_5_5": {
-        "vicuna_7b": [18, 12, 5, 5],  # swept 9/28
-        "llama_7b": [18, 12, 5, 5],  # same shapes as Vicuna-7B
+        "vicuna_7b": [28, 12, 5, 5], 
+        "llama_7b": [18, 12, 5, 5],
         "mistral_7b": [18, 12, 5, 5],  # GQA: 4x smaller KV, all of these fit even at B64
         # 152k-vocab lm_head is built fp32 then halved: 3118 MiB of the last
         # 5GB slice for a moment, leaving room for 3 layers at most.
