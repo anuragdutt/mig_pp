@@ -275,6 +275,19 @@ class TwoNodePlanning(_Box):
         # check without --node: config-level checks only.
         self.assertEqual(self.plan2()["node"], "A")
 
+    def test_head_only_model_keeps_its_head_only_splits(self):
+        # Explicit layer_limits must not force a layer onto Qwen's last rank:
+        # same min_last_rank_layers as on one node (layer_limits.HEAD_ONLY_LAST_RANK).
+        edit = lambda t: t.replace('"vicuna_7b": dict(path="' + str(self.tmp / "models" / "vicuna_7b") + '", '
+                                   'layer_limits=[18, 12, 5, 5]',
+                                   '"qwen_7b": dict(path="' + str(self.tmp / "models" / "qwen_7b") + '", '
+                                   'layer_limits=[16, 8, 4, 2]')
+        job = self.plan2(edit, node="A")["lanes"][0]["jobs"][0]["job"]
+        self.assertEqual((job["model_key"], job["min_last_rank_layers"]), ("qwen_7b", 0))
+        self.assertEqual(job["splits"], ec.generate_layer_splits(
+            28, [16, 8, 4, 2], [20, 10, 5, 5], True, 0, ["A", "A", "B", "B"]))
+        self.assertTrue(any(s[-1] == 0 for s in job["splits"]))
+
     def test_plan_needs_node_and_rejects_mixed_forms(self):
         self.assertIn("pass --node A or --node B", self.problems2(need_node=True))
         self.assertIn("--node 'C' is not in NODES", self.problems2(node="C"))

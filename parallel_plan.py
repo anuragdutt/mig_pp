@@ -404,6 +404,11 @@ def _build_two_node(ns, config_path, smoke, node):
         job_id = f"{lane_id}/{nn:02d}_{key}"
         prefix = f"migpp_{safe_id}j{nn:02d}"  # run id ends in _<node>: the nodes never share one
         s = {**sweep, **models[key]}  # SWEEP < MODELS[key]
+        # layer_limits is always explicit here, which _finish_job reads as "last
+        # rank holds at least 1 layer". A head-only model (Qwen's huge lm_head)
+        # needs 0, as on one node: without it Qwen-7B silently loses its
+        # head-only splits and Qwen-14B ([.., 0]) admits none at all.
+        s.setdefault("min_last_rank_layers", 0 if key in layer_limits.HEAD_ONLY_LAST_RANK else 1)
         model_dir, mc = info[key]
         job = dict(
             {k: s[k] for k in SWEEP_DEFAULTS}, **{k: mc[k] for k in MODEL_FIELDS},

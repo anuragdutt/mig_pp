@@ -40,7 +40,12 @@ PLACEMENT = [
 # required. A slice's capacity does not depend on which node it sits in, so the
 # single-GPU 20_10_5_5 caps of layer_limits.py carry over.
 MODELS = {
-    "vicuna_7b": dict(path=f"{MODEL_ROOT}/vicuna-7b-v1.5", layer_limits=[28, 12, 5, 5]),
+    # Done 2026-10-20 (run 20261018_203822): the widened reference sweep.
+    # "vicuna_7b": dict(path=f"{MODEL_ROOT}/vicuna-7b-v1.5", layer_limits=[28, 12, 5, 5]),
+    # Widened like Vicuna: rank 0 may take all but 1 + 1 layers (26 of 28; the
+    # last rank can be head-only). Ranks 1-3 keep the 20_10_5_5 caps; the
+    # 152k-vocab lm_head leaves the last 5GB slice room for 3 layers at most.
+    "qwen_7b": dict(path=f"{MODEL_ROOT}/Qwen2.5-7B", layer_limits=[26, 12, 5, 3]),
 }
 
 SWEEP = dict(
@@ -49,7 +54,7 @@ SWEEP = dict(
     max_runs=None,
     enforce_slice_ordering=True,
     batch_mb_pairs=[
-        (8, 4), (8, 2),
+        # (8, 4), (8, 2),
         (16, 8), (16, 4), (16, 2),
         (32, 16), (32, 8), (32, 4), (32, 2),
     ],
