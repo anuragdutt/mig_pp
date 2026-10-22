@@ -45,7 +45,19 @@ MODELS = {
     # Widened like Vicuna: rank 0 may take all but 1 + 1 layers (26 of 28; the
     # last rank can be head-only). Ranks 1-3 keep the 20_10_5_5 caps; the
     # 152k-vocab lm_head leaves the last 5GB slice room for 3 layers at most.
-    "qwen_7b": dict(path=f"{MODEL_ROOT}/Qwen2.5-7B", layer_limits=[26, 12, 5, 3]),
+    # B16 + B32 done 2026-10-21; this is the B8 remainder.
+    "qwen_7b": dict(path=f"{MODEL_ROOT}/Qwen2.5-7B", layer_limits=[26, 12, 5, 3],
+                    batch_mb_pairs=[(8, 4), (8, 2)]),
+    # Widened like Vicuna-7B (same 32-layer shape, GQA: 4x smaller KV). All 9 pairs.
+    "mistral_7b": dict(path=f"{MODEL_ROOT}/Mistral-7B-Instruct-v0.3", layer_limits=[28, 12, 5, 5]),
+    # Bigger models, widened too: rank 0 uncapped (all but 1 layer per other
+    # rank). Many extreme splits do not fit a 20GB slice at B16/B32; those run
+    # and record OOM_rank0 rows (the 13B/14B memory model is extrapolated, so
+    # the OOM boundary is data too). 13B cannot fit B32 at all: B8 + B16 only.
+    "vicuna_13b": dict(path=f"{MODEL_ROOT}/vicuna-13b-v1.5", layer_limits=[37, 12, 5, 5],
+                       batch_mb_pairs=[(8, 4), (8, 2), (16, 8), (16, 4), (16, 2)]),
+    # Head-only last rank (152k-vocab lm_head): the planner sets min_last_rank_layers=0.
+    "qwen_14b": dict(path=f"{MODEL_ROOT}/Qwen2.5-14B", layer_limits=[46, 15, 7, 0]),
 }
 
 SWEEP = dict(
@@ -53,10 +65,10 @@ SWEEP = dict(
     max_new_tokens=512,
     max_runs=None,
     enforce_slice_ordering=True,
-    batch_mb_pairs=[
+    batch_mb_pairs=[  # default for every model; an entry's own batch_mb_pairs wins
         (8, 4), (8, 2),
-        # (16, 8), (16, 4), (16, 2),
-        # (32, 16), (32, 8), (32, 4), (32, 2),
+        (16, 8), (16, 4), (16, 2),
+        (32, 16), (32, 8), (32, 4), (32, 2),
     ],
 )
 
