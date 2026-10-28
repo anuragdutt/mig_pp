@@ -29,12 +29,24 @@ partitions memory controllers, and on a 40GB A100 a 3g.20gb slice gets 2 of the
 4 HBM stacks, which would be 1/2. Slice mode settles this by measurement. Run it
 once per slice geometry and paste the measured fractions into SLICE_FRAC.
 
+  NET MODE   (--mode net --node A|B, run on BOTH nodes of a two-node setup)
+      Measures the cross-node hop the single-box constants do not cover: the
+      pinned host buffer going over gloo TCP to the other machine (a network
+      hop replaces the SHM memcpy legs), and the per-step next_tokens transfer
+      when the last rank and rank 0 sit on different nodes. Reads NODES and
+      PLACEMENT from two_node_config.py. CPU only: run it between sweeps, not
+      during one (a running sweep shares the NIC and skews the numbers).
+
 Usage:
     # once, on the unpartitioned GPU
     python3 measure_constants.py --mode full
 
     # once per slice geometry (MIG enabled)
     CUDA_VISIBLE_DEVICES=<mig_uuid> python3 measure_constants.py --mode slice
+
+    # two nodes, started at about the same time on each
+    python3 measure_constants.py --mode net --node A     # node A (holds rank 0)
+    python3 measure_constants.py --mode net --node B     # node B
 
 What FULL mode measures, and which constant it feeds:
 
@@ -48,6 +60,18 @@ What FULL mode measures, and which constant it feeds:
     MEMCPY_BW           host-to-host memcpy (SHM path)     -> transport both legs
     HANDOFF_FIXED_US    cuda.sync drain + handshake        -> transport fixed cost
     TOK_ROUNDTRIP_US    tiny blocking send/recv round-trip -> per-step feedback
+
+What NET mode measures (cross-node only):
+
+    NET_FIXED_US        per-message cost of a gloo TCP send -> cross-node hop fixed cost
+    NET_BW              gloo TCP payload bandwidth          -> cross-node hop bytes term
+                        (both fitted over decode- and prefill-sized activations:
+                         one_way_time = NET_FIXED_US + bytes / NET_BW)
+    TOK_NET_US          next_tokens one-way across nodes    -> per-step feedback when
+                                                               last rank and rank 0
+                                                               are on different nodes
+    On a cross-node hop the send leg is still GPU -> pinned (PCIE_BW_PINNED) and
+    the receive leg pinned -> GPU; the network replaces the SHM memcpy legs.
 
 NOTE ON EFF_ACT:
     Decode activation traffic is dominated by the KV-cache read, which grows
@@ -82,6 +106,14 @@ EFF_ACT_CTXS = [64, 128, 192, 320, 448, 576]
 
 # microbatch size to use for the transport measurements (payload scale)
 TRANSPORT_MB = 16
+
+# Net mode only. The two-node config (NODES, PLACEMENT), relative to this file:
+# it sits at the repo root.
+TWO_NODE_CONFIG = "../../two_node_config.py"
+NET_PORT = 29980  # apart from the sweep (29600+, 29900+) and the probe (29990/1)
+NET_TIMEOUT_S = 600  # gloo init + any one message; also how long a node waits for the other
+NET_MBS = [1, 2, 4, 8, 16, 32]  # microbatch sizes: payload = mb x tokens x HIDDEN x 2 bytes
+NET_TOKEN_BATCHES = [8, 16, 32]  # next_tokens is (batch, 1) int64
 
 # ---- imports ----
 import os
@@ -610,6 +642,104 @@ def run_slice_mode(full_achieved_bw=None):
 
 
 # ---------------------------------------------------------------------------
+# NET MODE -- the cross-node hop, measured across the real link.
+#
+# Two processes, one per node, in a gloo group exactly as the pipeline builds
+# it (rendezvous on the lead's address, GLOO_SOCKET_IFNAME = the private NIC).
+# Every measurement is a ping-pong: A sends, B receives and sends the same
+# message back, so one_way = round_trip / 2 needs no synchronized clocks. The
+# pipeline posts its receives early, and so does a ping-pong (the peer is
+# already waiting), so this is the hop the pipeline sees.
+#
+# CPU tensors: gloo sends the host buffer either way, and page-locking does not
+# change TCP throughput. The GPU<->pinned legs are PCIE_BW_PINNED, from full mode.
+# ---------------------------------------------------------------------------
+def _pingpong_one_way_s(dist, rank, tensor, reps):
+    for _ in range(WARMUP):
+        if rank == 0:
+            dist.send(tensor, dst=1)
+            dist.recv(tensor, src=1)
+        else:
+            dist.recv(tensor, src=0)
+            dist.send(tensor, dst=0)
+    dist.barrier()
+    t0 = time.perf_counter()
+    for _ in range(reps):
+        if rank == 0:
+            dist.send(tensor, dst=1)
+            dist.recv(tensor, src=1)
+        else:
+            dist.recv(tensor, src=0)
+            dist.send(tensor, dst=0)
+    return (time.perf_counter() - t0) / reps / 2
+
+
+def run_net_mode(node):
+    import datetime
+    import runpy
+    import torch.distributed as dist
+
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), TWO_NODE_CONFIG)
+    ns = runpy.run_path(path)
+    nodes, placement = ns["NODES"], ns["PLACEMENT"]
+    lead = placement[0][0]  # the node holding rank 0
+    names = sorted({p[0] for p in placement})
+    if node not in names:
+        raise SystemExit(f"--node {node!r}: PLACEMENT uses nodes {names}")
+    rank = 0 if node == lead else 1
+
+    os.environ["MASTER_ADDR"] = nodes[lead]["addr"]
+    os.environ["MASTER_PORT"] = str(NET_PORT)
+    os.environ["GLOO_SOCKET_IFNAME"] = nodes[node]["ifname"]
+    print(f"Node {node} (rank {rank}); rendezvous {nodes[lead]['addr']}:{NET_PORT}, "
+          f"NIC {nodes[node]['ifname']}. Waiting up to {NET_TIMEOUT_S}s for the other node...")
+    dist.init_process_group("gloo", rank=rank, world_size=2,
+                            timeout=datetime.timedelta(seconds=NET_TIMEOUT_S))
+    print()
+
+    # 1. activations: decode (1 token) and prefill (SEQ_LEN tokens) payloads
+    print("[1/2] gloo payload one-way time (ping-pong / 2)...")
+    print(f"      {'kind':>7} {'mb':>4} {'bytes':>12} {'one_way_us':>12} {'GB/s':>8}")
+    xs, ys = [], []
+    for kind, tokens in (("decode", 1), ("prefill", SEQ_LEN)):
+        for mb in NET_MBS:
+            nbytes = mb * tokens * HIDDEN * 2
+            t = torch.zeros(nbytes // 2, dtype=torch.float16)
+            reps = max(10, min(REPEATS, int(4e8 // nbytes)))  # ~0.4 GB per size
+            s = _pingpong_one_way_s(dist, rank, t, reps)
+            xs.append(nbytes)
+            ys.append(s)
+            print(f"      {kind:>7} {mb:4d} {nbytes:12d} {s * 1e6:12.1f} {nbytes / s / 1e9:8.2f}")
+    slope, intercept = statistics.linear_regression(xs, ys)
+    net_bw, net_fixed_us = 1.0 / slope, intercept * 1e6
+    print(f"      fit: one_way = {net_fixed_us:.1f} us + bytes / {net_bw / 1e9:.2f} GB/s")
+    print()
+
+    # 2. next_tokens: (batch, 1) int64, one blocking send per decode step
+    print("[2/2] next_tokens one-way across nodes...")
+    tok_us = {}
+    for b in NET_TOKEN_BATCHES:
+        tok = torch.zeros((b, 1), dtype=torch.long)
+        tok_us[b] = _pingpong_one_way_s(dist, rank, tok, REPEATS) * 1e6
+        print(f"      batch {b:3d}: {tok_us[b]:.1f} us")
+    print()
+
+    dist.barrier()
+    dist.destroy_process_group()
+
+    print("=" * 62)
+    print("Cross-node constants (same on both nodes, up to noise):")
+    print(f"  NET_FIXED_US = {net_fixed_us:.1f}")
+    print(f"  NET_BW       = {net_bw:.3e}   # bytes/s")
+    print(f"  TOK_NET_US   = {max(tok_us.values()):.1f}   # one-way, worst of the batches above")
+    print()
+    print(f"Per hop: GPU->pinned (PCIE_BW_PINNED) + NET_FIXED_US + bytes/NET_BW")
+    print(f"         + pinned->GPU. HIDDEN={HIDDEN} sized the payloads; set it for")
+    print(f"         other models, or rescale: the fit is per byte.")
+    print("=" * 62)
+
+
+# ---------------------------------------------------------------------------
 # MAIN
 # ---------------------------------------------------------------------------
 def run_full_mode():
@@ -704,11 +834,13 @@ def main():
     )
     ap.add_argument(
         "--mode",
-        choices=["full", "slice"],
+        choices=["full", "slice", "net"],
         default="full",
         help="full: hardware properties on the whole GPU (default). "
-        "slice: calibrate one MIG slice's bandwidth fraction.",
+        "slice: calibrate one MIG slice's bandwidth fraction. "
+        "net: the cross-node hop, run on both nodes with --node.",
     )
+    ap.add_argument("--node", help="net mode: this node's name in two_node_config.py")
     ap.add_argument(
         "--full-achieved",
         type=float,
@@ -727,6 +859,10 @@ def main():
             print("         normalized by A100_BW and come out ~slice_frac too low.")
             print()
         run_full_mode()
+    elif args.mode == "net":
+        if not args.node:
+            raise SystemExit("--mode net needs --node A or --node B")
+        run_net_mode(args.node)
     else:
         run_slice_mode(full_achieved_bw=args.full_achieved)
 

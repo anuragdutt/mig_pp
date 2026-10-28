@@ -251,7 +251,9 @@ run_dir_arg() { # [dir] -> run dir (default: the active run, else runs/latest)
 
 cmd_stop() {
     local run_dir mpid i=0
-    run_dir=$(run_dir_arg "${1:-}")
+    # die() inside $(...) only ends the subshell: stop here, or stop_lanes
+    # would run on an empty path (touch /STOP, read /lanes.txt).
+    run_dir=$(run_dir_arg "${1:-}") || exit 1
     mpid=$(first_line "$run_dir/manager.pid")
     [ -n "$mpid" ] && kill -TERM "$mpid" 2>/dev/null
     stop_lanes "$run_dir"
@@ -263,7 +265,7 @@ cmd_stop() {
 case "${1:-help}" in
     start) shift; cmd_start 0 "$@" ;;
     smoke) shift; cmd_start 1 "$@" ;;
-    status) "$PYTHON" "$PLANNER" report "$(run_dir_arg "${2:-}")" ;;
+    status) d=$(run_dir_arg "${2:-}") || exit 1; "$PYTHON" "$PLANNER" report "$d" ;;
     stop) cmd_stop "${2:-}" ;;
     check) shift; "$PYTHON" "$PLANNER" check "$@" ${NODE_ARGS[@]+"${NODE_ARGS[@]}"} ;;
     discover) shift; "$PYTHON" "$PLANNER" discover "$@" ;;
