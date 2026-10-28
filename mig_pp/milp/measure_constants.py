@@ -540,21 +540,33 @@ def run_slice(c, name):
     launch_us = layer_dispatch_us(layer, rotary, c["transport_mb"], c["seq_len"]) / kpl
     w_us = weight_bytes_per_layer() / rate * 1e6
     launch_term = kpl * launch_us
+    # Two forms, as in whole-GPU mode. Kernel time is the profiler's summed kernel
+    # durations (launch gaps excluded), so subtracting the CPU launch term as well
+    # (the ILP form) often leaves nothing; the no-launch form is the usable one then.
     print(f"\neff_act: weight time {w_us:.0f} us, launch term {launch_term:.0f} us "
           f"({kpl} kernels x {launch_us:.1f} us)")
-    print(f"  {'mb':>3} {'ctx':>4} {'kernel us':>10} {'act GB/s':>9}   ILP form vs card / GPC / mem")
-    act_b, act_t = 0.0, 0.0
+    print(f"  {'mb':>3} {'ctx':>4} {'kernel us':>10} {'ILP GB/s':>9} {'no-launch GB/s':>15}"
+          f"   no-launch vs card / GPC / mem")
+    sums = {"ilp": [0.0, 0.0], "nl": [0.0, 0.0]}  # bytes, seconds
     for mb in c["mbs"]:
         for ctx in c["ctxs"]:
             _, t = layer_kernel_us(layer, rotary, mb, ctx)
-            b, left = mb * act_bytes_per_token(ctx), (t - w_us - launch_term) * 1e-6
-            if left > 0:
-                act_b, act_t = act_b + b, act_t + left
-                print(f"  {mb:3d} {ctx:4d} {t:10.0f} {b / left / 1e9:9.1f}   {effs(b / left)}")
-            else:
-                print(f"  {mb:3d} {ctx:4d} {t:10.0f} {'-':>9}   (no time left after weights + launches)")
-    act_rate = act_b / act_t if act_t else float("nan")
-    print(f"  time-equivalent {act_rate / 1e9:.1f} GB/s   {effs(act_rate)}")
+            b = mb * act_bytes_per_token(ctx)
+            cols = []
+            for key, left in (("ilp", (t - w_us - launch_term) * 1e-6), ("nl", (t - w_us) * 1e-6)):
+                if left > 0:
+                    sums[key][0] += b
+                    sums[key][1] += left
+                    cols.append(b / left)
+                else:
+                    cols.append(None)
+            fmt = [f"{r / 1e9:.1f}" if r else "-" for r in cols]
+            tail = effs(cols[1]) if cols[1] else "(no time left after the weights)"
+            print(f"  {mb:3d} {ctx:4d} {t:10.0f} {fmt[0]:>9} {fmt[1]:>15}   {tail}")
+    act_rate = sums["ilp"][0] / sums["ilp"][1] if sums["ilp"][1] else float("nan")
+    act_rate_nl = sums["nl"][0] / sums["nl"][1] if sums["nl"][1] else float("nan")
+    print(f"  time-equivalent ILP form  {act_rate / 1e9:.1f} GB/s   {effs(act_rate)}")
+    print(f"  time-equivalent no-launch {act_rate_nl / 1e9:.1f} GB/s   {effs(act_rate_nl)}")
 
     # copies: this slice's copy engines
     dec = c["transport_mb"] * HIDDEN * 2
@@ -590,7 +602,8 @@ def run_slice(c, name):
     print(f"\n# measured on {name}, {os.path.basename(os.path.expanduser(c['model_path']))}")
     print(f"""SLICE_CONSTANTS["{profile}"] = dict(
     weight_rate={rate:.3g},  # bytes/s; eff_weight {three(rate)}
-    act_rate={act_rate:.3g},  # bytes/s; eff_act {three(act_rate)}
+    act_rate={act_rate:.3g},  # bytes/s, ILP form; eff_act {three(act_rate)}
+    act_rate_no_launch={act_rate_nl:.3g},  # bytes/s; eff_act {three(act_rate_nl)}
     pcie_bw={d2h:.3g},
     recv_h2d_bw={h2d:.3g},
     launch_us={launch_us:.1f},
