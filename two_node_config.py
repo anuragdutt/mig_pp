@@ -49,18 +49,18 @@ MODELS = {
     # Standard 20_10_5_5 caps (layer_limits.py). Latency depends on shape, not
     # weights: Llama-2-7B/13B have Vicuna-7B/13B's shapes, so they get a B8
     # spot-check only. Order = priority: a job cut by the lease loses its CSV.
-    # 1. Head-only last rank (152k-vocab lm_head): the planner sets
-    #    min_last_rank_layers=0. Fits B32 (GQA). ~8 h.
-    "qwen_14b": dict(path=f"{MODEL_ROOT}/Qwen2.5-14B", layer_limits=[30, 15, 7, 0]),
-    # 2. 13B cannot fit B32 on this layout: B8 + B16. ~8 h.
-    "vicuna_13b": dict(path=f"{MODEL_ROOT}/vicuna-13b-v1.5", layer_limits=[23, 12, 5, 5],
-                       batch_mb_pairs=[(8, 4), (8, 2), (16, 8), (16, 4), (16, 2)]),
+    # 1. Done 2026-10-29. Head-only last rank (152k-vocab lm_head): the planner
+    #    sets min_last_rank_layers=0. Fits B32 (GQA).
+    # "qwen_14b": dict(path=f"{MODEL_ROOT}/Qwen2.5-14B", layer_limits=[30, 15, 7, 0]),
+    # 2. Done 2026-10-29. 13B cannot fit B32 on this layout: B8 + B16.
+    # "vicuna_13b": dict(path=f"{MODEL_ROOT}/vicuna-13b-v1.5", layer_limits=[23, 12, 5, 5],
+    #                    batch_mb_pairs=[(8, 4), (8, 2), (16, 8), (16, 4), (16, 2)]),
     # 3. Spot-check: should match vicuna_13b's B8 rows. ~3 h.
-    # "llama_13b": dict(path=f"{MODEL_ROOT}/llama-2-13b-hf", layer_limits=[23, 12, 5, 5],
-    #                   batch_mb_pairs=[(8, 4), (8, 2)]),
+    "llama_13b": dict(path=f"{MODEL_ROOT}/llama-2-13b-hf", layer_limits=[23, 12, 5, 5],
+                      batch_mb_pairs=[(8, 4), (8, 2)]),
     # 4. Spot-check: should match vicuna_7b's B8 rows on the standard splits. ~3 h.
-    # "llama_7b": dict(path=f"{MODEL_ROOT}/llama-2-7b-hf", layer_limits=[18, 12, 5, 5],
-    #                  batch_mb_pairs=[(8, 4), (8, 2)]),
+    "llama_7b": dict(path=f"{MODEL_ROOT}/llama-2-7b-hf", layer_limits=[18, 12, 5, 5],
+                     batch_mb_pairs=[(8, 4), (8, 2)]),
 
     # --- next lease (~10 days): extreme splits for the big models ---
     # "vicuna_13b": dict(path=f"{MODEL_ROOT}/vicuna-13b-v1.5", layer_limits=[37, 12, 5, 5],
