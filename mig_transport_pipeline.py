@@ -89,6 +89,26 @@ NUM_SLOTS = 48
 # ACK tag is tag + ACK_TAG_OFFSET so it never collides with normal handshakes
 ACK_TAG_OFFSET = 10_000_000
 
+# SHM segment names are "<prefix>_<rank>_slot<slot>". The prefix used to be the
+# fixed "mig_pipe_shm", which is only safe while ONE pipeline runs on the box:
+# a second one would unlink the first's live segments on startup (the stale-
+# entry cleanup below), attach its peers to the wrong run's slots, and unlink
+# them again in cleanup(). run_parallel.sh gives every job its own prefix via
+# MIG_SHM_PREFIX (see experiment_config.SHM_PREFIX_ENV_VAR); unset keeps the
+# legacy names, so a standalone run is unchanged.
+#
+# Read at engine construction, not import: the benchmark sets the variable in
+# its config block, after this module is already imported.
+_LEGACY_SHM_PREFIX = "mig_pipe_shm"
+
+
+def _shm_prefix() -> str:
+    return os.environ.get("MIG_SHM_PREFIX") or _LEGACY_SHM_PREFIX
+
+
+def _slot_name(prefix: str, rank: int, slot: int) -> str:
+    return f"{prefix}_{rank}_slot{slot}"
+
 # Control-message tag window (TOKENS_TAG_BASE .. +999 in the benchmark).
 # Currently unused: ALL blocking sends go direct to gloo, so no tag test is
 # needed. Retained for a future blocking SHM path — see the commented
@@ -126,10 +146,14 @@ class MIGPipelineTransport:
         # Each slot holds raw bytes for largest tensor.
         self.slot_size = buffer_size_mb * 1024 * 1024
 
+        # Fixed for this engine's lifetime: creation, peer attach and
+        # cleanup() must all agree on the names.
+        self.shm_prefix = _shm_prefix()
+
         _tlog.info(
             "[T01][rank%d] init transport: world_size=%d num_slots=%d "
             "slot_size=%dMB (host cost: %dMB SHM + %dMB pinned send + "
-            "%dMB pinned recv)",
+            "%dMB pinned recv) shm_prefix=%s",
             rank,
             world_size,
             num_slots,
@@ -137,6 +161,7 @@ class MIGPipelineTransport:
             num_slots * buffer_size_mb,
             num_slots * buffer_size_mb,
             num_slots * buffer_size_mb,
+            self.shm_prefix,
         )
         print(
             f"[MIG-Pipe] Rank {rank} initializing transport "
@@ -150,7 +175,7 @@ class MIGPipelineTransport:
         self.slot_free = [True] * num_slots
 
         for slot in range(num_slots):
-            name = f"mig_pipe_shm_{rank}_slot{slot}"
+            name = _slot_name(self.shm_prefix, rank, slot)
 
             # Clean stale /dev/shm entries if present
             try:
@@ -245,7 +270,7 @@ class MIGPipelineTransport:
 
             self.peer_slots[peer_rank] = []
             for slot in range(num_slots):
-                peer_name = f"mig_pipe_shm_{peer_rank}_slot{slot}"
+                peer_name = _slot_name(self.shm_prefix, peer_rank, slot)
                 connected = False
                 attempts = 0
 
@@ -644,48 +669,50 @@ class MIGPipelineTransport:
             "slot_spins": self.stat_slot_spins,
         }
 
-        _tlog.info("[T22][rank%d] ===== TRANSPORT SUMMARY %s =====", self.rank, label)
-        _tlog.info(
-            "[T23][rank%d] D2H flush block: mean=%.2fms total=%.1fms over %d sends",
+        _tlog.warning(
+"[T22][rank%d] ===== TRANSPORT SUMMARY %s =====", self.rank, label)
+        _tlog.warning(
+"[T23][rank%d] D2H flush block: mean=%.2fms total=%.1fms over %d sends",
             self.rank,
             stats["flush_block_mean_ms"],
             stats["flush_block_total_ms"],
             stats["flush_count"],
         )
-        _tlog.info(
-            "[T24][rank%d] H2D recv block:  mean=%.2fms total=%.1fms over %d recvs",
+        _tlog.warning(
+"[T24][rank%d] H2D recv block:  mean=%.2fms total=%.1fms over %d recvs",
             self.rank,
             stats["h2d_block_mean_ms"],
             stats["h2d_block_total_ms"],
             stats["h2d_count"],
         )
-        _tlog.info(
-            "[T25][rank%d] handshake wait:  mean=%.2fms over %d recvs "
+        _tlog.warning(
+"[T25][rank%d] handshake wait:  mean=%.2fms over %d recvs "
             "(large = upstream slower than us, not a transport problem)",
             self.rank,
             stats["handshake_wait_mean_ms"],
             stats["handshake_count"],
         )
-        _tlog.info(
-            "[T26][rank%d] ACK wait:        mean=%.2fms over %d sends "
+        _tlog.warning(
+"[T26][rank%d] ACK wait:        mean=%.2fms over %d sends "
             "(remaining wait at drain; receives start during flush and "
             "ACK only after downstream H2D completes)",
             self.rank,
             stats["ack_wait_mean_ms"],
             stats["ack_count"],
         )
-        _tlog.info(
-            "[T27][rank%d] slot pool spins: %d (nonzero = pool undersized)",
+        _tlog.warning(
+"[T27][rank%d] slot pool spins: %d (nonzero = pool undersized)",
             self.rank,
             stats["slot_spins"],
         )
 
         # Verdict line — the one thing to grep for.
         if self.stat_flush_count == 0:
-            _tlog.info("[T28][rank%d] VERDICT: no async sends on this rank", self.rank)
+            _tlog.warning(
+"[T28][rank%d] VERDICT: no async sends on this rank", self.rank)
         elif stats["flush_block_mean_ms"] < 1.0:
-            _tlog.info(
-                "[T29][rank%d] VERDICT: OVERLAP WORKING — D2H hidden under "
+            _tlog.warning(
+"[T29][rank%d] VERDICT: OVERLAP WORKING — D2H hidden under "
                 "compute (mean block %.2fms)",
                 self.rank,
                 stats["flush_block_mean_ms"],
@@ -719,7 +746,27 @@ def setup_transport_logging(log_dir: str = "logs", run_label: str = "") -> str:
     The timestamp is generated by the PARENT and passed in via run_label so
     all four ranks land in one file. If run_label is empty, each process
     would otherwise create its own file, so a shared env var is used.
+
+    Verbosity, lowest to highest:
+
+      MIG_LOG_LEVEL=off        no file, no handler — nothing is written
+      MIG_LOG_LEVEL=summary    end-of-run summaries only (T22-T29)
+      (default)                per-microbatch INFO (T13/T15/T22-T32)
+      MIG_LOG_DEBUG=1          adds DEBUG (T13a/T14/T16/T20b)
+
+    A long sweep writes ~25k INFO lines per config, so `summary` keeps the
+    per-config numbers the analysis actually reads while dropping the
+    per-microbatch flood. `off` is for when even that is unwanted.
     """
+    level_env = os.environ.get("MIG_LOG_LEVEL", "").strip().lower()
+
+    if level_env == "off":
+        _tlog.handlers.clear()
+        _tlog.addHandler(logging.NullHandler())
+        _tlog.setLevel(logging.CRITICAL + 1)
+        _tlog.propagate = False
+        return ""
+
     os.makedirs(log_dir, exist_ok=True)
 
     # All ranks must agree on the filename. The parent sets this env var
@@ -739,9 +786,18 @@ def setup_transport_logging(log_dir: str = "logs", run_label: str = "") -> str:
         )
     )
 
+    if level_env == "summary":
+        # T22-T29 are emitted at WARNING (see log_summary) so they survive
+        # this filter; the per-microbatch T13/T15/T32 lines do not.
+        level = logging.WARNING
+    elif os.environ.get("MIG_LOG_DEBUG"):
+        level = logging.DEBUG
+    else:
+        level = logging.INFO
+
     _tlog.handlers.clear()
     _tlog.addHandler(handler)
-    _tlog.setLevel(logging.DEBUG if os.environ.get("MIG_LOG_DEBUG") else logging.INFO)
+    _tlog.setLevel(level)
     # Don't double-log into the root logger's benchmark.log
     _tlog.propagate = False
 
@@ -775,7 +831,8 @@ def cleanup():
     own_names = set()
     if engine is not None:
         own_names = {
-            f"mig_pipe_shm_{engine.rank}_slot{s}" for s in range(engine.num_slots)
+            _slot_name(engine.shm_prefix, engine.rank, s)
+            for s in range(engine.num_slots)
         }
 
     for shm in _MIG_SHM_HANDLES:

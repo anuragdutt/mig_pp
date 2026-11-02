@@ -15,8 +15,14 @@ Corollary: make anything the user runs self-contained and one-shot. Every round 
 costs a copy-paste, so front-load diagnostics and make one run answer as many
 questions as possible.
 
-**No local torch.** Neither system `python3` nor `.venv` has it. Nothing in
-`tests/` can be executed on the Mac — it all runs on the box.
+**Local torch is CPU-only and partial.** `.venv` has torch 2.14.0 (CPU build) but
+no transformers/numpy/datasets/pandas; system `python3` has none of them. The
+torch-free suites run on the Mac (see the parallel-runner section). For torch-level
+checks, install the pinned transformers into the scratchpad, not the venv:
+`.venv/bin/python -m pip install --target <scratch>/pylib transformers==5.14.1
+safetensors==0.8.0 numpy tqdm`, then `PYTHONPATH=<scratch>/pylib` (in zsh write
+`${LIB}:tests`, not `$LIB:tests` — `:t` is a zsh modifier). Anything needing
+CUDA, MIG or gloo across slices still only runs on the box.
 
 **Permission gate on benchmark edits.** A probe or test whose cases all pass is
 required *before* modifying benchmark files. This was set after Claude patched
@@ -28,6 +34,177 @@ They are harness overhead, not a property of the configuration being swept.
 
 **Stay on harness and experiment setup.** The user builds the predictive model. No
 equation modelling unless explicitly asked.
+
+## State as of 2026-10-09 — MILP placement rewritten for the current harness (uncommitted)
+
+The user brought the ILP back on 10/07 ("optimize the ILP as per our new harness").
+`mig_pp/milp/pulp_layer_placement.py` models the current harness from the code, not fit
+to data. The user wants **simple, convenient code for now (plain functions + dicts, no
+classes, hardcoded config in `main()`); they will tidy it later** -- keep it that way.
+- **Per-step schedule = a longest-path event graph** (`step_graph`, documented in the
+  module docstring): D2H queued on copy_stream, FLUSH(k-1) after RECV(k)+LAUNCH(k)
+  (publish one behind), ACK irecv posted before the handshake, pinned H2D on recv_stream,
+  TokenExchange; the final decode step ends at the barrier, so the last rank's queued GPU
+  work is outside rank 0's window. Neither the old serial chain nor GPipe holds: with free
+  transport N=2 gives C0 + sum max(C_s, C_s+1) + C_last. Two independent derivations from
+  the code agreed; a program-order simulator in the tests agrees on random instances.
+  gloo send measured locally as a rendezvous. transformers 5.18.0's decode path has no
+  host sync for these models (default RoPE, `DynamicCache()` without config).
+- **MILP**: integer layer counts per rank, one variable per event, one >= per edge; decode
+  sampled at 8 contexts (vs every step < 1e-4); `predict_ms` evaluates every step. The best
+  split depends on mb, so solve per (batch, mb); <= ~6 s at N=32. Equals brute force.
+  Space = everything within `memory_limits` caps (>= 1 layer per rank, last rank
+  `min_last_rank_layers`); no sweep caps/ordering rule (the user runs all theoretical
+  splits first and adjusts the ILP from the data).
+- **Config**: `CONFIG` dict in `main()` (model key, `slice_gb`, `card`, pairs, ...);
+  `validate_layout(slice_gb, card)` takes the card from the caller (no lookup, 5/10/20/40GB
+  on A100-40GB, 10/20/40/80GB on A100-80GB). Constants are the `DEFAULT_CONSTANTS` dict
+  (placeholders until measure_constants.py is run; its JSON is not loaded any more).
+  Bandwidth of a slice = card peak x GPCs/7. Bytes are measure_constants' own (a test
+  execs its functions); the KV `torch.cat` re-copy and ctx+1 read are absorbed by the
+  calibrated EFF_ACT -- do not add them to the bytes.
+- Not modelled: per-config cold start inside the window, copy-engine/PCIe and NUMA-core
+  sharing, slice compute vs bandwidth scaling. Assumes `MIG_LOG_LEVEL=summary`.
+- `validate.py` / `compare.py`: `CONFIG` in `main()` / top of file (csv, card). Oracle and
+  benchmark CSV formats; layout from the `peak_rank*` headers; model from the file or the
+  `NN_<model>` job dir. Q1 error by mb/batch; Q2 per pair: rank of the model's best
+  measured split, Kendall tau, the MILP's free pick. The user runs them on real data.
+- Tests: `tests/test_pulp_layer_placement.py` (18; the MILP ones need PuLP, install it
+  into the scratchpad). A 10/02 attempt sits in `stash@{0}` ("ILP": GPipe min-max v2);
+  superseded. Numerical equivalence of the 10/08 class-based version and this one: 384
+  predictions agree to 1e-14.
+
+## State as of 2026-09-30 — 4 x A100-80GB, heavier models (uncommitted)
+
+**The run box is `cc@mig` (repo `~/mig_pp`): 4 x A100-SXM4-80GB**, driver 560.35.05
+(CUDA 12.6 max), MIG disabled as of 9/30. Its venv came with torch `2.14.1+cu130`
+("driver too old (found version 12060)"); now `2.14.1+cu126` from the PyTorch cu126
+index: 4 GPUs, fp16 matmul + SDPA ok. It has **transformers 5.18.0** (not the pinned
+5.14.1): `tests/test_model_family_torch.py` passes against 5.18.0, including a Mistral
+variant with explicit `head_dim` != hidden/heads (Mistral-Small-24B's 128 vs 160).
+Enabling MIG there needs a reboot: `-mig 1` stays pending ("In use by another client")
+and `nvidia-smi -r` is refused even with nothing in `fuser -v /dev/nvidia*` and
+nvidia-persistenced stopped. MIG slices (and so their UUIDs) do not survive a reboot.
+Hard budget: the run must finish in 2.5 days. (`pace@etracker2` was a mix-up: 2 x GTX
+1080 Ti, no MIG; `/data` not writable there, hence `MODEL_ROOT = ~/models`.)
+
+Layout 40/20/10/10 (3g.40gb + 2g.20gb + 1g.10gb + 1g.10gb: the 9/28 compute split,
+twice the memory, ~1.3x the bandwidth, so latencies do not line up with 40GB data).
+GPU time shrank to 2 days (48 h); the user comments out batch pairs by hand and
+checks progress themselves (B64 first). One model per GPU, all 14 batch pairs (the user's call: the 16/32-microbatch pairs were
+only expensive on the pre-ACK-fix harness): vicuna_13b `[22,11,6,6]` 33 splits,
+llama_13b same, qwen_14b `[27,10,9,9]` 31, mistral_24b (Mistral-Small-24B-Base-2501)
+`[22,10,7,5]` 29 = 462/462/434/406 configs. The user dropped nemo_12b for mistral_24b
+and asked for wider small-slice caps than the April 80GB branches' `[24,10,5,5]` /
+`[30,10,4,2]` (5GB-era 5s): the 10GB slices sit at their B64 capacity (13B 6, Qwen 9,
+24B 7/5 -- Qwen's and 24B's last rank within ~300 MiB of the lm_head build peak, and
+the smoke split does not exercise them), 0 OOM predicted; ranks 0-1 narrowed to fit.
+
+Smoke on cc@mig 9/30 (`20260930_215856_smoke`, copied to the Mac as `runs_1/`): VERDICT
+PASS, all 4 jobs. The heavy models' B64 sweep took ~15 h; the 5-config trial
+(one split x splits) had projected 12.2-15.7 h, so that projection holds on this box.
+
+**10/02: 7B sweep, ~12 h left.** GPUs 0-2 run llama_7b / mistral_7b `[18,11,9,7]` (112
+splits) and qwen_7b `[13,12,8,6]` (53), B32 pairs only; GPU 3 runs vicuna_7b with the
+9/28 vector `[18,12,5,5]`: exactly the 9/28 40GB split set (67), so every row has a 40GB
+twin (a test checks it against `mig_benchmark_results_9_28.csv`). Every 7B split fits
+on 40/20/10/10 even at B64; the ordering rule, not memory, caps the small slices.
+`HEAD_ONLY_LAST_RANK` is now per layout (none on 40_20_10_10). 112 splits is ~21 h at
+the 9/28 7B pace (40GB card) -- the user's bet that this box is ~1.75x faster; the
+go/no-go is the first split's time (<= 6.4 min for 112 splits in 12 h).
+(In the end all 8 models were swept at all 14 pairs with 33/33/31/29 and 67/67/67/53
+splits: `../logs/oracle/80gb/40_20_10_10/`, whose folder names do not match their
+contents -- `bigger_models_bs_32_16` holds the 7B runs, `smaller_models_bs_32` the
+heavy ones.)
+
+**10/03: widening, ~24 h, no reruns.** Each 40_20_10_10 vector grew ~1 layer (rank 0,
+or rank 1 for mistral_7b), all within B64 capacity. `done_configs.py` (DONE: layout ->
+model -> split -> measured (batch, mb) pairs) is built by
+`python3 make_done.py ../logs/oracle/80gb/40_20_10_10`; with `RUNNER skip_done=True` the
+planner drops splits measured at all of a job's pairs and prints a NOTE per job. Two
+manual runs, one model per GPU, switched by `RUN = HEAVY` / `RUN = SMALL` in
+`parallel_config.py` (no chaining inside a lane, the user's call), 14 pairs, new splits
+only: heavy 13/13/10/12 = 672 configs (~14 h, Mistral-24B the long pole), then 7B
+12/12/18/12 = 756 configs (~9 h; qwen_7b `[18,6,5,5]`, the front-loaded region;
+mistral_7b `[19,12,5,5]` like llama/vicuna), at the measured per-split times (13B 46.5 min,
+Qwen-14B 53.7, Mistral-24B 70.5, 7B ~29.5 per 14-pair split).
+10/04: the 7B run went with qwen_7b `[16,12,5,5]` (35 new, ~17 h, on GPU 3) because the GPUs
+close 10/05 1 PM EST. Then GPU 3's Qwen job is stopped once GPUs 0-2 finish, and `RUN = NIGHT` runs: llama/
+vicuna/mistral_7b `[20,12,5,5]` (+10 new each) and qwen_7b `[20,12,6,6]` (+60), ~44 GPU-h.
+Each GPU's job list is written out in NIGHT: GPU0 llama then 12 qwen, GPU1 mistral then 12,
+GPU2 vicuna then 13, GPU3 23 qwen (`_qwen_chunks`), ~10.8-11.3 h, done ~10-10:30 AM EST.
+done_configs.py must be rebuilt on the box first (`python3 make_done.py runs/`) so tonight's
+[19,12,5,5] splits are skipped. Started as `runs/20261005_033608` (03:36 UTC = 11:36 PM EST;
+check showed 79 measured / 10 to run per 32-layer 7B, as expected); due ~10:30-11 AM EST.
+The user commented the heavy models out of the 20_10_5_5 (40GB) entries in `30cbd4d`;
+8 fake-box tests need them (all pass with them restored).
+
+Time. April 80GB data (branches `vic-13b-4mig-80gb`, `mistral-24b-4mig-80gb`; pre-ACK-fix
+code): 13B `[24,10,5,5]` x 14 pairs = 34.8 h, 24B 49 splits = 102.6 h; wall - latency
+per config ~80 s (13B), ~141 s (24B). New-harness estimate = 9/28's within-batch
+microbatch profile x each model's April 2-microbatch latency + that overhead: per split
+at 14 pairs 4124 s (13B), 4472 s (24B); x1.15-1.2 for more layers on slow slices ->
+~43 h per lane (April pace: 59-73 h). The 3 high-microbatch pairs are ~1/3 of a split
+on the new harness (46% in April). 14 pairs x the earlier 48/44/35 splits was ~52-63 h:
+over budget. April's `hang` rows were not hangs: `JOIN_TIMEOUT_S = 1200` includes weight
+load and April's (64,2) ran ~20 min; new-harness (64,2) estimate ~600-750 s. April
+maxima give the 80GB slice sizes (40190/19965/9728 MiB): `memory_limits.LAYOUT_MIB`.
+`oracle/80gb/20_10_5_5/` holds these 40/20/10/10 runs despite its name.
+
+## State as of 2026-09-29 — 8-GPU parallel runner (committed `2236a5e`)
+
+Goal: one box, 8 A100s, MIG on each; one **lane per GPU** running that GPU's model
+list sequentially, all lanes at once, nothing shared between lanes. Vicuna-7B is
+done (9/28); the other six models are on GPUs 0-5, Mistral-Nemo-12B on GPU 6, and a
+full Vicuna-7B re-run (same 938 configs as 9/28) on GPU 7 to measure how much the new
+box + eight lanes at once move latency (and to check the recovered 9/28 memory
+mapping against NVML's per-UUID columns). `download_models.py` fetches all eight
+(162.8 GB, one weight format each) into `MODEL_ROOT`; the two Llama-2 repos are gated.
+
+Collisions that made 8 plain copies unsafe (all fixed, all default-preserving):
+
+| Resource | Was | Now |
+|---|---|---|
+| Rendezvous port | `MASTER_PORT="29500"` hardcoded | `MASTER_PORT` constant; per job `base_port + gpu*10` |
+| /dev/shm names | `mig_pipe_shm_{rank}_slot{N}`; startup *unlinks* any existing one | `$MIG_SHM_PREFIX` (`migpp_<run>_g<gpu>j<NN>`); legacy name when unset |
+| Outputs | `benchmark.log`, CSVs, `logs/` in CWD | unchanged code; the manager runs each job with CWD = its job dir |
+| Memory monitor | DCGM: `sudo pkill -f 'dcgmi dmon'`, one group name, GPU 0 hardcoded | `nvml_mem_monitor.py`, per MIG UUID, no sudo; planner refuses DCGM for >1 lane |
+| Model | Llama classes + `.bin` only; other models lived on per-model branches | `model_family.resolve(model_type)` (llama, mistral, qwen2); safetensors + mmap'd `.bin`; `[B08]` coverage line |
+| CPU | unbound | each lane `taskset` to its GPU's NUMA-local CPUs (lanes on a node share them) |
+
+How a job gets its config: `parallel_plan.py` reads each model's `config.json`
+(layers, hidden, type), writes `job.json`, the lane exports `MIG_EXP_CONFIG`, and the
+benchmark's PARALLEL-RUN OVERRIDE block replaces its constants. Unset => standalone
+run exactly as before (`tests/test_benchmark_wiring.py` execs the real config
+section both ways).
+
+Layer limits live in `layer_limits.py` (layout -> model -> per-rank caps, plus
+`HEAD_ONLY_LAST_RANK`). `memory_limits.py` is the theory behind them: fp16 weights +
+KV (x1.10) + context 250 MiB + prefill activations + the embed/lm_head fp32 build
+peak. Calibrated on the 9/28 sweep it predicts 933/938 ok/OOM outcomes, and
+reproduces `mig_pp/profiles/poc_layer_memory.csv` byte-for-byte. `[18,12,5,5]` is
+exactly "rank0 = capacity at B64 - 1, ranks 1-3 = capacity at B32 - 1"; 7B models
+share it, 13B uses the same rule (`[23,12,5,5]`), Qwen keeps a head-only last rank.
+
+`generate_layer_splits` now delegates to `experiment_config` (torch-free), proven
+equal to a frozen copy of the old body (67 splits x 14 = 938 = the 9/28 CSV) and,
+with `min_last_rank_layers=0`, to the qwen-14b branch's generator. The qwen-7b branch
+also allowed a head-only last rank (oracle has `(16,8,4,0)`) — the 9/24 generator
+could not express either.
+
+Gate status: torch-free suites green on Python 3.13 and 3.10, bash 3.2 and 5.3,
+shellcheck clean; `tests/test_model_family_torch.py` (loader + stage maths vs HF,
+3 families x 3 checkpoint formats) green on CPU against transformers 5.14.1.
+**Box side not run yet:** `./run_parallel.sh smoke` is the acceptance gate — one tiny
+config per job on every lane at once, then a PASS/FAIL verdict per job (state ok,
+results rows ok, `[B08] missing=0` per rank, `[T01] shm_prefix=` = the job's prefix per
+rank, memory trace within slice capacity, no /dev/shm leftovers). On the box,
+`python3 -m unittest discover -s tests -p 'test_model_family_torch.py'` also runs
+there on CPU in seconds.
+
+Simplified on 2026-09-29 at the user's request ("get rid of over-engineering"):
+the 2.5k-line preflight is gone (check + smoke cover it), and the planner, NVML
+monitor and manager were cut to what is listed here.
 
 ## State as of 2026-09-24
 
@@ -146,16 +323,45 @@ This was the permission gate for the ACK change, which is now committed.
    (`benchmark_pipeline_microbatching.py:487`, `:592`) but line 547 reads it on every
    rank, so rank 1 sees stale zeros. Probably harmless since only rank 0 feeds embed.
    Flagged, awaiting a decision — not fixed.
-3. **DCGM is unavailable.** Not a rename — `datacenter-gpu-manager` is absent from the
-   box's apt repo entirely; `apt-cache search dcgm` returns only NSCQ libs. `pynvml` is
-   already in the venv and is the proposed fallback. `dcgm_mem_monitor.py` (481 lines,
-   unmodified) would need rewriting behind its existing interface:
-   `setup_dcgm_group(mig_uuids, slice_gb)`, `start()`, `stop()`, `set_label()`,
-   `clear()`, `save_csv(path)`, and `_samples` rows of
-   `(ts, label, gpu_mb, gi0_mb, gi1_mb, gi2_mb)`.
+3. **DCGM: availability varies by box; its rank mapping is wrong where it runs.**
+   It was absent from one box's apt repo, but on the 9/26 box it ran — and fell
+   back to `could not parse DCGM entity ids ... assuming ids 0..3` (see item 5).
+   `nvml_mem_monitor.py` now implements the same interface by MIG UUID; parallel
+   runs use it (`RUNNER mem_monitor="nvml"`). The standalone default is still DCGM.
 4. **MIG on the Autoresearch H100 is blocked.** `CapEff: 0000000000000000` — the
    container has no capabilities, so `nvidia-smi -mig 1` cannot work. Ticket
    `tkt-bx3vt` filed. Log at `logs/h100_mig_enable_probe_2026-09-21.log`.
+
+5. **9/28 memory columns are permuted** (latency and OOM status are fine — those come
+   from the ranks). Recovered mapping, same for peak_*, avg_* and the trace:
+
+   | column | actually holds |
+   |---|---|
+   | `*_rank0_20gb_mb` | rank 2 (5GB) |
+   | `*_rank1_10gb_mb` | rank 3 (5GB, lm_head) |
+   | `*_rank2_5gb_mb` | rank 1 (10GB) |
+   | `*_rank3_5gb_mb` | rank 0 (20GB) |
+
+   Three independent checks: column maxima sit at the true slices' capacities
+   (4861/4863/9983/20085 MB); each rank's layer count correlates most with that
+   column (r 0.51/0.51/0.63/0.84); with equal layers on ranks 2-3, col1-col0 = +203 MB
+   (the 262 MB lm_head) in 184/209 rows. A pure reversal was considered first and is
+   wrong for the two 5GB columns.
+6. **Embed / lm_head are built fp32 on the GPU, then `.half()`** (`nn.Linear(...).to(device).half()`):
+   6 bytes/param at the peak. Harmless for 32k vocabs (750 MiB) but it is what caps
+   Qwen's last 5GB rank — 3118 MiB for Qwen2.5-7B (max 3 layers), 4455 MiB for
+   Qwen2.5-14B (0 layers). Building them in fp16 directly would free ~2/3 of that.
+   Not changed: it would move memory numbers against the 9/28 and oracle data.
+   Awaiting a decision.
+7. **Parallel-run interference is unmeasured.** Lanes are pinned to their GPU's NUMA
+   node (lanes on one node share its cores); host memory bandwidth, PCIe switches
+   (GPU pairs) and page cache are shared. Compare one model solo (`--gpus N`) against the same model
+   in the full run before trusting cross-lane comparisons.
+8. **Results CSV is written only at the end of a job's sweep** (pre-existing). A job
+   killed at config 500/938 loses its rows; `benchmark.log` keeps per-config latency.
+9. **13B at B32/B64 cannot fit on 20/10/5/5 at all** (26 GB weights + KV; the old 13B
+   oracle runs only ever swept B8/B16), so `parallel_config.py` restricts the 13B
+   models to B8/B16 and Qwen2.5-14B to B<=32. Put them back if OOM rows are wanted.
 
 ## Things that cost time before
 
@@ -261,4 +467,19 @@ compute, which is no longer true now that receives are posted during `flush()`.
 | `probe_gloo_send.py` | acceptance gate for the gloo fix (T1–T7) |
 | `probe_recv_buf_race.py` | gate for the recv-buffer + norm fixes (P1–P7) |
 | `tests/test_async_ack.py` | acceptance gate for the ACK fix — never run |
-| `dcgm_mem_monitor.py` | memory sampling; DCGM unavailable, needs a pynvml rewrite |
+| `dcgm_mem_monitor.py` | DCGM memory sampling; GPU 0 only, not parallel-safe, mis-maps ranks (open item 5) |
+| `nvml_mem_monitor.py` | same interface via NVML by MIG UUID; parallel-safe, no sudo |
+| `run_parallel.sh` | bash manager: `discover check smoke start status stop` (+ `--detach`, `--resume`); `stop` only aborts early; one session per lane |
+| `parallel_plan.py` | torch-free planner: validation, run dirs, report, smoke verdict |
+| `parallel_config.py` | which models on which GPU (+ per-model batch overrides); the file you edit |
+| `layer_limits.py` | per-layout, per-model layer caps (dictionary) + head-only-last-rank set |
+| `memory_limits.py` | theoretical per-slice capacity per model/batch; `--validate` against a results CSV |
+| `download_models.py` | fetches every MODELS entry into its configured path (`--check` = access/sizes/disk only) |
+| `experiment_config.py` | job.json schema + the split enumeration (torch-free) |
+| `model_family.py` | model_type -> classes, model path / weight-file discovery (torch-free at import) |
+| `tests/test_run_parallel.py` | end-to-end: real planner + manager + stub benchmark on a fake 8-GPU box |
+| `tests/test_model_family_torch.py` | loader + stage maths vs HF for llama/mistral/qwen2 (skips without transformers) |
+| `mig_pp/milp/pulp_layer_placement.py` | MILP layer placement: per-step longest-path graph of the harness, memory-bound split space, `predict_ms`; plain functions, CONFIG in `main()`; PuLP only to solve |
+| `mig_pp/milp/measure_constants.py` | probes for the MILP's empirical constants (`--mode full` / `--mode slice`, `--json`); copy the numbers into `DEFAULT_CONSTANTS` |
+| `mig_pp/milp/validate.py` / `compare.py` | model vs a results CSV (Q1 accuracy, Q2 split choice per pair), hardcoded CONFIG; the user runs these |
+| `tests/test_pulp_layer_placement.py` | graph vs closed forms and a program-order simulator, MILP vs brute force, bytes vs measure_constants |
