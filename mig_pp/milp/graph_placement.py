@@ -73,42 +73,17 @@ from functools import lru_cache
 import pulp
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import memory_limits  # noqa: E402
+import hardware_constants  # noqa: E402
 
 warnings.filterwarnings("ignore", message=".*deprecated.*")
 
-# Measured by measure_constants.py on a whole A100 80GB PCIe (a100-05, job 2302084,
-# Vicuna-7B config, torch 2.14.1+cu126). eff_act is the launch-free value, matching terms(),
-# which keeps launches out of a layer's GPU time.
-DEFAULT_CONSTANTS = dict(
-    eff_weight=0.769,  # achieved / peak bandwidth streaming weights
-    eff_act=0.125,  # ... on per-token activation + KV traffic (launch-free form)
-    launch_us=22.6,  # CPU dispatch per kernel inside a decode layer call
-    kernels_per_layer=40,
-    pcie_bw=1.33e9,  # pinned D2H, bytes/s, at the mb-8 decode activation (64 KiB)
-    recv_h2d_bw=2.11e9,  # pinned H2D, same size
-    shm_to_pinned_bw=2.18e10,  # receiver host memcpy
-    memcpy_bw=2.64e10,  # sender pinned -> SHM
-    handshake_ack_us=70.5,  # one handshake + one ACK over gloo (half charged to each side)
-    tok_roundtrip_us=37.1,  # next_tokens gloo send/recv
-    token_staging_us=47.6,  # its D2H + H2D
-    step_start_us=73.4,  # position_ids sync at the start of a decode step
-    barrier_us=99.9,  # gloo barrier, once after prefill (the final one is in END)
-    rotary_kernels=9,  # extra launches per microbatch on every rank
-    timing_event_calls=2,  # CPU-only CUDA calls per microbatch on every rank (not measured)
-    send_queue_calls=2,  # ... and on sending ranks (not measured)
-)
-
-# peak HBM bytes/s
-CARD_BW = {"A100-40GB": 1555e9, "A100-80GB": 2039e9}  
-
-# slice GB -> memory slices of 8 on each card. NVIDIA MIG docs: each memory slice is 1/8 of
-# the card's memory capacity AND bandwidth (3g.40gb = 4/8 memory, 3/7 SMs), so bandwidth
-# follows memory slices, not GPCs.
-MEMORY_SLICES = {
-    "A100-40GB": {5: 1, 10: 2, 20: 4, 40: 8},
-    "A100-80GB": {10: 1, 20: 2, 40: 4, 80: 8},
-}
+# measured constants, card bandwidths and MIG memory slices live in hardware_constants.py;
+# pick a set with CONFIG["constants"] = hardware_constants.CONSTANTS["<name>"]
+DEFAULT_CONSTANTS = hardware_constants.CONSTANTS[hardware_constants.DEFAULT_NAME]
+CARD_BW = hardware_constants.CARD_BW
+MEMORY_SLICES = hardware_constants.MEMORY_SLICES
 
 # Matching harness setup
 SWEEP_PAIRS = [(8, 4), (8, 2), (16, 8), (16, 4), (16, 2), (32, 16), (32, 8), (32, 4),
@@ -519,7 +494,7 @@ def main():
         samples=8,  # decode contexts inside the MILP; predict_ms uses every step
         min_last_rank_layers=1,  # 0 allows a last rank with only norm + lm_head
         check=False,  # also run the brute force over every split (slow)
-        constants=DEFAULT_CONSTANTS,
+        constants=hardware_constants.CONSTANTS["a100_80gb_pcie_whole_gpu"],  # see hardware_constants.py
     )
 
     print(f"{CONFIG['model']} on {CONFIG['slice_gb']} ({CONFIG['card']})")

@@ -32,6 +32,7 @@ grows with C_s and z, so at the optimum they equal the max()es. Equals brute for
 import pulp
 
 import mig_pp.milp.graph_placement as plp
+import mig_pp.milp.hardware_constants as hardware_constants
 
 
 def stage_costs(layer_split, step_terms):
@@ -132,7 +133,7 @@ def main():
         samples=8,  # decode contexts inside the MILP; predict_ms uses every step
         min_last_rank_layers=1,  # 0 allows a last rank with only norm + lm_head
         check=False,  # also run the brute force over every split (slow)
-        constants=plp.DEFAULT_CONSTANTS,
+        constants=hardware_constants.CONSTANTS["a100_80gb_pcie_whole_gpu"],  # see hardware_constants.py
     )
 
     print(f"GPipe: {CONFIG['model']} on {CONFIG['slice_gb']} ({CONFIG['card']})")
