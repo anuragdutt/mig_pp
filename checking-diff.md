@@ -43,14 +43,14 @@ jump and both low and high microbatch counts:
 | GPU | Model | Splits | One pass |
 |---|---|---|---|
 | 0 | Vicuna-13B | [23,11,4,2], [20,11,5,4], [23,9,4,4], [23,8,6,3], [21,7,6,6], [17,11,6,6] | ~1.6 h |
-| 1 | Mistral-24B | [22,10,5,3], [22,9,6,3], [23,8,6,3], [22,8,5,5], [20,8,7,5], [23,10,5,2], [18,10,7,5] | ~2.9 h |
-| 2 | Vicuna-7B | [16,10,4,2], [17,9,3,3], [17,11,2,2], [15,12,4,1], [19,5,4,4], [20,8,3,1], [12,10,5,5] | ~1.2 h |
+| 1 | Qwen-14B | [28,10,7,3], [27,10,7,4], [26,9,8,5], [28,8,6,6], [20,10,9,9], [26,10,6,6], [25,10,7,6] | ~2.1 h |
+| 2 | Mistral-7B | [16,10,4,2], [15,10,4,3], [17,11,2,2], [20,7,4,1], [19,5,4,4], [20,8,3,1], [12,11,5,4] | ~1.2 h |
 | 3 | Qwen-7B | [14,9,4,1], [11,10,5,2], [18,8,1,1], [20,5,2,1], [9,7,6,6], [20,6,1,1], [9,8,7,4] | ~1.3 h |
 
 The splits span best to worst in the existing data, plus the rank-0-heaviest and rank-0-lightest
 splits. Times are estimates from the old latencies plus per-config overhead.
 
-**Run the whole set twice** (about 6 h in total). The second pass measures the new box's own
+**Run the whole set twice** (about 4.5 h in total). The second pass measures the new box's own
 run-to-run noise.
 
 SXM4 reference data: `logs/oracle/intra_gpu/80gb/40_20_10_10/*/*/gpu*/*_<model>/mig_benchmark_results.csv`.

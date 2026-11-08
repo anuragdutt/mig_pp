@@ -74,7 +74,25 @@ NIGHT = [
     [QWEN[3]],                  # GPU 3
 ]
 
-RUN = NIGHT
+# PCIe vs SXM4 check (checking-diff.md): re-run already-measured configs on the PCIe box.
+# Run this set twice, as two separate `start`s: the second pass measures the box's own noise.
+CARD_CHECK_PAIRS = [(16, 4), (16, 8), (32, 16), (64, 2)]
+CARD_CHECK = [
+    dict(model="vicuna_13b", batch_mb_pairs=CARD_CHECK_PAIRS,  # GPU 0
+         splits=[[23, 11, 4, 2], [20, 11, 5, 4], [23, 9, 4, 4], [23, 8, 6, 3], [21, 7, 6, 6],
+                 [17, 11, 6, 6]]),
+    dict(model="qwen_14b", batch_mb_pairs=CARD_CHECK_PAIRS,  # GPU 1
+         splits=[[28, 10, 7, 3], [27, 10, 7, 4], [26, 9, 8, 5], [28, 8, 6, 6], [20, 10, 9, 9],
+                 [26, 10, 6, 6], [25, 10, 7, 6]]),
+    dict(model="mistral_7b", batch_mb_pairs=CARD_CHECK_PAIRS,  # GPU 2
+         splits=[[16, 10, 4, 2], [15, 10, 4, 3], [17, 11, 2, 2], [20, 7, 4, 1], [19, 5, 4, 4],
+                 [20, 8, 3, 1], [12, 11, 5, 4]]),
+    dict(model="qwen_7b", batch_mb_pairs=CARD_CHECK_PAIRS,  # GPU 3
+         splits=[[14, 9, 4, 1], [11, 10, 5, 2], [18, 8, 1, 1], [20, 5, 2, 1], [9, 7, 6, 6],
+                 [20, 6, 1, 1], [9, 8, 7, 4]]),
+]
+
+RUN = CARD_CHECK
 
 def _lane(i):  # RUN[i]: a model key, a job dict, or a list of them run in order; None is skipped
     return [j for j in (RUN[i] if isinstance(RUN[i], list) else [RUN[i]]) if j is not None]
@@ -86,13 +104,13 @@ def _lane(i):  # RUN[i]: a model key, a job dict, or a list of them run in order
 # A100-80GB: 3g.40gb + 2g.20gb + 1g.10gb + 1g.10gb per GPU.
 GPUS = [
     dict(gpu=0, slice_gb=[40, 20, 10, 10], models=_lane(0),
-         mig_uuids=["MIG-0cfc69bb-d780-5095-9656-be2b83fb379d", "MIG-f6677aed-01af-56f3-83f3-91e511d24e6c", "MIG-4035a060-869a-58e6-9794-21dcff020348", "MIG-b2e8e895-ae5f-5e49-863d-35b4ad3bc0d5"]),  # NVIDIA A100-SXM4-80GB: 3g.40gb 2g.20gb 1g.10gb 1g.10gb
+         mig_uuids=["MIG-3b24b0ee-34c8-53d9-8fef-a4b0ea58ae58", "MIG-78342107-fa11-5a12-8d86-02f35bd5c2c4", "MIG-00891593-1c26-564f-bb71-f039c79f5c68", "MIG-92b8af9d-c19e-5299-b97c-7b56fa6c2217"]),  # NVIDIA A100 80GB PCIe: 3g.40gb 2g.20gb 1g.10gb 1g.10gb
     dict(gpu=1, slice_gb=[40, 20, 10, 10], models=_lane(1),
-         mig_uuids=["MIG-3300dd9c-59a5-5978-866a-9a4b62713e56", "MIG-0c88400e-21c0-5b39-a698-dd1230d974b7", "MIG-18295ce0-0f18-520b-9ae0-1ff8980abd2c", "MIG-b42afb91-2f72-526f-b908-b4f956ecc0e8"]),  # NVIDIA A100-SXM4-80GB: 3g.40gb 2g.20gb 1g.10gb 1g.10gb
+         mig_uuids=["MIG-a33f9552-2e64-5376-938f-0d5059fd3aef", "MIG-1853e45a-112b-56c2-8b82-955e3559661a", "MIG-ef3edd2a-6260-544d-8ad2-f50173de33e7", "MIG-76f6b5a9-95a8-5647-80df-b6e08214a39f"]),  # NVIDIA A100 80GB PCIe: 3g.40gb 2g.20gb 1g.10gb 1g.10gb
     dict(gpu=2, slice_gb=[40, 20, 10, 10], models=_lane(2),
-         mig_uuids=["MIG-a1190fb5-b8a0-57aa-9ad0-58dd183cae3b", "MIG-4b6fbb23-1c51-5293-b9b4-fd4964e7cded", "MIG-b9edd97b-d54e-56da-b43a-e252908cd96f", "MIG-8daa456f-0b2e-5d62-9608-c3d51797a857"]),  # NVIDIA A100-SXM4-80GB: 3g.40gb 2g.20gb 1g.10gb 1g.10gb
+         mig_uuids=["MIG-cf073845-28c9-50f3-b6f9-1eaf5566c511", "MIG-88ab4898-e490-5abb-8317-eb019998f050", "MIG-c8b2731e-53ad-52c7-a445-b2aa103e9c4c", "MIG-87efb1d2-e0fb-5fa9-9b89-5875cb59a028"]),  # NVIDIA A100 80GB PCIe: 3g.40gb 2g.20gb 1g.10gb 1g.10gb
     dict(gpu=3, slice_gb=[40, 20, 10, 10], models=_lane(3),
-         mig_uuids=["MIG-13c176dc-1fb4-5e69-af95-14744f1a6dc1", "MIG-c325e781-a6cc-5d8e-bf85-074ad7ede982", "MIG-b22269c6-b770-5ecd-86a5-25c3901391ac", "MIG-7da53c6b-6132-5d50-a1e3-f2c991b4ffd0"]),  # NVIDIA A100-SXM4-80GB: 3g.40gb 2g.20gb 1g.10gb 1g.10gb
+         mig_uuids=["MIG-289c8561-ae9f-5c39-b734-d583736677b6", "MIG-d3ee3b66-106a-5c5e-ba3a-031e11c22b45", "MIG-8361ffbf-f96d-5ffd-a2dd-2daca06871fb", "MIG-1531a7db-ef6a-57d6-be1d-e135aea4dcf4"]),  # NVIDIA A100 80GB PCIe: 3g.40gb 2g.20gb 1g.10gb 1g.10gb
 ]
 
 # The benchmark's own constants (benchmark_pipeline_microbatching.py).
@@ -122,5 +140,6 @@ RUNNER = dict(
     env={"MIG_LOG_LEVEL": "summary"},
     # Skip configs already measured: done_configs.py, built by
     # `python3 make_done.py <results dirs>` (rebuild it after every run).
-    skip_done=True,
+    # False for CARD_CHECK, which re-runs measured configs on purpose.
+    skip_done=False,
 )
