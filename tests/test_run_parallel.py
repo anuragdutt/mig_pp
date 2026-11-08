@@ -165,7 +165,7 @@ class RunParallel(unittest.TestCase):
                 for j in job_dirs(run_dir) if (j / "stub_record.json").exists()}
 
     def test_lanes_parallel_jobs_sequential_and_isolated(self):
-        cfg = self.box.config({0: ["llama_7b", "qwen_7b"], 1: ["mistral_7b"], 2: ["vicuna_13b", "qwen_14b"]},
+        cfg = self.box.config({0: ["llama_7b", "qwen_7b"], 1: ["mistral_7b"], 2: ["vicuna_7b", "qwen_7b"]},
                               stubs={k: {"sleep": 2} for k in MODEL_TYPES})
         p = self.box.run("start", "-c", cfg, check=True, timeout=90)
         run_dir = self.box.latest()
@@ -185,10 +185,10 @@ class RunParallel(unittest.TestCase):
             self.assertTrue(r["prefix"].startswith("migpp_"))
             self.assertEqual(r["env"]["PYTHONUNBUFFERED"], "1")
         # Lanes overlap in time; jobs within a lane do not.
-        first = [recs["gpu0/01_llama_7b"], recs["gpu1/01_mistral_7b"], recs["gpu2/01_vicuna_13b"]]
+        first = [recs["gpu0/01_llama_7b"], recs["gpu1/01_mistral_7b"], recs["gpu2/01_vicuna_7b"]]
         self.assertLess(max(r["started"] for r in first), min(r["finished"] for r in first))
         self.assertGreaterEqual(recs["gpu0/02_qwen_7b"]["started"], recs["gpu0/01_llama_7b"]["finished"])
-        self.assertGreaterEqual(recs["gpu2/02_qwen_14b"]["started"], recs["gpu2/01_vicuna_13b"]["finished"])
+        self.assertGreaterEqual(recs["gpu2/02_qwen_7b"]["started"], recs["gpu2/01_vicuna_7b"]["finished"])
         for j in job_dirs(run_dir):
             self.assertEqual(read(j / "state"), "ok")
         self.assertEqual(list(self.box.shm.iterdir()), [])
@@ -209,7 +209,7 @@ class RunParallel(unittest.TestCase):
         self.assertEqual(read(run_dir / "gpu1/01_mistral_7b/state"), "ok")
 
     def test_stop_kills_every_process_and_cleans_shm(self):
-        cfg = self.box.config({0: ["llama_7b", "qwen_7b"], 1: ["mistral_7b"], 3: ["llama_13b"]},
+        cfg = self.box.config({0: ["llama_7b", "qwen_7b"], 1: ["mistral_7b"], 3: ["vicuna_7b"]},
                               stubs={k: {"sleep": 60, "leak_shm": True} for k in MODEL_TYPES})
         self.box.run("start", "-c", cfg, "--detach", check=True, timeout=30)
         run_dir = self.box.latest()
@@ -246,7 +246,7 @@ class RunParallel(unittest.TestCase):
             (j / "job.json").write_text(json.dumps(job))
         r = self.box.run("start", "--resume", run_dir, check=True, timeout=90)
         self.assertIn("resuming", r.stdout)
-        for jid in ("gpu0/01_llama_7b", "gpu0/02_qwen_7b", "gpu3/01_llama_13b"):
+        for jid in ("gpu0/01_llama_7b", "gpu0/02_qwen_7b", "gpu3/01_vicuna_7b"):
             self.assertEqual(read(run_dir / jid / "state"), "ok", jid)
         def attempts(jid):
             return read(run_dir / jid / "stdout.log").count("===== attempt")

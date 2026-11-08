@@ -58,8 +58,11 @@ class LayerLimitsFile(unittest.TestCase):
                     )
 
     def test_head_only_models_exist(self):
+        # Against the known models, not the layout's entries: a model commented
+        # out of a layout keeps its head-only flag for when it comes back.
         for layout, models in ll.HEAD_ONLY_LAST_RANK.items():
-            self.assertLessEqual(models, set(ll.LAYER_LIMITS[layout]), layout)
+            self.assertIn(layout, ll.LAYER_LIMITS)
+            self.assertLessEqual(models, set(ml.REFERENCE_SHAPES), layout)
 
     def test_lookup_errors_name_the_problem(self):
         with self.assertRaises(KeyError) as cm:
@@ -73,7 +76,7 @@ class LayerLimitsFile(unittest.TestCase):
         self.assertIn("gemma_7b", str(cm.exception))
 
     def test_head_only_flag(self):
-        self.assertEqual(ll.limits_for("qwen_14b", LAYOUT), ([30, 15, 7, 0], 0))
+        self.assertEqual(ll.limits_for("qwen_7b", LAYOUT), ([18, 12, 5, 3], 0))
         self.assertEqual(ll.limits_for("llama_7b", LAYOUT), ([18, 12, 5, 5], 1))
 
     def test_7b_class_shares_the_vicuna_split_set(self):

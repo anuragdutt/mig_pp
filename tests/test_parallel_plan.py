@@ -192,10 +192,10 @@ class Planning(_Box):
         self.assertEqual(one_lane["llama_7b"]["job"]["mem_monitor"], "dcgm")
 
     def test_limits_come_from_layer_limits_py(self):
-        jobs = self.jobs(self.plan({0: ["qwen_7b"], 1: ["vicuna_13b"]}))
-        qwen, vicuna = jobs["qwen_7b"]["job"], jobs["vicuna_13b"]["job"]
+        jobs = self.jobs(self.plan({0: ["qwen_7b"], 1: ["vicuna_7b"]}))
+        qwen, vicuna = jobs["qwen_7b"]["job"], jobs["vicuna_7b"]["job"]
         self.assertEqual((qwen["layer_limits"], qwen["min_last_rank_layers"]), ([18, 12, 5, 3], 0))
-        self.assertEqual((vicuna["layer_limits"], vicuna["min_last_rank_layers"]), ([23, 12, 5, 5], 1))
+        self.assertEqual((vicuna["layer_limits"], vicuna["min_last_rank_layers"]), ([18, 12, 5, 5], 1))
         self.assertEqual(qwen["splits"],
                          ec.generate_layer_splits(28, [18, 12, 5, 3], [20, 10, 5, 5], True, 0))
         self.assertEqual(jobs["qwen_7b"]["n_configs"], len(qwen["splits"]) * 2)  # FakeBox sweeps 2 pairs
@@ -215,7 +215,7 @@ class Planning(_Box):
                       "on layout '20_10_5_5'", msg)
 
     def test_smoke_overrides(self):
-        plan = self.plan({0: ["llama_7b"], 1: ["qwen_14b"]}, smoke=True)
+        plan = self.plan({0: ["llama_7b"], 1: ["qwen_7b"]}, smoke=True)
         self.assertTrue(plan["run_id"].endswith("_smoke"))
         for j in self.jobs(plan).values():
             job = j["job"]
@@ -254,7 +254,7 @@ class Planning(_Box):
 class RunDir(_Box):
     def finished_smoke_run(self):
         """A 4-job smoke run dir whose jobs all wrote clean output, in the real formats."""
-        plan = self.plan({0: ["llama_7b", "mistral_7b"], 1: ["qwen_7b", "vicuna_13b"]}, smoke=True)
+        plan = self.plan({0: ["llama_7b", "mistral_7b"], 1: ["qwen_7b", "vicuna_7b"]}, smoke=True)
         run = pp.write_run_dir(plan)
         for j in self.jobs(plan).values():
             d, job, ranks = Path(j["job_dir"]), j["job"], range(len(j["job"]["mig_uuids"]))
@@ -289,13 +289,13 @@ class RunDir(_Box):
         t01 = d["mistral_7b"] / "logs/transport_1.log"
         t01.write_text(t01.read_text().replace(jobs["mistral_7b"]["shm_prefix"], "mig_pipe_shm"))
         (self.box.shm / f"{jobs['qwen_7b']['shm_prefix']}_0_slot0").write_bytes(b"\0")
-        write_csv(d["vicuna_13b"] / "mig_benchmark_results.csv", ["split", "status"],
-                  [["[23, 12, 3, 2]", "ok"], ["[23, 12, 3, 2]", "OOM_rank1"]])
+        write_csv(d["vicuna_7b"] / "mig_benchmark_results.csv", ["split", "status"],
+                  [["[18, 12, 1, 1]", "ok"], ["[18, 12, 1, 1]", "OOM_rank1"]])
         rc, out = cli("report", run, "--verdict")
         self.assertEqual(rc, 1, out)
         self.assertIn("VERDICT: FAIL (4)", out)
         for key, check in (("llama_7b", "weights"), ("mistral_7b", "shm_prefix"),
-                           ("qwen_7b", "shm_leftover"), ("vicuna_13b", "results")):
+                           ("qwen_7b", "shm_leftover"), ("vicuna_7b", "results")):
             self.assertIn(f"FAIL  {jobs[key]['job_id']}  {check}:", out)
 
 

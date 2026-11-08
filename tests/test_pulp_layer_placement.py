@@ -1,4 +1,4 @@
-"""Tests for mig_pp/milp/pulp_layer_placement.py and validate.py. Torch-free; the MILP
+"""Tests for mig_pp/milp/graph_placement.py and validate.py. Torch-free; the MILP
 tests need PuLP and skip without it. Run locally:
     python3 -m unittest discover -s tests -p 'test_pulp_layer_placement.py' -v
 With PuLP from a scratch dir (not the venv):
@@ -28,7 +28,7 @@ except ImportError:
     HAVE_PULP = False
 
 import memory_limits as ml  # noqa: E402
-import pulp_layer_placement as plp  # noqa: E402
+import graph_placement as plp  # noqa: E402
 
 SHARED = ("HS", "TOK", "BARRIER", "STEP")
 

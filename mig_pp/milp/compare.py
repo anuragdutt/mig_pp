@@ -8,7 +8,7 @@ import csv
 import sys
 
 sys.path.insert(0, ".")
-import pulp_layer_placement as plp  # noqa: E402
+import graph_placement as plp  # noqa: E402
 from validate import load_rows, model_from_path  # noqa: E402
 
 CSV_PATH = "../../oracle/40gb/20_10_5_5/vicuna_7B.csv"

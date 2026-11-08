@@ -35,6 +35,23 @@ They are harness overhead, not a property of the configuration being swept.
 **Stay on harness and experiment setup.** The user builds the predictive model. No
 equation modelling unless explicitly asked.
 
+## GPU form factor by setup
+
+| Setup | Cards | Form factor |
+|---|---|---|
+| One-GPU 80GB sweeps (`cc@mig`) | 4 x A100-SXM4-80GB | SXM4 |
+| Cross-node 40GB runs (`mig1` / `mig2`, one GPU per node at different IPs; branch `test/intra-gpu-setup-2-A100-40gb`) | 2 x A100-PCIE-40GB | PCIe |
+
+**All 80GB runs were on SXM4 cards. All cross-node A100 40GB runs were on PCIe cards.**
+
+Source for PCIe: the device names printed by the measurement runs in that branch's
+`measurements.md`, and its `two_node_config.py`.
+
+**A100-SXM4-40GB (named at the top of this file) was the early single-GPU development
+box**, used for the first runs after the refactor (3-slice 20/10/10, e.g. the 12-config
+sweep of 9/24). The 9/28 Vicuna-7B 40GB sweep (938 configs) also ran on this box. That
+data can be ignored for now; this note stays so the card is on record.
+
 ## State as of 2026-10-09 — MILP placement rewritten for the current harness (uncommitted)
 
 The user brought the ILP back on 10/07 ("optimize the ILP as per our new harness").
@@ -76,7 +93,8 @@ classes, hardcoded config in `main()`); they will tidy it later** -- keep it tha
 
 ## State as of 2026-09-30 — 4 x A100-80GB, heavier models (uncommitted)
 
-**The run box is `cc@mig` (repo `~/mig_pp`): 4 x A100-SXM4-80GB**, driver 560.35.05
+**The run box is `cc@mig` (repo `~/mig_pp`): 4 x A100-SXM4-80GB** (SXM4 form factor,
+not PCIe cards; per `nvidia-smi -L`), driver 560.35.05
 (CUDA 12.6 max), MIG disabled as of 9/30. Its venv came with torch `2.14.1+cu130`
 ("driver too old (found version 12060)"); now `2.14.1+cu126` from the PyTorch cu126
 index: 4 GPUs, fp16 matmul + SDPA ok. It has **transformers 5.18.0** (not the pinned

@@ -17,7 +17,7 @@ import statistics
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import pulp_layer_placement as plp  # noqa: E402
+import graph_placement as plp  # noqa: E402
 
 
 def load_rows(path):
