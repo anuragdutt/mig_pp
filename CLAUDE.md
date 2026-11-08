@@ -35,6 +35,45 @@ They are harness overhead, not a property of the configuration being swept.
 **Stay on harness and experiment setup.** The user builds the predictive model. No
 equation modelling unless explicitly asked.
 
+## State as of 2026-10-09 — MILP placement rewritten for the current harness (uncommitted)
+
+The user brought the ILP back on 10/07 ("optimize the ILP as per our new harness").
+`mig_pp/milp/pulp_layer_placement.py` models the current harness from the code, not fit
+to data. The user wants **simple, convenient code for now (plain functions + dicts, no
+classes, hardcoded config in `main()`); they will tidy it later** -- keep it that way.
+- **Per-step schedule = a longest-path event graph** (`step_graph`, documented in the
+  module docstring): D2H queued on copy_stream, FLUSH(k-1) after RECV(k)+LAUNCH(k)
+  (publish one behind), ACK irecv posted before the handshake, pinned H2D on recv_stream,
+  TokenExchange; the final decode step ends at the barrier, so the last rank's queued GPU
+  work is outside rank 0's window. Neither the old serial chain nor GPipe holds: with free
+  transport N=2 gives C0 + sum max(C_s, C_s+1) + C_last. Two independent derivations from
+  the code agreed; a program-order simulator in the tests agrees on random instances.
+  gloo send measured locally as a rendezvous. transformers 5.18.0's decode path has no
+  host sync for these models (default RoPE, `DynamicCache()` without config).
+- **MILP**: integer layer counts per rank, one variable per event, one >= per edge; decode
+  sampled at 8 contexts (vs every step < 1e-4); `predict_ms` evaluates every step. The best
+  split depends on mb, so solve per (batch, mb); <= ~6 s at N=32. Equals brute force.
+  Space = everything within `memory_limits` caps (>= 1 layer per rank, last rank
+  `min_last_rank_layers`); no sweep caps/ordering rule (the user runs all theoretical
+  splits first and adjusts the ILP from the data).
+- **Config**: `CONFIG` dict in `main()` (model key, `slice_gb`, `card`, pairs, ...);
+  `validate_layout(slice_gb, card)` takes the card from the caller (no lookup, 5/10/20/40GB
+  on A100-40GB, 10/20/40/80GB on A100-80GB). Constants are the `DEFAULT_CONSTANTS` dict
+  (placeholders until measure_constants.py is run; its JSON is not loaded any more).
+  Bandwidth of a slice = card peak x GPCs/7. Bytes are measure_constants' own (a test
+  execs its functions); the KV `torch.cat` re-copy and ctx+1 read are absorbed by the
+  calibrated EFF_ACT -- do not add them to the bytes.
+- Not modelled: per-config cold start inside the window, copy-engine/PCIe and NUMA-core
+  sharing, slice compute vs bandwidth scaling. Assumes `MIG_LOG_LEVEL=summary`.
+- `validate.py` / `compare.py`: `CONFIG` in `main()` / top of file (csv, card). Oracle and
+  benchmark CSV formats; layout from the `peak_rank*` headers; model from the file or the
+  `NN_<model>` job dir. Q1 error by mb/batch; Q2 per pair: rank of the model's best
+  measured split, Kendall tau, the MILP's free pick. The user runs them on real data.
+- Tests: `tests/test_pulp_layer_placement.py` (18; the MILP ones need PuLP, install it
+  into the scratchpad). A 10/02 attempt sits in `stash@{0}` ("ILP": GPipe min-max v2);
+  superseded. Numerical equivalence of the 10/08 class-based version and this one: 384
+  predictions agree to 1e-14.
+
 ## State as of 2026-09-30 — 4 x A100-80GB, heavier models (uncommitted)
 
 **The run box is `cc@mig` (repo `~/mig_pp`): 4 x A100-SXM4-80GB**, driver 560.35.05
@@ -89,6 +128,14 @@ only: heavy 13/13/10/12 = 672 configs (~14 h, Mistral-24B the long pole), then 7
 12/12/18/12 = 756 configs (~9 h; qwen_7b `[18,6,5,5]`, the front-loaded region;
 mistral_7b `[19,12,5,5]` like llama/vicuna), at the measured per-split times (13B 46.5 min,
 Qwen-14B 53.7, Mistral-24B 70.5, 7B ~29.5 per 14-pair split).
+10/04: the 7B run went with qwen_7b `[16,12,5,5]` (35 new, ~17 h, on GPU 3) because the GPUs
+close 10/05 1 PM EST. Then GPU 3's Qwen job is stopped once GPUs 0-2 finish, and `RUN = NIGHT` runs: llama/
+vicuna/mistral_7b `[20,12,5,5]` (+10 new each) and qwen_7b `[20,12,6,6]` (+60), ~44 GPU-h.
+Each GPU's job list is written out in NIGHT: GPU0 llama then 12 qwen, GPU1 mistral then 12,
+GPU2 vicuna then 13, GPU3 23 qwen (`_qwen_chunks`), ~10.8-11.3 h, done ~10-10:30 AM EST.
+done_configs.py must be rebuilt on the box first (`python3 make_done.py runs/`) so tonight's
+[19,12,5,5] splits are skipped. Started as `runs/20261005_033608` (03:36 UTC = 11:36 PM EST;
+check showed 79 measured / 10 to run per 32-layer 7B, as expected); due ~10:30-11 AM EST.
 The user commented the heavy models out of the 20_10_5_5 (40GB) entries in `30cbd4d`;
 8 fake-box tests need them (all pass with them restored).
 
@@ -432,3 +479,7 @@ compute, which is no longer true now that receives are posted during `flush()`.
 | `model_family.py` | model_type -> classes, model path / weight-file discovery (torch-free at import) |
 | `tests/test_run_parallel.py` | end-to-end: real planner + manager + stub benchmark on a fake 8-GPU box |
 | `tests/test_model_family_torch.py` | loader + stage maths vs HF for llama/mistral/qwen2 (skips without transformers) |
+| `mig_pp/milp/pulp_layer_placement.py` | MILP layer placement: per-step longest-path graph of the harness, memory-bound split space, `predict_ms`; plain functions, CONFIG in `main()`; PuLP only to solve |
+| `mig_pp/milp/measure_constants.py` | probes for the MILP's empirical constants (`--mode full` / `--mode slice`, `--json`); copy the numbers into `DEFAULT_CONSTANTS` |
+| `mig_pp/milp/validate.py` / `compare.py` | model vs a results CSV (Q1 accuracy, Q2 split choice per pair), hardcoded CONFIG; the user runs these |
+| `tests/test_pulp_layer_placement.py` | graph vs closed forms and a program-order simulator, MILP vs brute force, bytes vs measure_constants |

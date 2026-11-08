@@ -84,11 +84,17 @@ def slice_mibs(slice_gb) -> list:
 
 class MemoryModel:
     def __init__(self, s: dict, seq_len=64, max_new_tokens=512, ctx_mib=CTX_MIB, kv_factor=KV_FACTOR):
-        q, kvd = s["heads"] * s["hd"], s["kv"] * s["hd"]
-        params = s["H"] * q * 2 + 2 * s["H"] * kvd + 3 * s["H"] * s["I"] + 2 * s["H"] + ((q + 2 * kvd) if s["bias"] else 0)
+        q_width = s["heads"] * s["hd"]  # num_attention_heads * head_dim
+        kv_width = s["kv"] * s["hd"]  # num_key_value_heads * head_dim
+        hidden, inter = s["H"], s["I"]  # hidden_size, intermediate_size
+        params_per_layer = (hidden * q_width * 2  # q_proj + o_proj
+                            + 2 * hidden * kv_width  # k_proj + v_proj
+                            + 3 * hidden * inter  # MLP gate, up, down
+                            + 2 * hidden  # input + post-attention RMSNorm
+                            + ((q_width + 2 * kv_width) if s["bias"] else 0))  # q/k/v bias
         self.s, self.seq_len, self.ctx, self.kvf = s, seq_len, ctx_mib, kv_factor
-        self.w = params * 2 / MIB
-        self.kv_seq = 2 * (seq_len + max_new_tokens) * kvd * 2 / MIB
+        self.w = params_per_layer * 2 / MIB
+        self.kv_seq = 2 * (seq_len + max_new_tokens) * kv_width * 2 / MIB
         self.emb = s["V"] * s["H"] * 2 / MIB
         self.build = s["V"] * s["H"] * 6 / MIB
 
@@ -106,7 +112,7 @@ class MemoryModel:
             build += self.build
         return max(run, build)
 
-    def max_layers(self, rank, world, batch, mb, slice_mib) -> int:
+    def max_layers_that_can_fit(self, rank, world, batch, mb, slice_mib) -> int:
         n = -1
         while n < 1000 and self.need(rank, world, n + 1, batch, mb) <= slice_mib:
             n += 1
@@ -137,7 +143,7 @@ def report(key, entry, sweep, slice_gb):
           f"lm_head build {mm.build:.0f} MiB ({source})")
     for b in batches:
         mb = max(m for bb, m in pairs if bb == b)
-        caps = [mm.max_layers(r, world, b, mb, cap) for r, cap in enumerate(slice_mibs(slice_gb))]
+        caps = [mm.max_layers_that_can_fit(r, world, b, mb, cap) for r, cap in enumerate(slice_mibs(slice_gb))]
         print(f"  B{b:<3d} max layers {caps}" + ("" if sum(max(c, 0) for c in caps) >= shape["L"] else "  <- model cannot fit"))
     try:
         limits, min_last = ll.limits_for(key, slice_gb)
