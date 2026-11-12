@@ -101,8 +101,10 @@ import vicuna7b_40gb_split_order
 HOST = os.environ.get("INV_HOST") or socket.gethostname().split(".")[0]
 # Paste each box's `./run_parallel.sh discover` UUIDs here, rank order (20, 10, 5, 5 GB).
 GPUS_40GB = {
-    "mig1": ["MIG-FILL-mig1-20gb", "MIG-FILL-mig1-10gb", "MIG-FILL-mig1-5gb-a", "MIG-FILL-mig1-5gb-b"],
-    "mig2": ["MIG-FILL-mig2-20gb", "MIG-FILL-mig2-10gb", "MIG-FILL-mig2-5gb-a", "MIG-FILL-mig2-5gb-b"],
+    "mig1": ["MIG-7162319d-0d1d-5dcb-8866-54dc6fdabf14", "MIG-6b897767-3932-5114-b80f-8709aa7bf23d",
+             "MIG-259e7be0-bb48-524c-b8ba-89a640309404", "MIG-a8f9c210-23ed-5e6b-b691-87ea5266d8f9"],
+    "mig2": ["MIG-6dd23494-5fab-5507-9b31-70197c7ffce2", "MIG-160ce58f-ba42-5f9c-93f2-4cab3d5f326c",
+             "MIG-029d8a35-aac6-5bf8-b3a2-a5a0359a5c7e", "MIG-0fc29125-4eec-5484-9f26-cbc72a3603fc"],
 }
 # Single-node Vicuna-7B oracle: candidate splits x the cross-node sweep's 9 pairs, pairs split so
 # both boxes take about the same time. Front-runners first (see the module).
