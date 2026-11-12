@@ -92,7 +92,116 @@ CARD_CHECK = [
                  [20, 6, 1, 1], [9, 8, 7, 4]]),
 ]
 
-RUN = CARD_CHECK
+# --- 40GB single-node boxes: mig1 and mig2, one A100-PCIE-40GB each, MIG 20/10/5/5 ----------
+# Each box runs its own sweep; HOST picks its pairs and slices. INV_HOST overrides for testing.
+import socket
+
+import vicuna7b_40gb_split_order
+
+HOST = os.environ.get("INV_HOST") or socket.gethostname().split(".")[0]
+# Paste each box's `./run_parallel.sh discover` UUIDs here, rank order (20, 10, 5, 5 GB).
+GPUS_40GB = {
+    "mig1": ["MIG-FILL-mig1-20gb", "MIG-FILL-mig1-10gb", "MIG-FILL-mig1-5gb-a", "MIG-FILL-mig1-5gb-b"],
+    "mig2": ["MIG-FILL-mig2-20gb", "MIG-FILL-mig2-10gb", "MIG-FILL-mig2-5gb-a", "MIG-FILL-mig2-5gb-b"],
+}
+# Single-node Vicuna-7B oracle: candidate splits x the cross-node sweep's 9 pairs, pairs split so
+# both boxes take about the same time. Front-runners first (see the module).
+ORACLE_7B_PAIRS = {
+    "mig1": [(32, 16), (32, 2), (16, 8), (8, 4), (8, 2)],
+    "mig2": [(32, 8), (32, 4), (16, 2), (16, 4)],
+}
+# Top 5 per pair from the cross-node runs = the first 23 of the order, plus each regime's worst
+# split for contrast. If a pair's single-node winner is one of its weaker candidates, extend that
+# pair to SPLITS[:36] (top 10). All 120: vicuna7b_40gb_split_order.SPLITS.
+ORACLE_7B_SPLITS = vicuna7b_40gb_split_order.SPLITS[:23] + [
+    [12, 10, 5, 5], [27, 3, 1, 1], [16, 6, 5, 5], [25, 3, 2, 2]]
+# Past both earlier sweeps' caps, plus the 9/28 single-card (SXM4-40GB) winners not above.
+# Rank 0 at 28-29 fits only at batch 8/16 and is logged as OOM at batch 32; small slices at 6 fit
+# at every batch here (memory_limits.py).
+ORACLE_7B_SPLITS += [
+    [28, 2, 1, 1], [29, 1, 1, 1],                    # rank 0 past the cross-node cap of 28
+    [14, 8, 6, 4], [13, 8, 6, 5], [12, 8, 6, 6],     # 5GB slices past the cap of 5
+    [17, 10, 4, 1], [14, 9, 5, 4], [17, 8, 4, 3],    # 9/28 winners
+]
+
+# --- Investigation: what makes the best split best, one GPU alone --------------------------------
+# INV_SETUP picks the card (default 40gb on mig1/mig2, else 80gb). INV_RUN picks the run; each is
+# started by hand. On 40gb the runs use the first INV_K oracle splits (default 3), for debugging
+# until single-node winners are known; neighbors and extreme exist only for 80gb so far.
+INV_SETUP = os.environ.get("INV_SETUP", "40gb" if HOST in GPUS_40GB else "80gb")
+INV_K = int(os.environ.get("INV_K", "3"))
+INV_SETUPS = {
+    "80gb": dict(
+        model="vicuna_13b", slice_gb=[40, 20, 10, 10], layer_limits=[24, 12, 6, 6],
+        core=[[23, 11, 4, 2], [20, 11, 5, 4], [21, 7, 6, 6], [23, 9, 4, 4], [17, 11, 6, 6]],
+        pairs=[(32, 16), (64, 2)],
+        # Neighbors move one layer across one rank boundary of each pair's winner. All fit in
+        # memory per memory_limits.py.
+        neighbors={
+            "neighbors32": ([[22, 12, 4, 2], [24, 10, 4, 2], [23, 10, 5, 2], [23, 12, 3, 2],
+                             [23, 11, 3, 3], [23, 11, 5, 1]], (32, 16)),
+            "neighbors64": ([[19, 12, 5, 4], [21, 10, 5, 4], [20, 10, 6, 4], [20, 12, 4, 4],
+                             [20, 11, 4, 5], [20, 11, 6, 3]], (64, 2)),
+        },
+        neighbor_bases={(32, 16): [23, 11, 4, 2], (64, 2): [20, 11, 5, 4]},
+        # One config each, run with MIG_PARALLEL_BENCH=$PWD/nsys_bench.py: best and worst per pair.
+        timelines={"timeline_best32": ([23, 11, 4, 2], (32, 16)),
+                   "timeline_worst32": ([21, 7, 6, 6], (32, 16)),
+                   "timeline_best64": ([20, 11, 5, 4], (64, 2)),
+                   "timeline_worst64": ([23, 9, 4, 4], (64, 2))},
+    ),
+    "40gb": dict(
+        model="vicuna_7b", slice_gb=[20, 10, 5, 5], layer_limits=[29, 12, 6, 6],
+        core=ORACLE_7B_SPLITS[:INV_K], pairs=[(32, 16), (32, 2)],  # 2 and 16 microbatches
+        neighbors={}, neighbor_bases={},
+        timelines={"timeline_n2": (ORACLE_7B_SPLITS[0], (32, 16)),
+                   "timeline_n16": (ORACLE_7B_SPLITS[0], (32, 2))},
+    ),
+}
+INV = INV_SETUPS[INV_SETUP]
+
+
+def _inv_job(splits, pairs, limits=None):
+    # Explicit splits can pass the sweep's caps and ordering rule.
+    return dict(model=INV["model"], batch_mb_pairs=pairs, splits=splits,
+                layer_limits=limits or INV["layer_limits"], enforce_slice_ordering=False)
+
+
+INVESTIGATE = {
+    "core": [_inv_job(INV["core"], INV["pairs"]), None, None, None],
+    "transport": [_inv_job(INV["core"], INV["pairs"][:1]), None, None, None],
+    "oracle7b": [dict(model="vicuna_7b", batch_mb_pairs=ORACLE_7B_PAIRS.get(HOST, []),
+                      splits=ORACLE_7B_SPLITS, layer_limits=[29, 12, 6, 6]), None, None, None],
+}
+for _name, (_splits, _pair) in INV["neighbors"].items():
+    INVESTIGATE[_name] = [_inv_job(_splits, [_pair]), None, None, None]
+for _name, (_split, _pair) in INV["timelines"].items():
+    INVESTIGATE[_name] = [_inv_job([_split], [_pair]), None, None, None]
+if INV_SETUP == "80gb":
+    # Line search past the sweep's rank-0 cap of 23: the small-batch winner sits at that cap.
+    # First split is the measured winner, as this run's own reference. All fit per memory_limits.py.
+    INVESTIGATE["extreme"] = [_inv_job([[23, 11, 4, 2], [25, 10, 3, 2], [27, 9, 2, 2], [29, 8, 2, 1],
+                                        [31, 7, 1, 1], [34, 4, 1, 1]], [(32, 16), (16, 4)],
+                                       limits=[34, 12, 6, 6]), None, None, None]
+
+
+
+def _env_splits(name):
+    """"20,9,2,1;17,9,4,2" -> [[20, 9, 2, 1], [17, 9, 4, 2]]"""
+    text = os.environ.get(name, "").strip()
+    return [[int(x) for x in part.split(",")] for part in text.split(";") if part.strip()]
+
+
+# INV_RUN=custom: any splits at any pairs, e.g. INV_SPLITS="20,9,2,1;17,9,4,2" INV_PAIRS="32,16".
+# investigate.sh uses it for the per-pair oracle and for each pair's best and worst split.
+INV_SPLITS = _env_splits("INV_SPLITS")
+INV_PAIRS = [tuple(p) for p in _env_splits("INV_PAIRS")]
+if INV_SPLITS and INV_PAIRS:
+    INVESTIGATE["custom"] = [_inv_job(INV_SPLITS, INV_PAIRS), None, None, None]
+
+INV_RUN = os.environ.get("INV_RUN", "oracle7b" if HOST in GPUS_40GB else "core")
+
+RUN = INVESTIGATE[INV_RUN]
 
 def _lane(i):  # RUN[i]: a model key, a job dict, or a list of them run in order; None is skipped
     return [j for j in (RUN[i] if isinstance(RUN[i], list) else [RUN[i]]) if j is not None]
@@ -112,6 +221,9 @@ GPUS = [
     dict(gpu=3, slice_gb=[40, 20, 10, 10], models=_lane(3),
          mig_uuids=["MIG-289c8561-ae9f-5c39-b734-d583736677b6", "MIG-d3ee3b66-106a-5c5e-ba3a-031e11c22b45", "MIG-8361ffbf-f96d-5ffd-a2dd-2daca06871fb", "MIG-1531a7db-ef6a-57d6-be1d-e135aea4dcf4"]),  # NVIDIA A100 80GB PCIe: 3g.40gb 2g.20gb 1g.10gb 1g.10gb
 ]
+
+if HOST in GPUS_40GB:  # one A100-PCIE-40GB: 3g.20gb + 2g.10gb + 1g.5gb + 1g.5gb
+    GPUS = [dict(gpu=0, slice_gb=[20, 10, 5, 5], models=_lane(0), mig_uuids=GPUS_40GB[HOST])]
 
 # The benchmark's own constants (benchmark_pipeline_microbatching.py).
 SWEEP = dict(
@@ -137,7 +249,10 @@ RUNNER = dict(
     # Extra env for every job. MIG_LOG_LEVEL: "summary" = end-of-run transport
     # summaries only (T22-T29), "off" = no transport log; unset = per-microbatch
     # INFO (the transport's default, GBs per sweep).
-    env={"MIG_LOG_LEVEL": "summary"},
+    # Per-microbatch T11/T14/T15 lines instead: always for the "transport" investigation run, and
+    # for any run with INV_RAW_LOGS=1 (debugging; GBs on long runs and it slows them down).
+    env=({"MIG_LOG_DEBUG": "1"} if INV_RUN == "transport" or os.environ.get("INV_RAW_LOGS") == "1"
+         else {"MIG_LOG_LEVEL": "summary"}),
     # Skip configs already measured: done_configs.py, built by
     # `python3 make_done.py <results dirs>` (rebuild it after every run).
     # False for CARD_CHECK, which re-runs measured configs on purpose.
