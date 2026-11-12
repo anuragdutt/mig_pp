@@ -16,6 +16,8 @@
 #                   pairs      per (batch, microbatch) pair: that pair's oracle over its own 9-13
 #                              candidate splits (vicuna7b_40gb_split_order.BY_PAIR), then for its fastest
 #                              and slowest split: layer timing, nsys timeline, ncu on every rank
+#                   ncu_pairs  rerun only ncu for every pair whose timelines finished, on the fastest
+#                              and slowest split those runs used
 #   --pairs LIST  pairs for the "pairs" step, e.g. "32,16;8,4" (default: this box's oracle pairs)
 #   --pair-steps  what follows each pair's oracle (default: events,timeline,ncu,raw); raw reruns the
 #                 fastest and slowest split with per-microbatch transport logs (for reading, not timing)
@@ -46,7 +48,7 @@ while [ $# -gt 0 ]; do
         --pair-steps) PAIR_STEPS="$2"; shift ;;
         --smoke) SMOKE=1 ;;
         --dry-run) DRY=1 ;;
-        -h | --help) sed -n '2,30p' "$0"; exit 0 ;;
+        -h | --help) sed -n '2,32p' "$0"; exit 0 ;;
         *) echo "unknown option: $1 (see --help)" >&2; exit 2 ;;
     esac
     shift
@@ -162,6 +164,21 @@ for step in "${STEPS[@]}"; do
         dcgm) start_sampler core_dcgm dcgm; run_step dcgm core ""; stop_sampler ;;
         transport) run_step transport transport "" ;;
         oracle) run_step oracle oracle7b "" ;;
+        ncu_pairs)
+            tags=$(sed -n 's/^timeline_best_\(b[0-9]*_mb[0-9]*\) .*/\1/p' "$MANIFEST" | sort -u)
+            for tag in $tags; do
+                best_dir=$(awk -v s="timeline_best_$tag" '$1 == s {d = $2} END {print d}' "$MANIFEST")
+                worst_dir=$(awk -v s="timeline_worst_$tag" '$1 == s {d = $2} END {print d}' "$MANIFEST")
+                splits=$("$PYTHON" -c "import json, glob, sys
+print(';'.join(','.join(map(str, json.load(open(glob.glob(d + '/gpu*/*/job.json')[0]))['splits'][0])) for d in sys.argv[1:]))" "$best_dir" "$worst_dir") \
+                    || { say "ncu_pairs $tag: could not read its splits"; FAILED="$FAILED ncu_$tag"; continue; }
+                b=${tag%_mb*}; b=${b#b}; mb=${tag#*_mb}
+                say "== ncu_$tag: splits $splits"
+                if [ "$DRY" = 0 ]; then
+                    INV_PAIRS="$b,$mb" INV_SPLITS="$splits" INV_NCU_SCALE=0 "$PYTHON" ncu_investigate.py \
+                        || FAILED="$FAILED ncu_$tag"
+                fi
+            done ;;
         pairs)
             [ -n "$PAIRS" ] || PAIRS=$("$PYTHON" -c "import parallel_config as p; print(';'.join(f'{b},{m}' for b, m in p.ORACLE_7B_PAIRS.get(p.HOST, [])))")
             [ -n "$PAIRS" ] || { say "pairs: no pairs for this host; use --pairs"; FAILED="$FAILED pairs"; }

@@ -14,7 +14,8 @@ Two parts, written to investigation_ncu/:
                    the layer stack. No transport and no other rank, because ncu serializes kernels.
 
 With INV_SPLITS / INV_PAIRS set (see parallel_config.py) only those configs are profiled, and
-INV_NCU_SCALE=0 skips layer_scale.csv; investigate.sh's per-pair step uses both.
+INV_NCU_SCALE=0 skips layer_scale.csv; investigate.sh's per-pair step uses both. INV_NCU_RANKS=0
+profiles rank 0 only. Each attempt's full output is saved as ncu_<config>_r<rank>[.sudo].out.txt.
 
 The script re-runs itself as the worker, selected by INV_MODE.
 """
@@ -228,6 +229,8 @@ def ncu_attempt(ncu, cmd, env, report, metrics):
     if os.path.exists(path):
         os.remove(path)
     rc, out = run(cmd, env=env)
+    with open(report + (".sudo" if cmd[0] == "sudo" else "") + ".out.txt", "w") as f:
+        f.write(f"$ {' '.join(cmd)}\nexit {rc}\n\n{out}")  # full output, for diagnosing failures
     if rc != 0 or not os.path.exists(path):
         return rc, out, []
     # --page raw: one row per kernel launch and one column per metric.
@@ -241,8 +244,9 @@ def profile_rank(ncu, job, uuid, report, metrics):
     """(aggregate dict or None, note). Hardware counters may need admin rights: tries plain, then sudo."""
     env = worker_env(uuid, "rank", job)
     # Match ncu_attempt's import path even when ncu defaults to compressed .ncu-repz reports.
-    args = [ncu, "-o", report + ".ncu-rep", "--target-processes", "all", "--nvtx", "--nvtx-include",
-            RANGE_NAME + "/", "--metrics", ",".join(metrics)]
+    # --clock-control none: MIG does not allow locking clocks, and unlocked clocks match the real runs.
+    args = [ncu, "-o", report + ".ncu-rep", "--clock-control", "none", "--target-processes", "all",
+            "--nvtx", "--nvtx-include", RANGE_NAME + "/", "--metrics", ",".join(metrics)]
     for section in CONFIG["gui_sections"]:
         args += ["--section", section]
     args += [sys.executable, os.path.abspath(__file__)]
@@ -252,7 +256,14 @@ def profile_rank(ncu, job, uuid, report, metrics):
         sudo = ["sudo", "-n", "env"] + [f"{k}={v}" for k, v in env.items()]
         rc2, out2, rows = ncu_attempt(ncu, sudo + args, None, report, metrics)
         out = out + "\n" + out2
-        note = "needed sudo" if rows else f"FAILED rc={rc}/{rc2}: " + " | ".join(out.strip().splitlines()[-4:])[:400]
+        if rows:
+            note = "needed sudo"
+        else:
+            # The error, not the progress bars: ncu's ==ERROR== lines and Python tracebacks first.
+            lines = [l.strip() for l in out.splitlines() if l.strip() and "shards:" not in l]
+            errors = [l for l in lines if "==ERROR==" in l or "Error" in l or "Traceback" in l]
+            note = f"FAILED rc={rc}/{rc2}: " + " | ".join((errors or lines)[-6:])[:600] + \
+                   f" (full output: {os.path.basename(report)}.out.txt)"
     if not rows:
         return None, note
     m = re.search(r"SM_COUNT (\d+)", out)
@@ -304,6 +315,8 @@ def run_ncu(model_path, uuids, slice_gb, out_dir):
         for split in CONFIG["splits"]:
             for batch, mb in CONFIG["pairs"]:
                 for rank, count in enumerate(split):
+                    if CONFIG["ranks"] is not None and rank not in CONFIG["ranks"]:
+                        continue
                     first = sum(split[:rank])
                     job = {"model_path": model_path, "indices": list(range(first, first + count)),
                            "mb": mb, "context": CONFIG["ncu_context"], "steps": CONFIG["ncu_steps"]}
@@ -344,6 +357,9 @@ def main():
     if parallel_config.INV_SPLITS and parallel_config.INV_PAIRS:
         CONFIG.update(splits=parallel_config.INV_SPLITS, pairs=parallel_config.INV_PAIRS)
     do_scale = os.environ.get("INV_NCU_SCALE", "1") != "0"
+    # INV_NCU_RANKS=0 profiles only rank 0: a quick check that ncu works at all.
+    ranks = os.environ.get("INV_NCU_RANKS", "").strip()
+    CONFIG["ranks"] = [int(r) for r in ranks.split(",")] if ranks else None
     print(f"setup {parallel_config.INV_SETUP}: {inv['model']}, splits {inv['core']}, pairs {inv['pairs']}",
           flush=True)
     os.makedirs(CONFIG["out_dir"], exist_ok=True)
