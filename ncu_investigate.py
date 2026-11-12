@@ -59,6 +59,7 @@ CONFIG = {
 }
 
 RANGE_NAME = "INV_STACK"
+SUDO_NEEDED = [False]  # set after the first profile that only works with sudo; later ones skip the plain try
 
 
 # ---------------------------------------------------------------------------
@@ -211,7 +212,7 @@ def aggregate(rows, sm_count):
     busy_fraction = active / elapsed if elapsed else 0.0
     return {
         "n_kernels": len(rows),
-        "kernel_time_s": total,
+        "kernel_time_s": total / 1e9,  # gpu__time_duration in base units is nanoseconds
         "sm_util_pct": weighted("sm__throughput.avg.pct_of_peak_sustained_elapsed"),
         "dram_util_pct": weighted("dram__throughput.avg.pct_of_peak_sustained_elapsed"),
         "l2_hit_pct": weighted("lts__t_sector_hit_rate.pct"),
@@ -250,7 +251,7 @@ def profile_rank(ncu, job, uuid, report, metrics):
     for section in CONFIG["gui_sections"]:
         args += ["--section", section]
     args += [sys.executable, os.path.abspath(__file__)]
-    rc, out, rows = ncu_attempt(ncu, args, env, report, metrics)
+    rc, out, rows = (None, "", []) if SUDO_NEEDED[0] else ncu_attempt(ncu, args, env, report, metrics)
     note = "ok"
     if not rows:
         sudo = ["sudo", "-n", "env"] + [f"{k}={v}" for k, v in env.items()]
@@ -258,6 +259,7 @@ def profile_rank(ncu, job, uuid, report, metrics):
         out = out + "\n" + out2
         if rows:
             note = "needed sudo"
+            SUDO_NEEDED[0] = True
         else:
             # The error, not the progress bars: ncu's ==ERROR== lines and Python tracebacks first.
             lines = [l.strip() for l in out.splitlines() if l.strip() and "shards:" not in l]
