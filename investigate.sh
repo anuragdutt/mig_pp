@@ -21,6 +21,8 @@
 #                   deep       per pair, Vicuna-7B: every candidate split plus DEEP_EXTRA, twice:
 #                              layer timing (trace_bench.py) then raw transport logs
 #                   deep_qwen  the same for Qwen2.5-7B on QWEN7B_BY_PAIR, pairs from QWEN_7B_PAIRS
+#                   qwen_ncu   ncu for Qwen2.5-7B: every pair, every rank and the output head; mig1
+#                              takes every other profile, mig2 the rest
 #   --pairs LIST  pairs for the "pairs" step, e.g. "32,16;8,4" (default: this box's oracle pairs)
 #   --pair-steps  what follows each pair's oracle (default: events,timeline,ncu,raw); raw reruns the
 #                 fastest and slowest split with per-microbatch transport logs (for reading, not timing)
@@ -52,7 +54,7 @@ while [ $# -gt 0 ]; do
         --pair-steps) PAIR_STEPS="$2"; shift ;;
         --smoke) SMOKE=1 ;;
         --dry-run) DRY=1 ;;
-        -h | --help) sed -n '2,35p' "$0"; exit 0 ;;
+        -h | --help) sed -n '2,37p' "$0"; exit 0 ;;
         *) echo "unknown option: $1 (see --help)" >&2; exit 2 ;;
     esac
     shift
@@ -185,6 +187,13 @@ print(';'.join(','.join(map(str, json.load(open(glob.glob(d + '/gpu*/*/job.json'
                         || FAILED="$FAILED ncu_$tag"
                 fi
             done ;;
+        qwen_ncu)
+            shard=$("$PYTHON" -c "import parallel_config as p; print({'mig1': '0/2', 'mig2': '1/2'}.get(p.HOST, '0/1'))")
+            say "== qwen_ncu: shard $shard"
+            if [ "$DRY" = 0 ]; then
+                INV_MODEL=qwen_7b INV_NCU_ALL=1 INV_NCU_SHARD="$shard" INV_NCU_SCALE=0 "$PYTHON" ncu_investigate.py \
+                    || FAILED="$FAILED qwen_ncu"
+            fi ;;
         deep | deep_qwen)
             if [ "$step" = deep ]; then model=vicuna_7b; sets="v.BY_PAIR[p] + v.DEEP_EXTRA.get(p, [])"; table=ORACLE_7B_PAIRS
             else model=qwen_7b; sets="v.QWEN7B_BY_PAIR[p]"; table=QWEN_7B_PAIRS; fi

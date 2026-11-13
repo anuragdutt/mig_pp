@@ -16,6 +16,8 @@ Two parts, written to investigation_ncu/:
 With INV_SPLITS / INV_PAIRS set (see parallel_config.py) only those configs are profiled, and
 INV_NCU_SCALE=0 skips layer_scale.csv; investigate.sh's per-pair step uses both. INV_NCU_RANKS=0
 profiles rank 0 only. Each attempt's full output is saved as ncu_<config>_r<rank>[.sudo].out.txt.
+INV_MODEL, INV_NCU_ALL and INV_NCU_SHARD (see main) profile another model across all pairs, split
+between boxes; investigate.sh's qwen_ncu step uses them.
 
 The script re-runs itself as the worker, selected by INV_MODE.
 """
@@ -132,6 +134,35 @@ def worker_rank(job):
             out.sum().item()
 
 
+def worker_head(job):
+    """Final norm + output head + argmax on the last rank's slice, built as the benchmark builds
+    them; only these sit in the NVTX range ncu profiles."""
+    import torch
+    import torch.nn as nn
+    from transformers import AutoConfig
+
+    import model_family
+    from helpers import load_specific_weights
+
+    device = torch.device("cuda:0")
+    torch.cuda.set_device(device)
+    config = AutoConfig.from_pretrained(job["model_path"])
+    family = model_family.resolve(config.model_type)
+    parts = {"norm": family.rms_norm(config.hidden_size, eps=config.rms_norm_eps).to(device).half(),
+             "lm_head": nn.Linear(config.hidden_size, config.vocab_size, bias=False).to(device).half()}
+    # rank 3 of 4: the last rank, so only the final norm and output head are loaded.
+    load_specific_weights(3, 4, job["model_path"], nn.ModuleList(), [], parts,
+                          tie_word_embeddings=getattr(config, "tie_word_embeddings", False))
+    print("SM_COUNT", torch.cuda.get_device_properties(0).multi_processor_count, flush=True)
+    with torch.no_grad():
+        hidden = torch.randn(job["mb"], 1, config.hidden_size, dtype=torch.float16, device=device)
+        for _ in range(job["steps"]):
+            torch.cuda.nvtx.range_push(RANGE_NAME)
+            tokens = torch.argmax(parts["lm_head"](parts["norm"](hidden)), dim=-1)
+            torch.cuda.nvtx.range_pop()
+            tokens.sum().item()
+
+
 def worker_scale(job):
     """One layer at each (mb, context); events are read after the loop finishes."""
     import torch
@@ -241,9 +272,9 @@ def ncu_attempt(ncu, cmd, env, report, metrics):
     return rc, out, parse_ncu_csv(report + ".csv", metrics) if rc_csv == 0 else []
 
 
-def profile_rank(ncu, job, uuid, report, metrics):
+def profile_rank(ncu, job, uuid, report, metrics, mode="rank"):
     """(aggregate dict or None, note). Hardware counters may need admin rights: tries plain, then sudo."""
-    env = worker_env(uuid, "rank", job)
+    env = worker_env(uuid, mode, job)
     # Match ncu_attempt's import path even when ncu defaults to compressed .ncu-repz reports.
     # --clock-control none: MIG does not allow locking clocks, and unlocked clocks match the real runs.
     args = [ncu, "-o", report + ".ncu-rep", "--clock-control", "none", "--target-processes", "all",
@@ -314,30 +345,50 @@ def run_ncu(model_path, uuids, slice_gb, out_dir):
         if new_file:
             w.writerow(["split", "batch", "mb", "rank", "slice_gb", "layers", "profiled_layer", "context"]
                    + columns + ["note"])
-        for split in CONFIG["splits"]:
-            for batch, mb in CONFIG["pairs"]:
-                for rank, count in enumerate(split):
-                    if CONFIG["ranks"] is not None and rank not in CONFIG["ranks"]:
-                        continue
-                    first = sum(split[:rank])
-                    job = {"model_path": model_path, "indices": list(range(first, first + count)),
-                           "mb": mb, "context": CONFIG["ncu_context"], "steps": CONFIG["ncu_steps"]}
-                    name = "_".join(map(str, split)) + f"_b{batch}_mb{mb}_r{rank}"
-                    print(f"ncu {name}", flush=True)
-                    result, note = profile_rank(ncu, job, uuids[rank],
-                                                os.path.join(out_dir, f"ncu_{name}"),
-                                                CONFIG["metrics"])
-                    print(f"  {result if result else ''} ({note})", flush=True)
-                    values = [result[c] for c in columns] if result else [""] * len(columns)
-                    w.writerow(["_".join(map(str, split)), batch, mb, rank, slice_gb[rank], count, first,
-                                CONFIG["ncu_context"]] + values + [note])
-                    f.flush()
-                    if result is None:
-                        print("ncu failed; stopping here so one problem is not repeated 40 times. "
-                              f"Paste the note above. Log: {name}", flush=True)
-                        return False
+        # One task per (split, pair, rank), plus the output head per (split, pair) when asked.
+        configs = CONFIG.get("split_by_pair") or {}
+        configs = [(split, pair) for pair, split in configs.items()] or \
+            [(split, pair) for split in CONFIG["splits"] for pair in CONFIG["pairs"]]
+        tasks = []
+        for split, pair in configs:
+            tasks += [(split, pair, rank) for rank in range(len(split))
+                      if CONFIG["ranks"] is None or rank in CONFIG["ranks"]]
+            if CONFIG.get("profile_head"):
+                tasks.append((split, pair, "head"))
+        shard, shards = CONFIG.get("shard", (0, 1))
+        tasks = tasks[shard::shards]
+        print(f"{len(tasks)} profiles on this box (shard {shard} of {shards})", flush=True)
+        head_failed = False
+        for split, (batch, mb), rank in tasks:
+            name = "_".join(map(str, split)) + f"_b{batch}_mb{mb}_" + ("head" if rank == "head" else f"r{rank}")
+            print(f"ncu {CONFIG['model']} {name}", flush=True)
+            if rank == "head":
+                count, first, slice_size = 0, "", slice_gb[-1]
+                job = {"model_path": model_path, "mb": mb, "steps": CONFIG["ncu_steps"]}
+                result, note = profile_rank(ncu, job, uuids[-1], os.path.join(out_dir, f"ncu_{CONFIG['model']}_{name}"),
+                                            CONFIG["metrics"], mode="head")
+            else:
+                count, first, slice_size = split[rank], sum(split[:rank]), slice_gb[rank]
+                job = {"model_path": model_path, "indices": list(range(first, first + count)),
+                       "mb": mb, "context": CONFIG["ncu_context"], "steps": CONFIG["ncu_steps"]}
+                prefix = "" if CONFIG["model"] == "vicuna_7b" else f"{CONFIG['model']}_"
+                result, note = profile_rank(ncu, job, uuids[rank], os.path.join(out_dir, f"ncu_{prefix}{name}"),
+                                            CONFIG["metrics"])
+            print(f"  {result if result else ''} ({note})", flush=True)
+            values = [result[c] for c in columns] if result else [""] * len(columns)
+            w.writerow(["_".join(map(str, split)), batch, mb, rank, slice_size, count, first,
+                        CONFIG["ncu_context"]] + values + [note])
+            f.flush()
+            if result is None and rank == "head":
+                # New code path: record it and keep going so the layer profiles still run.
+                print(f"head profile failed, continuing. Log: {name}", flush=True)
+                head_failed = True
+            elif result is None:
+                print("ncu failed; stopping here so one problem is not repeated for every profile. "
+                      f"Paste the note above. Log: {name}", flush=True)
+                return False
     print(f"wrote {path}", flush=True)
-    return True
+    return not head_failed
 
 
 def main():
@@ -347,6 +398,9 @@ def main():
         return
     if mode == "scale":
         worker_scale(json.loads(os.environ["INV_JOB"]))
+        return
+    if mode == "head":
+        worker_head(json.loads(os.environ["INV_JOB"]))
         return
 
     import parallel_config
@@ -359,6 +413,19 @@ def main():
     if parallel_config.INV_SPLITS and parallel_config.INV_PAIRS:
         CONFIG.update(splits=parallel_config.INV_SPLITS, pairs=parallel_config.INV_PAIRS)
     do_scale = os.environ.get("INV_NCU_SCALE", "1") != "0"
+    # INV_MODEL=qwen_7b profiles Qwen instead of the setup's model.
+    CONFIG["model"] = os.environ.get("INV_MODEL") or CONFIG["model"]
+    # INV_NCU_ALL=1: every pair of the model's candidate table, one split per pair with layers on
+    # every rank (a layer's profile does not depend on the rest of the split), plus each pair's
+    # output head. INV_NCU_SHARD=k/n: this box takes every n-th profile from the k-th.
+    if os.environ.get("INV_NCU_ALL") == "1":
+        import vicuna7b_40gb_split_order as v
+
+        table = v.QWEN7B_BY_PAIR if CONFIG["model"] == "qwen_7b" else v.BY_PAIR
+        CONFIG["split_by_pair"] = {p: next(s for s in table[p] if min(s) >= 1) for p in sorted(table)}
+        CONFIG["profile_head"] = True
+    shard = os.environ.get("INV_NCU_SHARD", "0/1").split("/")
+    CONFIG["shard"] = (int(shard[0]), int(shard[1]))
     # INV_NCU_RANKS=0 profiles only rank 0: a quick check that ncu works at all.
     ranks = os.environ.get("INV_NCU_RANKS", "").strip()
     CONFIG["ranks"] = [int(r) for r in ranks.split(",")] if ranks else None
