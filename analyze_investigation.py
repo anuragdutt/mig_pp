@@ -220,7 +220,7 @@ def main():
         with open("investigation_runs.txt") as f:
             for line in f:
                 parts = line.split()
-                if len(parts) == 2:
+                if len(parts) == 2 and not line.startswith("#"):  # "# run ..." marks an invocation
                     latest[parts[0]] = parts[1]
         for step, run_dir in latest.items():
             if CONFIG.get(step) == "":

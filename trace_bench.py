@@ -5,7 +5,8 @@ Used instead of the benchmark through the manager's existing hook:
     MIG_PARALLEL_BENCH=$PWD/trace_bench.py ./run_parallel.sh start --detach
 
 What it adds, per rank, in the job directory:
-  layer_latency_rank<r>.csv  one row per layer, for prefill and every SAMPLE_EVERY-th decode step
+  layer_latency_rank<r>.csv  one row per layer, for prefill and every SAMPLE_EVERY-th decode step:
+                             GPU time (layer_ms) and CPU time spent launching it (cpu_launch_ms)
   cpu_time_rank<r>.csv       CPU seconds used during inference, thread count, CPU affinity size
   token_wait_rank0.csv       rank 0's wait for each step's next token from the last rank
 
@@ -97,16 +98,18 @@ def traced_forward(layers, current_hidden, position_embeddings, mask, cache):
     if step not in STATE["sampled"]:
         return _orig_forward(layers, current_hidden, position_embeddings, mask, cache)
 
-    events = []
+    events, cpu = [], []
     for layer in layers:
         event = _event()
+        cpu.append(time.perf_counter())  # CPU clock at each layer boundary: time to launch the layer
         event.record()
         events.append(event)
         current_hidden = _orig_forward([layer], current_hidden, position_embeddings, mask, cache)
     event = _event()
+    cpu.append(time.perf_counter())
     event.record()
     events.append(event)
-    STATE["records"].append((step, call % n_mb, events))
+    STATE["records"].append((step, call % n_mb, events, cpu))
     return current_hidden
 
 
@@ -133,11 +136,12 @@ def _save():
     key = ["_".join(map(str, split)), STATE["batch"], STATE["mb"], rank]
     first_layer = sum(split[:rank])
     rows = []
-    for step, mb_idx, events in STATE["records"]:
+    for step, mb_idx, events, cpu in STATE["records"]:
         for i in range(len(events) - 1):
-            rows.append(key + [step, mb_idx, first_layer + i, events[i].elapsed_time(events[i + 1])])
+            rows.append(key + [step, mb_idx, first_layer + i, events[i].elapsed_time(events[i + 1]),
+                               round((cpu[i + 1] - cpu[i]) * 1000.0, 4)])
     _append(f"layer_latency_rank{rank}.csv",
-            ["split", "batch", "mb", "rank", "step", "mb_idx", "layer", "layer_ms"], rows)
+            ["split", "batch", "mb", "rank", "step", "mb_idx", "layer", "layer_ms", "cpu_launch_ms"], rows)
 
     if STATE["token_waits"]:
         _append(f"token_wait_rank{rank}.csv", ["split", "batch", "mb", "rank", "step", "wait_ms"],

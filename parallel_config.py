@@ -112,6 +112,12 @@ ORACLE_7B_PAIRS = {
     "mig1": [(32, 16), (32, 2), (16, 8), (8, 4), (8, 2)],
     "mig2": [(32, 8), (32, 4), (16, 2), (16, 4)],
 }
+# Qwen2.5-7B deep runs: pairs balanced by run time across the boxes (Qwen has no earlier
+# single-node data to stay comparable with, unlike Vicuna's pairs above).
+QWEN_7B_PAIRS = {
+    "mig1": [(32, 16), (8, 2), (32, 8), (16, 4), (8, 4)],
+    "mig2": [(32, 2), (16, 2), (32, 4), (16, 8)],
+}
 # Top 5 per pair from the cross-node runs = the first 23 of the order, plus each regime's worst
 # split for contrast. If a pair's single-node winner is one of its weaker candidates, extend that
 # pair to SPLITS[:36] (top 10). All 120: vicuna7b_40gb_split_order.SPLITS.
@@ -163,10 +169,13 @@ INV_SETUPS = {
 INV = INV_SETUPS[INV_SETUP]
 
 
-def _inv_job(splits, pairs, limits=None):
+def _inv_job(splits, pairs, limits=None, model=None):
     # Explicit splits can pass the sweep's caps and ordering rule.
-    return dict(model=INV["model"], batch_mb_pairs=pairs, splits=splits,
-                layer_limits=limits or INV["layer_limits"], enforce_slice_ordering=False)
+    job = dict(model=model or INV["model"], batch_mb_pairs=pairs, splits=splits,
+               layer_limits=limits or INV["layer_limits"], enforce_slice_ordering=False)
+    if job["model"] == "qwen_7b":  # its last rank may hold 0 layers (norm + output head only)
+        job.update(layer_limits=[28, 12, 6, 3], min_last_rank_layers=0)
+    return job
 
 
 INVESTIGATE = {
@@ -199,7 +208,9 @@ def _env_splits(name):
 INV_SPLITS = _env_splits("INV_SPLITS")
 INV_PAIRS = [tuple(p) for p in _env_splits("INV_PAIRS")]
 if INV_SPLITS and INV_PAIRS:
-    INVESTIGATE["custom"] = [_inv_job(INV_SPLITS, INV_PAIRS), None, None, None]
+    # INV_MODEL picks another model for custom runs (default: the setup's), e.g. qwen_7b.
+    INVESTIGATE["custom"] = [_inv_job(INV_SPLITS, INV_PAIRS, model=os.environ.get("INV_MODEL")),
+                             None, None, None]
 
 INV_RUN = os.environ.get("INV_RUN", "oracle7b" if HOST in GPUS_40GB else "core")
 

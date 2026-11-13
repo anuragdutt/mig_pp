@@ -18,6 +18,9 @@
 #                              and slowest split: layer timing, nsys timeline, ncu on every rank
 #                   ncu_pairs  rerun only ncu for every pair whose timelines finished, on the fastest
 #                              and slowest split those runs used
+#                   deep       per pair, Vicuna-7B: every candidate split plus DEEP_EXTRA, twice:
+#                              layer timing (trace_bench.py) then raw transport logs
+#                   deep_qwen  the same for Qwen2.5-7B on QWEN7B_BY_PAIR, pairs from QWEN_7B_PAIRS
 #   --pairs LIST  pairs for the "pairs" step, e.g. "32,16;8,4" (default: this box's oracle pairs)
 #   --pair-steps  what follows each pair's oracle (default: events,timeline,ncu,raw); raw reruns the
 #                 fastest and slowest split with per-microbatch transport logs (for reading, not timing)
@@ -28,9 +31,10 @@
 #   --dry-run     print the commands only
 #
 # Each step's run directory is appended to investigation_runs.txt ("step dir"), which
-# analyze_investigation.py reads. Start this inside tmux: it runs in the foreground until done.
+# analyze_investigation.py reads. Each invocation first writes a "# run <time> <args>" line. Start this inside tmux: it runs in the foreground until done.
 
 set -u
+ARGS="$*"  # recorded in the run marker line below
 cd "$(dirname "$0")" || exit 1
 
 RUNS="control,events,dcgm,timeline,transport,ncu"
@@ -48,7 +52,7 @@ while [ $# -gt 0 ]; do
         --pair-steps) PAIR_STEPS="$2"; shift ;;
         --smoke) SMOKE=1 ;;
         --dry-run) DRY=1 ;;
-        -h | --help) sed -n '2,32p' "$0"; exit 0 ;;
+        -h | --help) sed -n '2,35p' "$0"; exit 0 ;;
         *) echo "unknown option: $1 (see --help)" >&2; exit 2 ;;
     esac
     shift
@@ -148,6 +152,8 @@ run_pair() { # "b,mb"
 }
 
 say "setup ${INV_SETUP:-host default}, runs: $RUNS, k=${INV_K:-3}, raw logs: ${INV_RAW_LOGS:-0}"
+# Marks where this invocation's steps begin in the manifest; readers skip lines starting with #.
+[ "$DRY" = 1 ] || printf '# run %s %s\n' "$(date '+%Y-%m-%d_%H:%M:%S')" "$ARGS" >> "$MANIFEST"
 if [ "$SMOKE" = 1 ]; then
     say "== smoke"
     if [ "$DRY" = 0 ]; then
@@ -178,6 +184,19 @@ print(';'.join(','.join(map(str, json.load(open(glob.glob(d + '/gpu*/*/job.json'
                     INV_PAIRS="$b,$mb" INV_SPLITS="$splits" INV_NCU_SCALE=0 "$PYTHON" ncu_investigate.py \
                         || FAILED="$FAILED ncu_$tag"
                 fi
+            done ;;
+        deep | deep_qwen)
+            if [ "$step" = deep ]; then model=vicuna_7b; sets="v.BY_PAIR[p] + v.DEEP_EXTRA.get(p, [])"; table=ORACLE_7B_PAIRS
+            else model=qwen_7b; sets="v.QWEN7B_BY_PAIR[p]"; table=QWEN_7B_PAIRS; fi
+            step_pairs="$PAIRS"
+            [ -n "$step_pairs" ] || step_pairs=$("$PYTHON" -c "import parallel_config as p; print(';'.join(f'{b},{m}' for b, m in p.$table.get(p.HOST, [])))")
+            IFS=';' read -r -a PAIR_LIST <<< "$step_pairs"
+            for pair in ${PAIR_LIST[@]+"${PAIR_LIST[@]}"}; do
+                tag="${model}_b${pair%,*}_mb${pair#*,}"
+                splits=$("$PYTHON" -c "import vicuna7b_40gb_split_order as v; p = ($pair); print(';'.join(','.join(map(str, s)) for s in $sets))") \
+                    || { say "$step $pair: no splits"; FAILED="$FAILED ${step}_$pair"; continue; }
+                INV_MODEL="$model" INV_PAIRS="$pair" INV_SPLITS="$splits" run_step "deep_events_$tag" custom trace_bench.py
+                INV_MODEL="$model" INV_PAIRS="$pair" INV_SPLITS="$splits" INV_RAW_LOGS=1 run_step "deep_raw_$tag" custom ""
             done ;;
         pairs)
             [ -n "$PAIRS" ] || PAIRS=$("$PYTHON" -c "import parallel_config as p; print(';'.join(f'{b},{m}' for b, m in p.ORACLE_7B_PAIRS.get(p.HOST, [])))")

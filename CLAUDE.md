@@ -383,6 +383,14 @@ This was the permission gate for the ACK change, which is now committed.
 
 ## Things that cost time before
 
+**nsys timelines show which kernels run and in what order, not timing between ranks.** Use raw
+transport logs (T05/T13/T15 timestamps) and events data (`trace_bench.py` per-layer times) for that.
+Evidence, 2026-11-12, single-node 40GB (32, 16), split [19, 9, 3, 1]: under nsys rank 0's microbatch
+took ~37.8 ms vs ~23 ms untraced (other ranks barely changed), steps took ~158 ms vs ~111 ms, and the
+4 ranks looked fully serialized; the raw-log run shows ~11 ms of real overlap between rank 0 and
+rank 1. Tracing slows kernel launching, which delays the publish-one-behind handoff. Inferred from
+comparing runs, not an A/B in one run.
+
 **The box runs torch 2.14.0+cu130, not the `torch==2.13.0` pinned in
 `requirements.txt:280`.** Reasoning from the stale pin produced a confidently wrong
 conclusion: adversarial refuter agents claimed `ProcessGroupGloo` stages CUDA tensors
