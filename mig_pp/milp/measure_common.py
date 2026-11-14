@@ -286,75 +286,177 @@ def fit_rate(points):
     return a, (1e6 / b if b > 0 else float("nan"))
 
 
+# ---------------------------------------------------------------------------
+# steady-state GPU timing: what a primitive takes while the GPU is busy, as in a running decode
+# ---------------------------------------------------------------------------
+L2_BYTES = 40 << 20  # A100's L2; a slice has at most this
+
+
+def warm_gpu(seconds=1.0):
+    """Keep the GPU busy so its clock is where it sits during a decode (it lowers it when idle)."""
+    a = torch.randn(4096, 4096, dtype=torch.float16, device="cuda")
+    b = torch.randn_like(a)
+    t_end = time.perf_counter() + seconds
+    while time.perf_counter() < t_end:
+        for _ in range(10):
+            torch.mm(a, b)
+        torch.cuda.synchronize()
+
+
+def sm_clock_mhz():
+    """The GPU's current SM clock (nvidia-smi; with MIG, the parent GPU's), or None."""
+    import subprocess
+
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-gpu=clocks.sm", "--format=csv,noheader,nounits"],
+                             capture_output=True, text=True, timeout=10).stdout.split()
+        return int(out[0])
+    except Exception:
+        return None
+
+
+def copies_for(nbytes):
+    """Input copies to rotate through so two calls in a row never find their inputs in L2: in a
+    decode every layer reads its own weights and KV cache."""
+    return max(1, min(64, -(-2 * L2_BYTES // max(int(nbytes), 1))))
+
+
+def graph_us(calls, target_ms=20.0, replays=5):
+    """GPU time (us) per call, steady state: the calls (closures, rotated) captured n times in a
+    CUDA graph and replayed back to back, so neither CPU launch gaps nor idle gaps are in it.
+    Falls back to a back-to-back eager loop (launch gaps included) if capture fails."""
+    side = torch.cuda.Stream()
+    side.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(side):  # warm-up off the default stream, as CUDA graph capture needs
+        for c in calls[:3]:
+            c()
+    torch.cuda.current_stream().wait_stream(side)
+    torch.cuda.synchronize()
+    e0, e1 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+    e0.record()
+    calls[0]()
+    e1.record()
+    torch.cuda.synchronize()
+    n = int(min(400, max(5, target_ms * 1000 / max(e0.elapsed_time(e1) * 1000, 1.0))))
+    try:
+        g = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g):
+            for k in range(n):
+                calls[k % len(calls)]()
+        g.replay()
+        torch.cuda.synchronize()
+        run = g.replay
+    except Exception as err:  # report and keep going
+        print(f"    (no CUDA graph: {type(err).__name__}; timing an eager loop)", flush=True)
+        def run():
+            for k in range(n):
+                calls[k % len(calls)]()
+    times = []
+    for _ in range(replays):
+        e0.record()
+        run()
+        e1.record()
+        torch.cuda.synchronize()
+        times.append(e0.elapsed_time(e1) * 1000 / n)
+    return statistics.median(times)
+
+
 def primitives(c, peak, gpcs):
     """Generic GPU primitives on the visible device (a whole GPU or one MIG slice), as functions
-    of shape, no model: each fitted as t = fixed + units / rate over its sweep. peak = the
-    device's peak HBM bytes/s; gpcs = its GPC count. Prints the tables; returns a dict."""
+    of shape, no model, timed in steady state (graph_us). Each sweep is fitted as
+    t = fixed + units / rate; attention and the KV append per head shape. peak = the device's peak
+    HBM bytes/s; gpcs = its GPC count. Prints the tables; returns a dict."""
     f16 = dict(dtype=torch.float16, device="cuda")
-    out = {}
+    out, clocks = {}, {}
 
     def report(name, pts, unit, scale, per):
         fixed, rate = fit_rate(pts)
         worst = max(abs((fixed + x / rate * 1e6) / t - 1) for x, t in pts)
         out[f"{name}_fixed_us"], out[f"{name}_rate"] = fixed, rate
-        print(f"  {name:<12} fixed {fixed:7.1f} us + {unit} / {rate / scale:8.1f} {per}"
-              f"   ({len(pts)} points, worst {100 * worst:.1f}% off)")
+        print(f"  {name:<22} fixed {fixed:7.1f} us + {unit} / {rate / scale:8.1f} {per}"
+              f"   ({len(pts)} points, worst {100 * worst:.1f}% off)", flush=True)
 
-    print("\nprimitives (kernel time, torch.profiler):")
+    def group(name):  # warm the GPU before each sweep, note its clock
+        warm_gpu(c["warm_s"])
+        clocks[name] = sm_clock_mhz()
+
+    print(f"\nprimitives (steady state: CUDA graphs, GPU warmed; SM clock at start {sm_clock_mhz()} MHz):")
     # decode GEMMs (M <= 32): weight streaming, bytes = N x K x 2
+    group("gemm_decode")
     pts = []
     for N, K in c["gemm_shapes"]:
-        w = torch.randn(N, K, **f16)
+        ws = [torch.randn(N, K, **f16) for _ in range(copies_for(N * K * 2))]
         for M in c["gemm_decode_m"]:
-            x = torch.randn(M, K, **f16)
-            pts.append((N * K * 2, kernel_us(lambda: F.linear(x, w))))
-        del w
+            x, y = torch.randn(M, K, **f16), torch.empty(M, N, **f16)
+            calls = [(lambda w=w: torch.matmul(x, w.t(), out=y)) for w in ws]
+            pts.append((N * K * 2, graph_us(calls)))
+        del ws
     report("gemm_decode", pts, "weight bytes", 1e9, "GB/s")
     # prefill GEMMs (large M): FLOPs = 2 x M x N x K
+    group("gemm_prefill")
     pts = []
     for N, K in c["gemm_prefill_shapes"]:
-        w = torch.randn(N, K, **f16)
+        ws = [torch.randn(N, K, **f16) for _ in range(copies_for(N * K * 2))]
         for M in c["gemm_prefill_m"]:
-            x = torch.randn(M, K, **f16)
-            pts.append((2 * M * N * K, kernel_us(lambda: F.linear(x, w))))
-        del w
+            x, y = torch.randn(M, K, **f16), torch.empty(M, N, **f16)
+            calls = [(lambda w=w: torch.matmul(x, w.t(), out=y)) for w in ws]
+            pts.append((2 * M * N * K, graph_us(calls)))
+        del ws
     report("gemm_prefill", pts, "FLOPs", 1e12, "TFLOP/s")
-    # decode attention, one query token per sequence against L cached, as transformers 5.14.1
-    # (integrations/sdpa_attention.py) calls SDPA in decode (no mask): full attention (K/V heads =
-    # query heads) as is; GQA with enable_gqa=True, K/V not expanded (torch >= 2.5). Prefill passes
-    # a mask, so there GQA K/V are expanded (repeat_kv) first. bytes = 2 (K, V) x mb x kv x L x d x 2
-    for name, configs, gqa in (("attention_mha", [(h, h, d) for h, d in c["attn_mha"]], False),
+    # decode attention, as transformers 5.14.1 / 5.18.0 call SDPA in decode (no mask): full attention
+    # as is; GQA with enable_gqa=True, K/V not expanded. Fitted per head shape.
+    # bytes = 2 (K, V) x mb x kv x L x head_dim x 2
+    group("attention")
+    for kind, configs, gqa in (("attention_mha", [(h, h, d) for h, d in c["attn_mha"]], False),
                                ("attention_gqa", c["attn_gqa"], True)):
-        pts = []
         for heads, kv, d in configs:
+            pts = []
             for L in c["attn_ctx"]:
                 for mb in c["attn_mb"]:
+                    nb = 2 * mb * kv * L * d * 2
                     q = torch.randn(mb, heads, 1, d, **f16)
-                    k, v = torch.randn(mb, kv, L, d, **f16), torch.randn(mb, kv, L, d, **f16)
+                    kvs = [(torch.randn(mb, kv, L, d, **f16), torch.randn(mb, kv, L, d, **f16)) for _ in range(copies_for(nb))]
                     kw = dict(enable_gqa=True) if gqa else {}
-                    pts.append((2 * mb * kv * L * d * 2, kernel_us(lambda: F.scaled_dot_product_attention(q, k, v, **kw))))
-        report(name, pts, "KV bytes", 1e9, "GB/s")
-    # KV cache append (DynamicCache: torch.cat of the cache and one new token); bytes read + written
-    pts = []
+                    calls = [(lambda k=k, v=v: F.scaled_dot_product_attention(q, k, v, **kw)) for k, v in kvs]
+                    pts.append((nb, graph_us(calls)))
+                    del kvs
+            report(f"{kind}_h{heads}_kv{kv}_d{d}", pts, "KV bytes", 1e9, "GB/s")
+    # KV cache append (DynamicLayer.update: torch.cat of the cache and one new token), per K/V head
+    # count; bytes read + written
+    group("kv_append")
     for kv in c["cat_kv_heads"]:
+        pts = []
         for L in c["attn_ctx"]:
             for mb in c["attn_mb"]:
-                cache, new = torch.randn(mb, kv, L, 128, **f16), torch.randn(mb, kv, 1, 128, **f16)
-                pts.append((2 * mb * kv * (L + 1) * 128 * 2, kernel_us(lambda: torch.cat([cache, new], dim=-2))))
-    report("kv_append", pts, "bytes", 1e9, "GB/s")
-    # elementwise (binary, in place): bytes = 3 x numel x 2
+                nb = 2 * mb * kv * (L + 1) * 128 * 2
+                caches = [torch.randn(mb, kv, L, 128, **f16) for _ in range(copies_for(nb))]
+                new, dst = torch.randn(mb, kv, 1, 128, **f16), torch.empty(mb, kv, L + 1, 128, **f16)
+                calls = [(lambda cc=cc: torch.cat([cc, new], dim=-2, out=dst)) for cc in caches]
+                pts.append((nb, graph_us(calls)))
+                del caches
+        report(f"kv_append_kv{kv}", pts, "bytes", 1e9, "GB/s")
+    # elementwise (binary, in place): bytes = 3 x numel x 2. Small sizes give the fixed time per
+    # kernel, sizes past L2 the rate.
+    group("elementwise")
     pts = []
     for n in c["elem_numel"]:
-        a, b = torch.randn(n, **f16), torch.randn(n, **f16)
-        pts.append((3 * n * 2, kernel_us(lambda: a.mul_(b))))
-    report("elementwise", pts, "bytes", 1e9, "GB/s")
-    # device copy (clone, a DtoD memcpy): bytes read + written
-    pts = []
-    for n in c["elem_numel"]:
+        bs = [torch.randn(n, **f16) for _ in range(copies_for(3 * n * 2))]
         a = torch.randn(n, **f16)
-        pts.append((2 * n * 2, kernel_us(lambda: a.clone(), copies=True)))
+        calls = [(lambda b=b: a.mul_(b)) for b in bs]
+        pts.append((3 * n * 2, graph_us(calls)))
+        del bs
+    report("elementwise", pts, "bytes", 1e9, "GB/s")
+    # device copy (DtoD): bytes read + written
+    group("device_copy")
+    pts = []
+    for n in c["elem_numel"]:
+        srcs = [torch.randn(n, **f16) for _ in range(copies_for(2 * n * 2))]
+        dst = torch.empty(n, **f16)
+        calls = [(lambda s_=s_: dst.copy_(s_)) for s_ in srcs]
+        pts.append((2 * n * 2, graph_us(calls)))
+        del srcs
     report("device_copy", pts, "bytes", 1e9, "GB/s")
-    # host copies as the transport does them (wall time, a side stream + event wait)
+    # host copies as the transport does them (wall time, a side stream + event wait; CPU in it)
     d2h, h2d = [], []
     for nb in c["copy_bytes"]:
         a, b = device_copies(nb)
@@ -363,17 +465,45 @@ def primitives(c, peak, gpcs):
     report("d2h", d2h, "bytes", 1e9, "GB/s")
     report("h2d", h2d, "bytes", 1e9, "GB/s")
 
-    out.update(peak=peak, gpcs=gpcs)
-    print("  as fractions: " + ", ".join(f"{k[:-5]} {out[k] / peak:.3f} of peak"
-                                       for k in ("gemm_decode_rate", "attention_mha_rate", "attention_gqa_rate", "kv_append_rate",
-                                                 "elementwise_rate", "device_copy_rate"))
+    out.update(peak=peak, gpcs=gpcs, sm_clock_mhz=clocks)
+    print(f"  SM clock after each warm-up (MHz): {clocks}")
+    rates = [k for k in out if k.endswith("_rate") and k not in ("gemm_prefill_rate", "d2h_rate", "h2d_rate")]
+    print("  as fractions of peak: " + ", ".join(f"{k[:-5]} {out[k] / peak:.3f}" for k in rates)
           + f"; prefill {out['gemm_prefill_rate'] / gpcs / 1e12:.1f} TFLOP/s per GPC")
     return out
 
 
+def layer_kernel_us_steady(layer, rotary, mb, ctx, calls=10):
+    """Kernel time (us) of one decode layer call in steady state: the GPU warmed, `calls` calls
+    back to back (the cache grows by one token each, negligible), profiler kernel time / calls."""
+    h, emb, _ = decode_input(rotary, mb, ctx)
+    with torch.no_grad():
+        cache = cache_at(layer, rotary, mb, ctx)
+        layer_forward(layer, h, emb, cache)
+        warm_gpu(0.3)
+        _, us = kernels(lambda: [layer_forward(layer, h, emb, cache) for _ in range(calls)])
+    return us / calls
+
+
+def prefill_layer_us_steady(layer, rotary, mb, seq, calls=5):
+    """Kernel time (us) of one prefill layer call in steady state (fresh cache each call)."""
+    from transformers import DynamicCache
+
+    x = torch.randn(mb, seq, HIDDEN, dtype=torch.float16, device="cuda")
+    pos = torch.arange(seq, device="cuda").unsqueeze(0)
+    mask = torch.triu(torch.full((1, 1, seq, seq), torch.finfo(torch.float16).min, device="cuda"), diagonal=1).half()
+    with torch.no_grad():
+        emb = rotary(x, pos)
+        layer_forward(layer, x, emb, DynamicCache(), mask)
+        warm_gpu(0.3)
+        _, us = kernels(lambda: [layer_forward(layer, x, emb, DynamicCache(), mask) for _ in range(calls)])
+    return us / calls
+
+
 def validation_layers(c):
     """VALIDATION ONLY, never a constant: one decoder layer's kernel time per model at a few
-    (mb, ctx), to check later that layer time composed from the primitives matches."""
+    (mb, ctx), in steady state like the primitives, to check that layer time composed from the
+    primitives matches."""
     out = {}
     for path in c["validate_models"]:
         try:
@@ -384,10 +514,10 @@ def validation_layers(c):
         rows = {}
         for mb in c["validate_mb"]:
             for ctx in c["validate_ctx"]:
-                rows[f"decode mb{mb} ctx{ctx}"] = layer_kernel_us(layer, rotary, mb, ctx, reps=3)[1]
-            rows[f"prefill mb{mb} seq{c['seq_len']}"] = prefill_layer_us(layer, rotary, mb, c["seq_len"], reps=3)
+                rows[f"decode mb{mb} ctx{ctx}"] = layer_kernel_us_steady(layer, rotary, mb, ctx)
+            rows[f"prefill mb{mb} seq{c['seq_len']}"] = prefill_layer_us_steady(layer, rotary, mb, c["seq_len"])
         out[path] = rows
-        print(f"\nvalidation layer, {path} (kernel us): " + ", ".join(f"{k} {v:.0f}" for k, v in rows.items()))
+        print(f"\nvalidation layer, {path} (kernel us, steady state): " + ", ".join(f"{k} {v:.0f}" for k, v in rows.items()))
         del layer, rotary
         torch.cuda.empty_cache()
     return out
@@ -404,8 +534,9 @@ PRIMITIVE_CONFIG = dict(
     attn_ctx=[64, 320, 576, 1088],
     attn_mb=[1, 8, 32],
     cat_kv_heads=[4, 8, 32, 40],
-    elem_numel=[4096, 65536, 1 << 20, 1 << 24],
+    elem_numel=[4096, 65536, 1 << 25, 1 << 26],  # small: fixed time per kernel; 64-128 MB: past L2, the rate
     copy_bytes=[16 << 10, 64 << 10, 512 << 10, 4 << 20],
+    warm_s=1.0,  # seconds of GPU load before each sweep
     validate_models=["lmsys/vicuna-7b-v1.5", "Qwen/Qwen2.5-7B"],  # HF ids (config.json only) or local dirs
     validate_mb=[1, 8, 32],
     validate_ctx=[64, 320, 575],

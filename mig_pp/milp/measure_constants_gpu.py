@@ -34,16 +34,15 @@ def main():
     g = mc.primitives(c, peak, gpcs=7)
     g["validation"] = mc.validation_layers(c)
 
-    keys = ("gemm_decode", "elementwise", "attention_mha", "attention_gqa", "kv_append", "device_copy")
-    print(f"\n# measured on a whole {name} ({card}); a MIG slice of m memory slices (of 8) and g GPCs:")
-    print("# rates x m/8 (the *_eff below x card peak x m/8), prefill flops x g/7, fixed times and D2H/H2D as they are")
+    print(f"\n# measured on a whole {name} ({card}), steady state; a MIG slice of m memory slices (of 8) and")
+    print("# g GPCs: *_eff x card peak x m/8 for the rates, gemm_prefill_flops_per_gpc x g, fixed times as they are")
     print(f"GPU_PRIMITIVES[\"{card}\"] = dict(")
-    for k in keys:
+    for k in [k[:-5] for k in g if k.endswith("_rate") and k not in ("gemm_prefill_rate", "d2h_rate", "h2d_rate")]:
         print(f"    {k}_fixed_us={g[k + '_fixed_us']:.1f}, {k}_eff={g[k + '_rate'] / peak:.3f},")
     print(f"    gemm_prefill_fixed_us={g['gemm_prefill_fixed_us']:.1f}, gemm_prefill_flops_per_gpc={g['gemm_prefill_rate'] / 7:.3g},")
     print(f"    d2h_fixed_us={g['d2h_fixed_us']:.1f}, d2h_rate={g['d2h_rate']:.3g}, "
           f"h2d_fixed_us={g['h2d_fixed_us']:.1f}, h2d_rate={g['h2d_rate']:.3g},")
-    print(")")
+    print(f")  # SM clock {g.get('sm_clock_mhz')}")
     mc.save_json(c["json"], dict(device=name, card=card, **g))
 
 

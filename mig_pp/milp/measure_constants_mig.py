@@ -89,17 +89,14 @@ def main():
         results.append(json.load(open(out)))
         os.remove(out)
 
-    keys = ("gemm_decode", "gemm_prefill", "attention_mha", "attention_gqa", "kv_append", "elementwise", "device_copy", "d2h", "h2d")
-    print("\n# generic primitives per MIG slice: t = fixed_us + units / rate (units: bytes, or FLOPs for gemm_prefill)")
+    print("\n# generic primitives per MIG slice, steady state: t = fixed_us + units / rate (units: bytes,"
+          " or FLOPs for gemm_prefill); attention and kv_append per head shape")
     print("SLICE_PRIMITIVES = {")
     for g in results:
-        body = ", ".join(f"{k}_fixed_us={g[k + '_fixed_us']:.1f}, {k}_rate={g[k + '_rate']:.3g}" for k in keys)
-        print(f"    {g['gb']}: dict({body}),  # {g['profile']}")
+        names = [k[:-5] for k in g if k.endswith("_rate")]
+        body = ",\n             ".join(f"{k}_fixed_us={g[k + '_fixed_us']:.1f}, {k}_rate={g[k + '_rate']:.3g}" for k in names)
+        print(f"    {g['gb']}: dict({body}),  # {g['profile']}, SM clock {g.get('sm_clock_mhz')}")
     print("}")
-    for g in results:
-        print(f"#   {g['profile']}: gemm_decode {g['gemm_decode_rate'] / g['peak']:.3f}, attention {g['attention_mha_rate'] / g['peak']:.3f} (GQA {g['attention_gqa_rate'] / g['peak']:.3f})"
-              f", elementwise {g['elementwise_rate'] / g['peak']:.3f} of the slice's memory share; prefill "
-              f"{g['gemm_prefill_rate'] / g['gpcs'] / 1e12:.1f} TFLOP/s per GPC")
     with open(c["json"], "w") as f:
         json.dump(results, f, indent=2)
     print(f"\nwrote {c['json']}")
