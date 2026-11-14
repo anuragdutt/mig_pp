@@ -23,6 +23,8 @@
 #                   deep_qwen  the same for Qwen2.5-7B on QWEN7B_BY_PAIR, pairs from QWEN_7B_PAIRS
 #                   qwen_ncu   ncu for Qwen2.5-7B: every pair, every rank and the output head; mig1
 #                              takes every other profile, mig2 the rest
+#                   near       per pair in --pairs, Vicuna-7B: one oracle over that pair's near-best
+#                              splits (vicuna7b_40gb_split_order.NEAR_BEST); mig2 runs each list reversed
 #   --pairs LIST  pairs for the "pairs" step, e.g. "32,16;8,4" (default: this box's oracle pairs)
 #   --pair-steps  what follows each pair's oracle (default: events,timeline,ncu,raw); raw reruns the
 #                 fastest and slowest split with per-microbatch transport logs (for reading, not timing)
@@ -206,6 +208,18 @@ print(';'.join(','.join(map(str, json.load(open(glob.glob(d + '/gpu*/*/job.json'
                     || { say "$step $pair: no splits"; FAILED="$FAILED ${step}_$pair"; continue; }
                 INV_MODEL="$model" INV_PAIRS="$pair" INV_SPLITS="$splits" run_step "deep_events_$tag" custom trace_bench.py
                 INV_MODEL="$model" INV_PAIRS="$pair" INV_SPLITS="$splits" INV_RAW_LOGS=1 run_step "deep_raw_$tag" custom ""
+            done ;;
+        near)
+            [ -n "$PAIRS" ] || { say "near: list the pairs with --pairs"; FAILED="$FAILED near"; }
+            IFS=';' read -r -a PAIR_LIST <<< "$PAIRS"
+            for pair in ${PAIR_LIST[@]+"${PAIR_LIST[@]}"}; do
+                tag="b${pair%,*}_mb${pair#*,}"
+                splits=$("$PYTHON" -c "import vicuna7b_40gb_split_order as v, parallel_config as h
+s = v.NEAR_BEST[($pair)]
+s = s[::-1] if h.HOST == 'mig2' else s
+print(';'.join(','.join(map(str, x)) for x in s))") \
+                    || { say "near $pair: no splits in vicuna7b_40gb_split_order.NEAR_BEST"; FAILED="$FAILED near_$tag"; continue; }
+                INV_PAIRS="$pair" INV_SPLITS="$splits" run_step "near_$tag" custom ""
             done ;;
         pairs)
             [ -n "$PAIRS" ] || PAIRS=$("$PYTHON" -c "import parallel_config as p; print(';'.join(f'{b},{m}' for b, m in p.ORACLE_7B_PAIRS.get(p.HOST, [])))")
