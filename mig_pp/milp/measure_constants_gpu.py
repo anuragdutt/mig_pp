@@ -33,6 +33,8 @@ def main():
 
     g = mc.primitives(c, peak, gpcs=7)
     g["validation"] = mc.validation_layers(c)
+    print("\nrepeat pass of the primitives (same sweeps, later in time; compare with the first):")
+    g["repeat"] = mc.primitives(c, peak, gpcs=7)
 
     print(f"\n# measured on a whole {name} ({card}), steady state; a MIG slice of m memory slices (of 8) and")
     print("# g GPCs: *_eff x card peak x m/8 for the rates, gemm_prefill_flops_per_gpc x g, fixed times as they are")

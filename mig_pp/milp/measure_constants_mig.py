@@ -8,7 +8,8 @@ Edit CONFIG in main(), then on the box, MIG enabled, nothing else running on tha
 
 It finds the GPU's slices with nvidia-smi -L and measures one slice type at a time, each in
 its own process (CUDA_VISIBLE_DEVICES=MIG-<uuid>); slices of the same type are measured once.
-Prints a dict per slice and writes CONFIG["json"]. ~3-5 min per slice type.
+Prints a dict per slice and writes CONFIG["json"] (raw points, timing method, the repeat
+pass). ~5-8 min per slice type.
 """
 
 import json
@@ -49,8 +50,11 @@ def measure_one(c):
     peak = mc.CARD_BW[card] * share
     print(f"{name}: {gpcs} GPCs, {gb} GB = {share:.3f} of {card} (slice peak {peak / 1e9:.0f} GB/s)")
     g = mc.primitives(c, peak, gpcs)
+    validation = mc.validation_layers(c)
+    print("\nrepeat pass of the primitives (same sweeps, later in time; compare with the first):")
+    repeat = mc.primitives(c, peak, gpcs)
     g.update(device=name, profile=f"{gpcs}g.{gb}gb", gb=gb, card=card, mem_share=share,
-             validation=mc.validation_layers(c))
+             validation=validation, repeat=repeat)
     with open(c["child_out"], "w") as f:
         json.dump(g, f)
 

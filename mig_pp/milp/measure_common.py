@@ -322,9 +322,10 @@ def copies_for(nbytes):
 
 
 def graph_us(calls, target_ms=20.0, replays=5):
-    """GPU time (us) per call, steady state: the calls (closures, rotated) captured n times in a
-    CUDA graph and replayed back to back, so neither CPU launch gaps nor idle gaps are in it.
-    Falls back to a back-to-back eager loop (launch gaps included) if capture fails."""
+    """(GPU time in us per call, method, every replay's time), steady state: the calls (closures, rotated) captured n
+    times in a CUDA graph and replayed back to back, so neither CPU launch gaps nor idle gaps are in
+    it; median of `replays` replays. method "graph", or "eager" if capture failed (a back-to-back
+    eager loop, launch gaps included: kept apart from graph points, never fitted with them)."""
     side = torch.cuda.Stream()
     side.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(side):  # warm-up off the default stream, as CUDA graph capture needs
@@ -338,6 +339,7 @@ def graph_us(calls, target_ms=20.0, replays=5):
     e1.record()
     torch.cuda.synchronize()
     n = int(min(400, max(5, target_ms * 1000 / max(e0.elapsed_time(e1) * 1000, 1.0))))
+    method = "graph"
     try:
         g = torch.cuda.CUDAGraph()
         with torch.cuda.graph(g):
@@ -348,6 +350,7 @@ def graph_us(calls, target_ms=20.0, replays=5):
         run = g.replay
     except Exception as err:  # report and keep going
         print(f"    (no CUDA graph: {type(err).__name__}; timing an eager loop)", flush=True)
+        method = "eager"
         def run():
             for k in range(n):
                 calls[k % len(calls)]()
@@ -358,7 +361,7 @@ def graph_us(calls, target_ms=20.0, replays=5):
         e1.record()
         torch.cuda.synchronize()
         times.append(e0.elapsed_time(e1) * 1000 / n)
-    return statistics.median(times)
+    return statistics.median(times), method, times
 
 
 def primitives(c, peak, gpcs):
@@ -367,14 +370,27 @@ def primitives(c, peak, gpcs):
     t = fixed + units / rate; attention and the KV append per head shape. peak = the device's peak
     HBM bytes/s; gpcs = its GPC count. Prints the tables; returns a dict."""
     f16 = dict(dtype=torch.float16, device="cuda")
-    out, clocks = {}, {}
+    out, clocks = {"timing": {}}, {}
 
-    def report(name, pts, unit, scale, per):
-        fixed, rate = fit_rate(pts)
-        worst = max(abs((fixed + x / rate * 1e6) / t - 1) for x, t in pts)
+    def report(name, pts, unit, scale, per, timing="device time: CUDA graph replays, GPU warmed, back to back"):
+        """pts: [(units, us, method, shape dict)]. Fits the graph-timed points only; every point is
+        kept raw with its shape, method and residual against the fit."""
+        fit_pts = [(x, t) for x, t, m, _ in pts if m in ("graph", "wall")]
+        eager = len(pts) - len(fit_pts)
+        if len({x for x, _ in fit_pts}) < 2:  # a slope needs two distinct sizes
+            print(f"  {name:<22} NOT FITTED: {len(fit_pts)} graph-timed points at "
+                  f"{len({x for x, _ in fit_pts})} distinct sizes ({eager} eager)", flush=True)
+            fixed, rate = float("nan"), float("nan")
+        else:
+            fixed, rate = fit_rate(fit_pts)
+            worst = max(abs((fixed + x / rate * 1e6) / t - 1) for x, t in fit_pts)
+            print(f"  {name:<22} fixed {fixed:7.1f} us + {unit} / {rate / scale:8.1f} {per}"
+                  f"   ({len(fit_pts)} points, worst {100 * worst:.1f}% off"
+                  + (f"; {eager} eager points not fitted" if eager else "") + ")", flush=True)
         out[f"{name}_fixed_us"], out[f"{name}_rate"] = fixed, rate
-        print(f"  {name:<22} fixed {fixed:7.1f} us + {unit} / {rate / scale:8.1f} {per}"
-              f"   ({len(pts)} points, worst {100 * worst:.1f}% off)", flush=True)
+        out[f"{name}_points"] = [dict(units=x, us=t, method=m, residual=((fixed + x / rate * 1e6) / t - 1) if rate == rate else None, **shape)
+                                 for x, t, m, shape in pts]
+        out["timing"][name] = timing
 
     def group(name):  # warm the GPU before each sweep, note its clock
         warm_gpu(c["warm_s"])
@@ -389,7 +405,8 @@ def primitives(c, peak, gpcs):
         for M in c["gemm_decode_m"]:
             x, y = torch.randn(M, K, **f16), torch.empty(M, N, **f16)
             calls = [(lambda w=w: torch.matmul(x, w.t(), out=y)) for w in ws]
-            pts.append((N * K * 2, graph_us(calls)))
+            t, m, reps = graph_us(calls)
+            pts.append((N * K * 2, t, m, dict(N=N, K=K, M=M, replays_us=reps)))
         del ws
     report("gemm_decode", pts, "weight bytes", 1e9, "GB/s")
     # prefill GEMMs (large M): FLOPs = 2 x M x N x K
@@ -400,7 +417,8 @@ def primitives(c, peak, gpcs):
         for M in c["gemm_prefill_m"]:
             x, y = torch.randn(M, K, **f16), torch.empty(M, N, **f16)
             calls = [(lambda w=w: torch.matmul(x, w.t(), out=y)) for w in ws]
-            pts.append((2 * M * N * K, graph_us(calls)))
+            t, m, reps = graph_us(calls)
+            pts.append((2 * M * N * K, t, m, dict(N=N, K=K, M=M, replays_us=reps)))
         del ws
     report("gemm_prefill", pts, "FLOPs", 1e12, "TFLOP/s")
     # decode attention, as transformers 5.14.1 / 5.18.0 call SDPA in decode (no mask): full attention
@@ -418,7 +436,8 @@ def primitives(c, peak, gpcs):
                     kvs = [(torch.randn(mb, kv, L, d, **f16), torch.randn(mb, kv, L, d, **f16)) for _ in range(copies_for(nb))]
                     kw = dict(enable_gqa=True) if gqa else {}
                     calls = [(lambda k=k, v=v: F.scaled_dot_product_attention(q, k, v, **kw)) for k, v in kvs]
-                    pts.append((nb, graph_us(calls)))
+                    t, m, reps = graph_us(calls)
+                    pts.append((nb, t, m, dict(heads=heads, kv=kv, d=d, L=L, mb=mb, replays_us=reps)))
                     del kvs
             report(f"{kind}_h{heads}_kv{kv}_d{d}", pts, "KV bytes", 1e9, "GB/s")
     # KV cache append (DynamicLayer.update: torch.cat of the cache and one new token), per K/V head
@@ -432,7 +451,8 @@ def primitives(c, peak, gpcs):
                 caches = [torch.randn(mb, kv, L, 128, **f16) for _ in range(copies_for(nb))]
                 new, dst = torch.randn(mb, kv, 1, 128, **f16), torch.empty(mb, kv, L + 1, 128, **f16)
                 calls = [(lambda cc=cc: torch.cat([cc, new], dim=-2, out=dst)) for cc in caches]
-                pts.append((nb, graph_us(calls)))
+                t, m, reps = graph_us(calls)
+                pts.append((nb, t, m, dict(kv=kv, d=128, L=L, mb=mb, replays_us=reps)))
                 del caches
         report(f"kv_append_kv{kv}", pts, "bytes", 1e9, "GB/s")
     # elementwise (binary, in place): bytes = 3 x numel x 2. Small sizes give the fixed time per
@@ -443,7 +463,8 @@ def primitives(c, peak, gpcs):
         bs = [torch.randn(n, **f16) for _ in range(copies_for(3 * n * 2))]
         a = torch.randn(n, **f16)
         calls = [(lambda b=b: a.mul_(b)) for b in bs]
-        pts.append((3 * n * 2, graph_us(calls)))
+        t, m, reps = graph_us(calls)
+        pts.append((3 * n * 2, t, m, dict(numel=n, replays_us=reps)))
         del bs
     report("elementwise", pts, "bytes", 1e9, "GB/s")
     # device copy (DtoD): bytes read + written
@@ -453,21 +474,23 @@ def primitives(c, peak, gpcs):
         srcs = [torch.randn(n, **f16) for _ in range(copies_for(2 * n * 2))]
         dst = torch.empty(n, **f16)
         calls = [(lambda s_=s_: dst.copy_(s_)) for s_ in srcs]
-        pts.append((2 * n * 2, graph_us(calls)))
+        t, m, reps = graph_us(calls)
+        pts.append((2 * n * 2, t, m, dict(numel=n, replays_us=reps)))
         del srcs
     report("device_copy", pts, "bytes", 1e9, "GB/s")
     # host copies as the transport does them (wall time, a side stream + event wait; CPU in it)
     d2h, h2d = [], []
     for nb in c["copy_bytes"]:
         a, b = device_copies(nb)
-        d2h.append((nb, nb / a * 1e6))
-        h2d.append((nb, nb / b * 1e6))
-    report("d2h", d2h, "bytes", 1e9, "GB/s")
-    report("h2d", h2d, "bytes", 1e9, "GB/s")
+        d2h.append((nb, nb / a * 1e6, "wall", dict(bytes=nb)))
+        h2d.append((nb, nb / b * 1e6, "wall", dict(bytes=nb)))
+    wall = "wall time: side-stream copy + event wait, as the transport does it (CPU and GPU, mean of 200)"
+    report("d2h", d2h, "bytes", 1e9, "GB/s", timing=wall)
+    report("h2d", h2d, "bytes", 1e9, "GB/s", timing=wall)
 
     out.update(peak=peak, gpcs=gpcs, sm_clock_mhz=clocks)
     print(f"  SM clock after each warm-up (MHz): {clocks}")
-    rates = [k for k in out if k.endswith("_rate") and k not in ("gemm_prefill_rate", "d2h_rate", "h2d_rate")]
+    rates = [k for k in out if k.endswith("_rate") and k not in ("gemm_prefill_rate", "d2h_rate", "h2d_rate") and out[k] == out[k]]
     print("  as fractions of peak: " + ", ".join(f"{k[:-5]} {out[k] / peak:.3f}" for k in rates)
           + f"; prefill {out['gemm_prefill_rate'] / gpcs / 1e12:.1f} TFLOP/s per GPC")
     return out
@@ -514,10 +537,13 @@ def validation_layers(c):
         rows = {}
         for mb in c["validate_mb"]:
             for ctx in c["validate_ctx"]:
-                rows[f"decode mb{mb} ctx{ctx}"] = layer_kernel_us_steady(layer, rotary, mb, ctx)
-            rows[f"prefill mb{mb} seq{c['seq_len']}"] = prefill_layer_us_steady(layer, rotary, mb, c["seq_len"])
+                w = [layer_kernel_us_steady(layer, rotary, mb, ctx) for _ in range(c["windows"])]
+                rows[f"decode mb{mb} ctx{ctx}"] = dict(median=statistics.median(w), spread=(max(w) - min(w)) / min(w), windows=w)
+            w = [prefill_layer_us_steady(layer, rotary, mb, c["seq_len"]) for _ in range(c["windows"])]
+            rows[f"prefill mb{mb} seq{c['seq_len']}"] = dict(median=statistics.median(w), spread=(max(w) - min(w)) / min(w), windows=w)
         out[path] = rows
-        print(f"\nvalidation layer, {path} (kernel us, steady state): " + ", ".join(f"{k} {v:.0f}" for k, v in rows.items()))
+        print(f"\nvalidation layer, {path} (kernel us, steady state, median of {c['windows']} windows, spread): "
+              + ", ".join(f"{k} {v['median']:.0f} ({100 * v['spread']:.1f}%)" for k, v in rows.items()))
         del layer, rotary
         torch.cuda.empty_cache()
     return out
@@ -540,6 +566,7 @@ PRIMITIVE_CONFIG = dict(
     validate_models=["lmsys/vicuna-7b-v1.5", "Qwen/Qwen2.5-7B"],  # HF ids (config.json only) or local dirs
     validate_mb=[1, 8, 32],
     validate_ctx=[64, 320, 575],
+    windows=5,  # validation layers: repeated windows per point (median and spread kept)
     seq_len=64,
 )
 
