@@ -107,9 +107,10 @@ def decode_input(rotary, mb, ctx):
     return h, rotary(h, pos), pos
 
 
-def kernels(fn, copies=False):
+def kernels(fn, copies=False, detail=False):
     """(kernel count, summed kernel time in us) of one call of fn, from torch.profiler.
-    copies=True also counts Memcpy/Memset (a device clone() or copy_() is one memcpy)."""
+    copies=True also counts Memcpy/Memset (a device clone() or copy_() is one memcpy).
+    detail=True adds a third item: [(kernel name, us)] in the order the kernels started."""
     torch.cuda.synchronize()
     with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof:
         fn()
@@ -119,7 +120,27 @@ def kernels(fn, copies=False):
     if not ks:
         seen = [f"{e.name} ({e.device_type})" for e in prof.events()][:20]
         raise RuntimeError(f"torch.profiler recorded no CUDA kernels; events seen: {seen}")
-    return len(ks), sum(e.time_range.elapsed_us() for e in ks)
+    total = (len(ks), sum(e.time_range.elapsed_us() for e in ks))
+    if not detail:
+        return total
+    return total + ([(e.name, e.time_range.elapsed_us()) for e in sorted(ks, key=lambda e: e.time_range.start)],)
+
+
+def kernel_detail(kernel_list, calls):
+    """[(name, us)] of `calls` calls in a row -> what a validation point stores about its kernels:
+    {"kernels": [[name, mean us]] per kernel position of ONE call} only when every call launched the
+    same kernel sequence (same count, same names in the same order); otherwise {"kernels": None,
+    "kernels_failed": why, "kernels_raw": [[name, us]] of all the calls}, never passed off as one call."""
+    names = [n for n, _ in kernel_list]
+    k, rest = divmod(len(names), calls)
+    if rest:
+        why = f"{len(names)} kernels for {calls} calls"
+    elif any(names[j * k:(j + 1) * k] != names[:k] for j in range(1, calls)):
+        why = "the calls launched different kernel sequences"
+    else:
+        return dict(kernels=[[names[i][:100], statistics.mean(kernel_list[i + j * k][1] for j in range(calls))]
+                             for i in range(k)])
+    return dict(kernels=None, kernels_failed=why, kernels_raw=[[n[:100], us] for n, us in kernel_list])
 
 
 def wall_s(fn, reps=200, warmup=20):
@@ -282,8 +303,10 @@ def fit_rate(points):
     sxx = sum(wi * x * x for wi, (x, _) in zip(w, points))
     sxy = sum(wi * x * t for wi, (x, t) in zip(w, points))
     b = (sw * sxy - sx * sy) / (sw * sxx - sx * sx)
+    if b <= 0:  # no measurable growth with size (tiny ops): fixed time only
+        return sy / sw, float("inf")
     a = (sy - b * sx) / sw
-    return a, (1e6 / b if b > 0 else float("nan"))
+    return a, 1e6 / b
 
 
 # ---------------------------------------------------------------------------
@@ -440,6 +463,24 @@ def primitives(c, peak, gpcs):
                     pts.append((nb, t, m, dict(heads=heads, kv=kv, d=d, L=L, mb=mb, replays_us=reps)))
                     del kvs
             report(f"{kind}_h{heads}_kv{kv}_d{d}", pts, "KV bytes", 1e9, "GB/s")
+    # prefill attention, as transformers calls SDPA when a mask is passed (the harness's prefill):
+    # K/V already repeated to every query head (repeat_kv, its own copy kernels), so full attention
+    # with heads = query heads and an explicit causal mask. Per head count;
+    # FLOPs = 4 x mb x heads x seq x seq x head_dim (QK^T and PV, mask not subtracted)
+    group("attention_prefill")
+    d = 128
+    for heads in c["attn_prefill_heads"]:
+        pts = []
+        for seq in c["attn_prefill_seq"]:
+            mask = torch.triu(torch.full((1, 1, seq, seq), torch.finfo(torch.float16).min, **f16), diagonal=1)
+            for mb in c["attn_mb"]:
+                nb = 3 * mb * heads * seq * d * 2
+                qkvs = [tuple(torch.randn(mb, heads, seq, d, **f16) for _ in range(3)) for _ in range(copies_for(nb))]
+                calls = [(lambda q=q, k=k, v=v: F.scaled_dot_product_attention(q, k, v, attn_mask=mask)) for q, k, v in qkvs]
+                t, m, reps = graph_us(calls)
+                pts.append((4 * mb * heads * seq * seq * d, t, m, dict(heads=heads, d=d, seq=seq, mb=mb, replays_us=reps)))
+                del qkvs
+        report(f"attention_prefill_h{heads}_d{d}", pts, "FLOPs", 1e12, "TFLOP/s")
     # KV cache append (DynamicLayer.update: torch.cat of the cache and one new token), per K/V head
     # count; bytes read + written
     group("kv_append")
@@ -478,6 +519,49 @@ def primitives(c, peak, gpcs):
         pts.append((2 * n * 2, t, m, dict(numel=n, replays_us=reps)))
         del srcs
     report("device_copy", pts, "bytes", 1e9, "GB/s")
+    # a decoder layer's small ops by type, as generic ops on T rows x W columns (rope_*: T tokens x
+    # W heads of 128, one decode token each): RMSNorm's steps, the residual add, SiLU and gate x up,
+    # and rotary's broadcast multiply, half negate and cat of the halves. Their inputs were just
+    # written by the kernel before, so they are not rotated past L2. bytes = inputs + output, as
+    # layer_ops counts them. Fitted per type; the points are kept for lookups.
+    group("small_ops")
+    f32 = dict(dtype=torch.float32, device="cuda")
+
+    def small_op(name, T, W):
+        """(call, bytes) of one small op on T x W."""
+        if name.startswith("rope"):
+            q = torch.randn(T, W, 1, 128, **f16)
+            if name == "rope_mul":  # q x cos, cos broadcast over the heads
+                cos = torch.randn(T, 1, 1, 128, **f16)
+                return (lambda: q * cos), 4 * T * W * 128 + 2 * T * 128
+            if name == "rope_neg":  # - second half (a strided view)
+                return (lambda: -q[..., 64:]), 2 * T * W * 128
+            a = torch.randn(T, W, 1, 64, **f16)  # rope_cat: cat(-x2, x1), x1 a strided view
+            return (lambda: torch.cat((a, q[..., :64]), dim=-1)), 4 * T * W * 128
+        x16, y16, w16 = torch.randn(T, W, **f16), torch.randn(T, W, **f16), torch.randn(W, **f16)
+        x32, r32 = torch.randn(T, W, **f32), torch.rand(T, 1, **f32) + 0.5
+        return {"to_f32": ((lambda: x16.to(torch.float32)), 6 * T * W),
+                "pow": ((lambda: x32.pow(2)), 8 * T * W),
+                "mean": ((lambda: x32.mean(-1, keepdim=True)), 4 * T * W + 4 * T),
+                "add_eps": ((lambda: r32 + 1e-6), 8 * T),
+                "rsqrt": ((lambda: torch.rsqrt(r32)), 8 * T),
+                "mul_rows": ((lambda: x32 * r32), 8 * T * W + 4 * T),
+                "to_f16": ((lambda: x32.to(torch.float16)), 6 * T * W),
+                "mul_weight": ((lambda: w16 * x16), 4 * T * W + 2 * W),
+                "add": ((lambda: x16 + y16), 6 * T * W),
+                "silu": ((lambda: F.silu(x16)), 4 * T * W),
+                "mul": ((lambda: x16 * y16), 6 * T * W)}[name]
+
+    for name in c["small_ops"]:
+        pts = []
+        widths = c["small_rope_heads"] if name.startswith("rope") else ([c["small_widths"][0]]
+                                                                       if name in ("add_eps", "rsqrt") else c["small_widths"])
+        for W in widths:
+            for T in c["small_rows"]:
+                fn, nb = small_op(name, T, W)
+                t, m, reps = graph_us([fn])
+                pts.append((nb, t, m, dict(T=T, W=W, replays_us=reps)))
+        report(f"op_{name}", pts, "bytes", 1e9, "GB/s")
     # host copies as the transport does them (wall time, a side stream + event wait; CPU in it)
     d2h, h2d = [], []
     for nb in c["copy_bytes"]:
@@ -490,26 +574,29 @@ def primitives(c, peak, gpcs):
 
     out.update(peak=peak, gpcs=gpcs, sm_clock_mhz=clocks)
     print(f"  SM clock after each warm-up (MHz): {clocks}")
-    rates = [k for k in out if k.endswith("_rate") and k not in ("gemm_prefill_rate", "d2h_rate", "h2d_rate") and out[k] == out[k]]
+    rates = [k for k in out if k.endswith("_rate") and k not in ("gemm_prefill_rate", "d2h_rate", "h2d_rate")
+             and not k.startswith("attention_prefill") and out[k] == out[k]]  # bandwidths only
     print("  as fractions of peak: " + ", ".join(f"{k[:-5]} {out[k] / peak:.3f}" for k in rates)
           + f"; prefill {out['gemm_prefill_rate'] / gpcs / 1e12:.1f} TFLOP/s per GPC")
     return out
 
 
-def layer_kernel_us_steady(layer, rotary, mb, ctx, calls=10):
+def layer_kernel_us_steady(layer, rotary, mb, ctx, calls=10, detail=False):
     """Kernel time (us) of one decode layer call in steady state: the GPU warmed, `calls` calls
-    back to back (the cache grows by one token each, negligible), profiler kernel time / calls."""
+    back to back (the cache grows by one token each, negligible), profiler kernel time / calls.
+    detail=True: (that time, kernel_detail() of the calls)."""
     h, emb, _ = decode_input(rotary, mb, ctx)
     with torch.no_grad():
         cache = cache_at(layer, rotary, mb, ctx)
         layer_forward(layer, h, emb, cache)
         warm_gpu(0.3)
-        _, us = kernels(lambda: [layer_forward(layer, h, emb, cache) for _ in range(calls)])
-    return us / calls
+        res = kernels(lambda: [layer_forward(layer, h, emb, cache) for _ in range(calls)], detail=detail)
+    return (res[1] / calls, kernel_detail(res[2], calls)) if detail else res[1] / calls
 
 
-def prefill_layer_us_steady(layer, rotary, mb, seq, calls=5):
-    """Kernel time (us) of one prefill layer call in steady state (fresh cache each call)."""
+def prefill_layer_us_steady(layer, rotary, mb, seq, calls=5, detail=False):
+    """Kernel time (us) of one prefill layer call in steady state (fresh cache each call).
+    detail=True: (that time, kernel_detail() of the calls)."""
     from transformers import DynamicCache
 
     x = torch.randn(mb, seq, HIDDEN, dtype=torch.float16, device="cuda")
@@ -519,8 +606,8 @@ def prefill_layer_us_steady(layer, rotary, mb, seq, calls=5):
         emb = rotary(x, pos)
         layer_forward(layer, x, emb, DynamicCache(), mask)
         warm_gpu(0.3)
-        _, us = kernels(lambda: [layer_forward(layer, x, emb, DynamicCache(), mask) for _ in range(calls)])
-    return us / calls
+        res = kernels(lambda: [layer_forward(layer, x, emb, DynamicCache(), mask) for _ in range(calls)], detail=detail)
+    return (res[1] / calls, kernel_detail(res[2], calls)) if detail else res[1] / calls
 
 
 def validation_layers(c):
@@ -538,28 +625,43 @@ def validation_layers(c):
         for mb in c["validate_mb"]:
             for ctx in c["validate_ctx"]:
                 w = [layer_kernel_us_steady(layer, rotary, mb, ctx) for _ in range(c["windows"])]
-                rows[f"decode mb{mb} ctx{ctx}"] = dict(median=statistics.median(w), spread=(max(w) - min(w)) / min(w), windows=w)
+                _, det = layer_kernel_us_steady(layer, rotary, mb, ctx, detail=True)  # which kernel takes what
+                rows[f"decode mb{mb} ctx{ctx}"] = dict(median=statistics.median(w), spread=(max(w) - min(w)) / min(w),
+                                                       windows=w, **det)
             w = [prefill_layer_us_steady(layer, rotary, mb, c["seq_len"]) for _ in range(c["windows"])]
-            rows[f"prefill mb{mb} seq{c['seq_len']}"] = dict(median=statistics.median(w), spread=(max(w) - min(w)) / min(w), windows=w)
+            _, det = prefill_layer_us_steady(layer, rotary, mb, c["seq_len"], detail=True)
+            rows[f"prefill mb{mb} seq{c['seq_len']}"] = dict(median=statistics.median(w), spread=(max(w) - min(w)) / min(w),
+                                                            windows=w, **det)
         out[path] = rows
-        print(f"\nvalidation layer, {path} (kernel us, steady state, median of {c['windows']} windows, spread): "
-              + ", ".join(f"{k} {v['median']:.0f} ({100 * v['spread']:.1f}%)" for k, v in rows.items()))
+        print(f"\nvalidation layer, {path} (kernel us, steady state, median of {c['windows']} windows, spread; "
+              f"kernels per call): " + ", ".join(
+                  f"{k} {v['median']:.0f} ({100 * v['spread']:.1f}%; "
+                  + (f"{len(v['kernels'])})" if v["kernels"] is not None else f"NOT GROUPED: {v['kernels_failed']})")
+                  for k, v in rows.items()))
         del layer, rotary
         torch.cuda.empty_cache()
     return out
 
 
 PRIMITIVE_CONFIG = dict(
-    gemm_shapes=[(4096, 4096), (11008, 4096), (4096, 11008), (1024, 4096), (5120, 5120), (13824, 5120),
-                 (3584, 3584), (18944, 3584), (32000, 4096)],  # (N out, K in), the 7B-14B family
-    gemm_decode_m=[1, 8, 32],
-    gemm_prefill_shapes=[(4096, 4096), (11008, 4096)],
-    gemm_prefill_m=[256, 1024, 2048],
+    gemm_shapes=[(4096, 4096), (11008, 4096), (4096, 11008), (1024, 4096), (14336, 4096), (4096, 14336),
+                 (5120, 5120), (13824, 5120), (5120, 13824), (3584, 3584), (512, 3584), (18944, 3584),
+                 (3584, 18944), (32000, 4096), (32768, 4096), (152064, 3584)],  # (N out, K in): 7B-14B widths, lm_heads
+    gemm_decode_m=[1, 2, 4, 8, 16, 32],  # the harness's microbatch sizes are 2-16
+    gemm_prefill_shapes=[(4096, 4096), (11008, 4096), (3584, 3584), (18944, 3584)],
+    gemm_prefill_m=[64, 128, 256, 512, 1024, 2048],  # microbatch x 64 prompt tokens
     attn_mha=[(32, 128), (40, 128)],  # full attention: (heads, head dim), e.g. Llama-2-7B / 13B
     attn_gqa=[(28, 4, 128), (32, 8, 128)],  # GQA: (query heads, K/V heads, head dim), e.g. Qwen2.5-7B, Mistral-7B
     attn_ctx=[64, 320, 576, 1088],
-    attn_mb=[1, 8, 32],
+    attn_mb=[1, 2, 4, 8, 16, 32],
+    attn_prefill_heads=[28, 32, 40],  # prefill attention: query heads (K/V already repeated to them)
+    attn_prefill_seq=[64, 256],
     cat_kv_heads=[4, 8, 32, 40],
+    small_ops=["to_f32", "pow", "mean", "add_eps", "rsqrt", "mul_rows", "to_f16", "mul_weight", "add", "silu",
+               "mul", "rope_mul", "rope_neg", "rope_cat"],  # a decoder layer's small ops (primitives(), small_op)
+    small_rows=[1, 2, 4, 8, 16, 32, 128, 512, 2048],  # decode: microbatch rows; prefill: microbatch x 64
+    small_widths=[4096, 14336],  # hidden and MLP widths
+    small_rope_heads=[4, 32],  # K/V and query heads, 128 each
     elem_numel=[4096, 65536, 1 << 25, 1 << 26],  # small: fixed time per kernel; 64-128 MB: past L2, the rate
     copy_bytes=[16 << 10, 64 << 10, 512 << 10, 4 << 20],
     warm_s=1.0,  # seconds of GPU load before each sweep
