@@ -387,21 +387,66 @@ def graph_us(calls, target_ms=20.0, replays=5):
     return statistics.median(times), method, times
 
 
+def eager_us(calls, target_ms=20.0):
+    """(GPU kernel time in us per call, "kernel", [that time]): the calls (closures, rotated) launched
+    eagerly one by one, the way the harness launches them, GPU warmed by the caller; kernel time
+    from the profiler (launch gaps not in it), summed over each call's kernels (e.g. a GEMM and
+    its split-K reduce, flash attention and its split-KV combine). Probe v5 on; graph_us before."""
+    for cl in calls[:3]:  # warm this shape
+        cl()
+    torch.cuda.synchronize()
+    e0, e1 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+    e0.record()
+    calls[0]()
+    e1.record()
+    torch.cuda.synchronize()
+    n = int(min(400, max(5, target_ms * 1000 / max(e0.elapsed_time(e1) * 1000, 1.0))))
+
+    def run():  # each result is dropped at once, as in normal eager execution (memory reused)
+        for k in range(n):
+            calls[k % len(calls)]()
+
+    _, us = kernels(run, copies=True)
+    return us / n, "kernel", [us / n]
+
+
+def chain_us(fn, n_kernels, target_ms=10.0):
+    """[us] per kernel position of fn, a chain of n_kernels small kernels (e.g. RMSNorm's steps),
+    launched eagerly and timed by the profiler, mean over the calls; None if the calls did not all
+    launch the same n_kernels kernels (kernel_detail)."""
+    for _ in range(3):
+        fn()
+    torch.cuda.synchronize()
+    n = int(min(200, max(10, target_ms * 1000 / (5.0 * n_kernels))))  # ~5 us per small kernel
+
+    def run():  # each result is dropped at once, as in normal eager execution (memory reused)
+        for _ in range(n):
+            fn()
+
+    res = kernels(run, detail=True)
+    det = kernel_detail(res[2], n)
+    if det["kernels"] is None or len(det["kernels"]) != n_kernels:
+        return None
+    return [us for _, us in det["kernels"]]
+
+
 def primitives(c, peak, gpcs):
     """Generic GPU primitives on the visible device (a whole GPU or one MIG slice), as functions
-    of shape, no model, timed in steady state (graph_us). Each sweep is fitted as
+    of shape, no model, launched eagerly one by one as the harness does, kernel time from the
+    profiler (eager_us; probe v4 and before: CUDA graph replays, graph_us). Each sweep is fitted as
     t = fixed + units / rate; attention and the KV append per head shape. peak = the device's peak
     HBM bytes/s; gpcs = its GPC count. Prints the tables; returns a dict."""
     f16 = dict(dtype=torch.float16, device="cuda")
     out, clocks = {"timing": {}}, {}
 
-    def report(name, pts, unit, scale, per, timing="device time: CUDA graph replays, GPU warmed, back to back"):
+    def report(name, pts, unit, scale, per,
+               timing="device time: profiler kernel time, launched eagerly one by one like the harness, GPU warmed"):
         """pts: [(units, us, method, shape dict)]. Fits the graph-timed points only; every point is
         kept raw with its shape, method and residual against the fit."""
-        fit_pts = [(x, t) for x, t, m, _ in pts if m in ("graph", "wall")]
+        fit_pts = [(x, t) for x, t, m, _ in pts if m in ("kernel", "graph", "wall")]
         eager = len(pts) - len(fit_pts)
         if len({x for x, _ in fit_pts}) < 2:  # a slope needs two distinct sizes
-            print(f"  {name:<22} NOT FITTED: {len(fit_pts)} graph-timed points at "
+            print(f"  {name:<22} NOT FITTED: {len(fit_pts)} timed points at "
                   f"{len({x for x, _ in fit_pts})} distinct sizes ({eager} eager)", flush=True)
             fixed, rate = float("nan"), float("nan")
         else:
@@ -419,7 +464,7 @@ def primitives(c, peak, gpcs):
         warm_gpu(c["warm_s"])
         clocks[name] = sm_clock_mhz()
 
-    print(f"\nprimitives (steady state: CUDA graphs, GPU warmed; SM clock at start {sm_clock_mhz()} MHz):")
+    print(f"\nprimitives (eager launches, profiler kernel time, GPU warmed; SM clock at start {sm_clock_mhz()} MHz):")
     # decode GEMMs (M <= 32): weight streaming, bytes = N x K x 2
     group("gemm_decode")
     pts = []
@@ -428,7 +473,7 @@ def primitives(c, peak, gpcs):
         for M in c["gemm_decode_m"]:
             x, y = torch.randn(M, K, **f16), torch.empty(M, N, **f16)
             calls = [(lambda w=w: torch.matmul(x, w.t(), out=y)) for w in ws]
-            t, m, reps = graph_us(calls)
+            t, m, reps = eager_us(calls)
             pts.append((N * K * 2, t, m, dict(N=N, K=K, M=M, replays_us=reps)))
         del ws
     report("gemm_decode", pts, "weight bytes", 1e9, "GB/s")
@@ -440,7 +485,7 @@ def primitives(c, peak, gpcs):
         for M in c["gemm_prefill_m"]:
             x, y = torch.randn(M, K, **f16), torch.empty(M, N, **f16)
             calls = [(lambda w=w: torch.matmul(x, w.t(), out=y)) for w in ws]
-            t, m, reps = graph_us(calls)
+            t, m, reps = eager_us(calls)
             pts.append((2 * M * N * K, t, m, dict(N=N, K=K, M=M, replays_us=reps)))
         del ws
     report("gemm_prefill", pts, "FLOPs", 1e12, "TFLOP/s")
@@ -459,7 +504,7 @@ def primitives(c, peak, gpcs):
                     kvs = [(torch.randn(mb, kv, L, d, **f16), torch.randn(mb, kv, L, d, **f16)) for _ in range(copies_for(nb))]
                     kw = dict(enable_gqa=True) if gqa else {}
                     calls = [(lambda k=k, v=v: F.scaled_dot_product_attention(q, k, v, **kw)) for k, v in kvs]
-                    t, m, reps = graph_us(calls)
+                    t, m, reps = eager_us(calls)
                     pts.append((nb, t, m, dict(heads=heads, kv=kv, d=d, L=L, mb=mb, replays_us=reps)))
                     del kvs
             report(f"{kind}_h{heads}_kv{kv}_d{d}", pts, "KV bytes", 1e9, "GB/s")
@@ -477,7 +522,7 @@ def primitives(c, peak, gpcs):
                 nb = 3 * mb * heads * seq * d * 2
                 qkvs = [tuple(torch.randn(mb, heads, seq, d, **f16) for _ in range(3)) for _ in range(copies_for(nb))]
                 calls = [(lambda q=q, k=k, v=v: F.scaled_dot_product_attention(q, k, v, attn_mask=mask)) for q, k, v in qkvs]
-                t, m, reps = graph_us(calls)
+                t, m, reps = eager_us(calls)
                 pts.append((4 * mb * heads * seq * seq * d, t, m, dict(heads=heads, d=d, seq=seq, mb=mb, replays_us=reps)))
                 del qkvs
         report(f"attention_prefill_h{heads}_d{d}", pts, "FLOPs", 1e12, "TFLOP/s")
@@ -486,13 +531,13 @@ def primitives(c, peak, gpcs):
     group("kv_append")
     for kv in c["cat_kv_heads"]:
         pts = []
-        for L in c["attn_ctx"]:
+        for L in c["kv_ctx"]:
             for mb in c["attn_mb"]:
                 nb = 2 * mb * kv * (L + 1) * 128 * 2
                 caches = [torch.randn(mb, kv, L, 128, **f16) for _ in range(copies_for(nb))]
                 new, dst = torch.randn(mb, kv, 1, 128, **f16), torch.empty(mb, kv, L + 1, 128, **f16)
                 calls = [(lambda cc=cc: torch.cat([cc, new], dim=-2, out=dst)) for cc in caches]
-                t, m, reps = graph_us(calls)
+                t, m, reps = eager_us(calls)
                 pts.append((nb, t, m, dict(kv=kv, d=128, L=L, mb=mb, replays_us=reps)))
                 del caches
         report(f"kv_append_kv{kv}", pts, "bytes", 1e9, "GB/s")
@@ -504,7 +549,7 @@ def primitives(c, peak, gpcs):
         bs = [torch.randn(n, **f16) for _ in range(copies_for(3 * n * 2))]
         a = torch.randn(n, **f16)
         calls = [(lambda b=b: a.mul_(b)) for b in bs]
-        t, m, reps = graph_us(calls)
+        t, m, reps = eager_us(calls)
         pts.append((3 * n * 2, t, m, dict(numel=n, replays_us=reps)))
         del bs
     report("elementwise", pts, "bytes", 1e9, "GB/s")
@@ -515,53 +560,66 @@ def primitives(c, peak, gpcs):
         srcs = [torch.randn(n, **f16) for _ in range(copies_for(2 * n * 2))]
         dst = torch.empty(n, **f16)
         calls = [(lambda s_=s_: dst.copy_(s_)) for s_ in srcs]
-        t, m, reps = graph_us(calls)
+        t, m, reps = eager_us(calls)
         pts.append((2 * n * 2, t, m, dict(numel=n, replays_us=reps)))
         del srcs
     report("device_copy", pts, "bytes", 1e9, "GB/s")
-    # a decoder layer's small ops by type, as generic ops on T rows x W columns (rope_*: T tokens x
-    # W heads of 128, one decode token each): RMSNorm's steps, the residual add, SiLU and gate x up,
-    # and rotary's broadcast multiply, half negate and cat of the halves. Their inputs were just
-    # written by the kernel before, so they are not rotated past L2. bytes = inputs + output, as
-    # layer_ops counts them. Fitted per type; the points are kept for lookups.
+    # a decoder layer's small ops by type, measured inside generic chains in their layer order and
+    # launched eagerly (chain_us: profiler time per kernel), on T rows x W columns (rope: T tokens x
+    # W heads of 128, one decode token each): RMSNorm's 8 steps; rotary's multiply by cos, half
+    # negate, cat of the halves, multiply by sin, add; SwiGLU's SiLU and gate x up, and a residual
+    # add. bytes = inputs + output, as layer_ops counts them. Fitted per type; points kept for lookups.
     group("small_ops")
     f32 = dict(dtype=torch.float32, device="cuda")
+    small = {}  # op type -> points
+    failed = []
 
-    def small_op(name, T, W):
-        """(call, bytes) of one small op on T x W."""
-        if name.startswith("rope"):
-            q = torch.randn(T, W, 1, 128, **f16)
-            if name == "rope_mul":  # q x cos, cos broadcast over the heads
-                cos = torch.randn(T, 1, 1, 128, **f16)
-                return (lambda: q * cos), 4 * T * W * 128 + 2 * T * 128
-            if name == "rope_neg":  # - second half (a strided view)
-                return (lambda: -q[..., 64:]), 2 * T * W * 128
-            a = torch.randn(T, W, 1, 64, **f16)  # rope_cat: cat(-x2, x1), x1 a strided view
-            return (lambda: torch.cat((a, q[..., :64]), dim=-1)), 4 * T * W * 128
-        x16, y16, w16 = torch.randn(T, W, **f16), torch.randn(T, W, **f16), torch.randn(W, **f16)
-        x32, r32 = torch.randn(T, W, **f32), torch.rand(T, 1, **f32) + 0.5
-        return {"to_f32": ((lambda: x16.to(torch.float32)), 6 * T * W),
-                "pow": ((lambda: x32.pow(2)), 8 * T * W),
-                "mean": ((lambda: x32.mean(-1, keepdim=True)), 4 * T * W + 4 * T),
-                "add_eps": ((lambda: r32 + 1e-6), 8 * T),
-                "rsqrt": ((lambda: torch.rsqrt(r32)), 8 * T),
-                "mul_rows": ((lambda: x32 * r32), 8 * T * W + 4 * T),
-                "to_f16": ((lambda: x32.to(torch.float16)), 6 * T * W),
-                "mul_weight": ((lambda: w16 * x16), 4 * T * W + 2 * W),
-                "add": ((lambda: x16 + y16), 6 * T * W),
-                "silu": ((lambda: F.silu(x16)), 4 * T * W),
-                "mul": ((lambda: x16 * y16), 6 * T * W)}[name]
+    def keep(names_bytes, times, T, W):
+        for (name, nb), us in zip(names_bytes, times):
+            small.setdefault(name, []).append((nb, us, "kernel", dict(T=T, W=W, replays_us=[us])))
 
+    for W in c["small_widths"]:
+        for T in c["small_rows"]:
+            x16, y16, w16 = torch.randn(T, W, **f16), torch.randn(T, W, **f16), torch.randn(W, **f16)
+
+            def norm():  # RMSNorm, as the transformers code runs it
+                x = x16.to(torch.float32)
+                v = x.pow(2).mean(-1, keepdim=True)
+                x = x * torch.rsqrt(v + 1e-6)
+                return w16 * x.to(torch.float16)
+
+            def mlp():  # SiLU(gate) x up, then the residual add
+                return F.silu(x16) * y16 + x16
+
+            for fn, names_bytes in (
+                    (norm, [("to_f32", 6 * T * W), ("pow", 8 * T * W), ("mean", 4 * T * W + 4 * T), ("add_eps", 8 * T),
+                            ("rsqrt", 8 * T), ("mul_rows", 8 * T * W + 4 * T), ("to_f16", 6 * T * W),
+                            ("mul_weight", 4 * T * W + 2 * W)]),
+                    (mlp, [("silu", 4 * T * W), ("mul", 6 * T * W), ("add", 6 * T * W)])):
+                times = chain_us(fn, len(names_bytes))
+                if times is None:
+                    failed.append(f"{fn.__name__} T{T} W{W}")
+                else:
+                    keep(names_bytes, times, T, W)
+    for H in c["small_rope_heads"]:
+        for T in c["small_rows"]:
+            q, cos, sin = torch.randn(T, H, 1, 128, **f16), torch.randn(T, 1, 1, 128, **f16), torch.randn(T, 1, 1, 128, **f16)
+
+            def rope():  # q x cos + rotate_half(q) x sin, as apply_rotary_pos_emb runs it
+                return q * cos + torch.cat((-q[..., 64:], q[..., :64]), dim=-1) * sin
+
+            nb = T * H * 128
+            names_bytes = [("rope_mul", 4 * nb + 2 * T * 128), ("rope_neg", 2 * nb), ("rope_cat", 4 * nb),
+                           ("rope_mul", 4 * nb + 2 * T * 128), ("add", 6 * nb)]
+            times = chain_us(rope, len(names_bytes))
+            if times is None:
+                failed.append(f"rope T{T} H{H}")
+            else:
+                keep(names_bytes, times, T, H)
+    if failed:
+        print(f"  small-op chains NOT GROUPED (calls launched different kernels): {failed}", flush=True)
     for name in c["small_ops"]:
-        pts = []
-        widths = c["small_rope_heads"] if name.startswith("rope") else ([c["small_widths"][0]]
-                                                                       if name in ("add_eps", "rsqrt") else c["small_widths"])
-        for W in widths:
-            for T in c["small_rows"]:
-                fn, nb = small_op(name, T, W)
-                t, m, reps = graph_us([fn])
-                pts.append((nb, t, m, dict(T=T, W=W, replays_us=reps)))
-        report(f"op_{name}", pts, "bytes", 1e9, "GB/s")
+        report(f"op_{name}", small.get(name, []), "bytes", 1e9, "GB/s")
     # host copies as the transport does them (wall time, a side stream + event wait; CPU in it)
     d2h, h2d = [], []
     for nb in c["copy_bytes"]:
@@ -590,7 +648,11 @@ def layer_kernel_us_steady(layer, rotary, mb, ctx, calls=10, detail=False):
         cache = cache_at(layer, rotary, mb, ctx)
         layer_forward(layer, h, emb, cache)
         warm_gpu(0.3)
-        res = kernels(lambda: [layer_forward(layer, h, emb, cache) for _ in range(calls)], detail=detail)
+        def run():  # each output dropped at once, as in normal eager execution
+            for _ in range(calls):
+                layer_forward(layer, h, emb, cache)
+
+        res = kernels(run, detail=detail)
     return (res[1] / calls, kernel_detail(res[2], calls)) if detail else res[1] / calls
 
 
@@ -606,7 +668,11 @@ def prefill_layer_us_steady(layer, rotary, mb, seq, calls=5, detail=False):
         emb = rotary(x, pos)
         layer_forward(layer, x, emb, DynamicCache(), mask)
         warm_gpu(0.3)
-        res = kernels(lambda: [layer_forward(layer, x, emb, DynamicCache(), mask) for _ in range(calls)], detail=detail)
+        def run():  # each output and its fresh cache dropped at once
+            for _ in range(calls):
+                layer_forward(layer, x, emb, DynamicCache(), mask)
+
+        res = kernels(run, detail=detail)
     return (res[1] / calls, kernel_detail(res[2], calls)) if detail else res[1] / calls
 
 
@@ -648,17 +714,21 @@ PRIMITIVE_CONFIG = dict(
                  (5120, 5120), (13824, 5120), (5120, 13824), (3584, 3584), (512, 3584), (18944, 3584),
                  (3584, 18944), (32000, 4096), (32768, 4096), (152064, 3584)],  # (N out, K in): 7B-14B widths, lm_heads
     gemm_decode_m=[1, 2, 4, 8, 16, 32],  # the harness's microbatch sizes are 2-16
-    gemm_prefill_shapes=[(4096, 4096), (11008, 4096), (3584, 3584), (18944, 3584)],
+    gemm_prefill_shapes=[(4096, 4096), (11008, 4096), (4096, 11008), (1024, 4096), (14336, 4096), (4096, 14336),
+                         (5120, 5120), (13824, 5120), (5120, 13824), (3584, 3584), (512, 3584), (18944, 3584),
+                         (3584, 18944)],  # every decode shape but the lm_heads (prefill runs them on the last token only)
     gemm_prefill_m=[64, 128, 256, 512, 1024, 2048],  # microbatch x 64 prompt tokens
     attn_mha=[(32, 128), (40, 128)],  # full attention: (heads, head dim), e.g. Llama-2-7B / 13B
     attn_gqa=[(28, 4, 128), (32, 8, 128)],  # GQA: (query heads, K/V heads, head dim), e.g. Qwen2.5-7B, Mistral-7B
-    attn_ctx=[64, 320, 576, 1088],
+    # decode attention reads ctx + 1 keys and works in blocks of 64: both sides of each block edge
+    attn_ctx=[L for k in range(1, 10) for L in (64 * k, 64 * k + 1)] + [1088, 1089],
+    kv_ctx=[64, 320, 576, 1088],  # the KV append (a copy) has no block steps
     attn_mb=[1, 2, 4, 8, 16, 32],
     attn_prefill_heads=[28, 32, 40],  # prefill attention: query heads (K/V already repeated to them)
     attn_prefill_seq=[64, 256],
     cat_kv_heads=[4, 8, 32, 40],
     small_ops=["to_f32", "pow", "mean", "add_eps", "rsqrt", "mul_rows", "to_f16", "mul_weight", "add", "silu",
-               "mul", "rope_mul", "rope_neg", "rope_cat"],  # a decoder layer's small ops (primitives(), small_op)
+               "mul", "rope_mul", "rope_neg", "rope_cat"],  # a decoder layer's small ops (primitives(): chains)
     small_rows=[1, 2, 4, 8, 16, 32, 128, 512, 2048],  # decode: microbatch rows; prefill: microbatch x 64
     small_widths=[4096, 14336],  # hidden and MLP widths
     small_rope_heads=[4, 32],  # K/V and query heads, 128 each
