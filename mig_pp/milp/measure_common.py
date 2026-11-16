@@ -215,6 +215,26 @@ def layer_dispatch_us(layer, rotary, mb, ctx, reps=30):
     return statistics.median(out) * 1e6
 
 
+def layer_stack_dispatch_us(layer, rotary, mb, ctx, layers=16, stacks=10):
+    """CPU time (us) to queue one decode layer call the way forward_through_layers does: a stack of
+    layer calls back to back, no sync between them (the GPU works through the queue meanwhile);
+    each call timed, the first of each stack left out (it starts cold after the sync), median.
+    Probe v6 on; layer_dispatch_us before (one call after a sync: ~15% above the harness)."""
+    h, emb, _ = decode_input(rotary, mb, ctx)
+    cache = cache_at(layer, rotary, mb, ctx)
+    out = []
+    with torch.no_grad():
+        for _ in range(stacks):
+            torch.cuda.synchronize()
+            for i in range(layers):
+                t0 = time.perf_counter()
+                layer_forward(layer, h, emb, cache)
+                if i > 0:
+                    out.append(time.perf_counter() - t0)
+        torch.cuda.synchronize()
+    return statistics.median(out) * 1e6
+
+
 def prefill_layer_us(layer, rotary, mb, seq, reps=5):
     """Kernel time of one prefill layer call: mb sequences of seq tokens, empty cache,
     the benchmark's causal mask (1, 1, seq, seq)."""
@@ -428,6 +448,76 @@ def chain_us(fn, n_kernels, target_ms=10.0):
     if det["kernels"] is None or len(det["kernels"]) != n_kernels:
         return None
     return [us for _, us in det["kernels"]]
+
+
+def gpu_load(seconds):
+    """A decode-like load on the visible device for `seconds`: M=8 GEMMs streaming rotated
+    11008 x 4096 fp16 weights (past L2), as a pipeline rank does most of the time."""
+    w_bytes = 11008 * 4096 * 2
+    ws = [torch.randn(11008, 4096, dtype=torch.float16, device="cuda") for _ in range(max(2, copies_for(w_bytes)))]
+    x = torch.randn(8, 4096, dtype=torch.float16, device="cuda")
+    y = torch.empty(8, 11008, dtype=torch.float16, device="cuda")
+    t_end = time.perf_counter() + seconds
+    while time.perf_counter() < t_end:
+        for w in ws:
+            torch.matmul(x, w.t(), out=y)
+        torch.cuda.synchronize()
+
+
+def concurrency(c, loader_cmd, others):
+    """Slowdown of this slice's work while the other slices of the card are busy, as in the
+    pipeline (the probes otherwise run one slice at a time and the card shares its power and
+    clocks): a decode GEMM, decode attention and an RMSNorm chain, each timed as eager_us /
+    chain_us alone, with the other slices running gpu_load (loader_cmd per slice in `others`, a
+    list of MIG UUIDs), and alone again. Returns {kind: loaded / alone} and the raw medians."""
+    import subprocess
+
+    f16 = dict(dtype=torch.float16, device="cuda")
+    ws = [torch.randn(11008, 4096, **f16) for _ in range(copies_for(11008 * 4096 * 2))]
+    x, y = torch.randn(8, 4096, **f16), torch.empty(8, 11008, **f16)
+    q = torch.randn(8, 32, 1, 128, **f16)
+    kvs = [(torch.randn(8, 32, 321, 128, **f16), torch.randn(8, 32, 321, 128, **f16))
+           for _ in range(copies_for(2 * 8 * 32 * 321 * 128 * 2))]
+    h16, w16 = torch.randn(8, 4096, **f16), torch.randn(4096, **f16)
+
+    def norm():
+        v = h16.to(torch.float32)
+        v = v * torch.rsqrt(v.pow(2).mean(-1, keepdim=True) + 1e-6)
+        return w16 * v.to(torch.float16)
+
+    work = {
+        "gemm": lambda: eager_us([(lambda w=w: torch.matmul(x, w.t(), out=y)) for w in ws])[0],
+        "attention": lambda: eager_us([(lambda k=k, v=v: F.scaled_dot_product_attention(q, k, v)) for k, v in kvs])[0],
+        "small": lambda: sum(chain_us(norm, 8) or [float("nan")]),
+    }
+
+    def measure(windows):
+        return {kind: statistics.median(fn() for _ in range(windows)) for kind, fn in work.items()}
+
+    warm_gpu(c["warm_s"])
+    alone_before = measure(c["conc_windows"])
+    env = dict(os.environ)
+    loaders = [subprocess.Popen(loader_cmd, env=dict(env, CUDA_VISIBLE_DEVICES=uuid,
+                                                     MEASURE_MIG_LOADER=str(c["load_seconds"])),
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) for uuid in others]
+    try:
+        time.sleep(c["load_warm_s"])  # loaders start, warm up and fill their slices
+        clock_loaded = sm_clock_mhz()
+        loaded = measure(c["conc_windows"])
+    finally:
+        for p in loaders:
+            p.kill()
+        for p in loaders:
+            p.wait()
+    warm_gpu(c["warm_s"])
+    alone_after = measure(c["conc_windows"])
+    alone = {k: (alone_before[k] + alone_after[k]) / 2 for k in work}
+    factors = {k: loaded[k] / alone[k] for k in work}
+    print(f"\nconcurrency ({len(others)} other slices busy; SM clock loaded {clock_loaded} MHz): " + ", ".join(
+        f"{k} {alone_before[k]:.1f} / {loaded[k]:.1f} / {alone_after[k]:.1f} us (x{factors[k]:.3f})" for k in work),
+        flush=True)
+    return dict(factors=factors, alone_before_us=alone_before, loaded_us=loaded, alone_after_us=alone_after,
+                others=len(others), sm_clock_loaded_mhz=clock_loaded)
 
 
 def primitives(c, peak, gpcs):
@@ -740,6 +830,9 @@ PRIMITIVE_CONFIG = dict(
     validate_ctx=[64, 320, 575],
     windows=5,  # validation layers: repeated windows per point (median and spread kept)
     seq_len=64,
+    conc_windows=3,  # concurrency(): windows per workload, alone / loaded / alone again
+    load_seconds=600,  # a loader's lifetime cap (they are killed as soon as the loaded windows are done)
+    load_warm_s=5.0,  # seconds the loaders run before the loaded windows
 )
 
 

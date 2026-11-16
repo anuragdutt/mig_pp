@@ -247,15 +247,19 @@ def main():
         print("NOTE: not oracle_v2's conditions (schedutil, OMP_NUM_THREADS unset); the numbers describe these settings")
 
     W = c["windows"]
-    # kernel launch: CPU time to queue one decode layer call / its kernels (GPU idle at each start)
+    # kernel launch: CPU time to queue one decode layer call / its kernels, the way
+    # forward_through_layers launches a stack of layers back to back (probe v6 on); the old
+    # measurement (one call after a sync, cold) is kept as launch_us_cold for comparison
     layer, rotary = mc.load_model(c["model_path"])
     kpl, _ = mc.layer_kernel_us(layer, rotary, 1, c["seq_len"], reps=1)
-    launch = summary([mc.layer_dispatch_us(layer, rotary, c["transport_mb"], c["seq_len"]) / kpl for _ in range(W)])
+    launch = summary([mc.layer_stack_dispatch_us(layer, rotary, c["transport_mb"], c["seq_len"]) / kpl for _ in range(W)])
+    launch_cold = summary([mc.layer_dispatch_us(layer, rotary, c["transport_mb"], c["seq_len"]) / kpl for _ in range(W)])
     with torch.no_grad():
         h, _, pos = mc.decode_input(rotary, c["transport_mb"], c["seq_len"])
         rotary_kernels, _ = mc.kernels(lambda: rotary(h, pos))
-    print(f"\nlaunch: {kpl} kernels per decode layer x {launch['median']:.1f} us (median of {W} windows, spread "
-          f"{100 * launch['spread']:.1f}%); rotary {rotary_kernels} kernels  [wall time, CPU only]")
+    print(f"\nlaunch: {kpl} kernels per decode layer x {launch['median']:.1f} us in a back-to-back stack (median of "
+          f"{W} windows, spread {100 * launch['spread']:.1f}%); one call after a sync: {launch_cold['median']:.1f} us; "
+          f"rotary {rotary_kernels} kernels  [wall time, CPU only]")
 
     # host copies of one decode activation, back to back, W windows
     nbytes = c["transport_mb"] * mc.HIDDEN * 2
@@ -312,7 +316,7 @@ CPU_CONSTANTS["<box>"] = dict(
     recv_copy_one_thread_us={pool[f'mb{big} 1 thread']['median_us']:.1f},  # same copy, OMP_NUM_THREADS=1
 )""")
     mc.save_json(c["json"], dict(host=host, config=c, kernels_per_layer=kpl, rotary_kernels=rotary_kernels,
-                                 launch_us=launch, memcpy_bw=send, shm_to_pinned_bw=recv, token_staging_us=staging,
+                                 launch_us=launch, launch_us_cold=launch_cold, memcpy_bw=send, shm_to_pinned_bw=recv, token_staging_us=staging,
                                  step_start_us=step, recv_copy_gaps=gaps, pool_copy=pool, **g,
                                  timing="all wall time (CPU, and GPU waits where the transport waits)"))
 

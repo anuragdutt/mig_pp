@@ -8,8 +8,9 @@ Edit CONFIG in main(), then on the box, MIG enabled, nothing else running on tha
 
 It finds the GPU's slices with nvidia-smi -L and measures one slice type at a time, each in
 its own process (CUDA_VISIBLE_DEVICES=MIG-<uuid>); slices of the same type are measured once.
-Prints a dict per slice and writes CONFIG["json"] (raw points, timing method, the repeat
-pass). ~5-8 min per slice type.
+Prints a dict per slice and writes CONFIG["json"] (raw points, timing method; the repeat pass if
+CONFIG["repeat"]; the slowdown with the card's other slices busy if CONFIG["concurrency"], which
+runs a decode-like load on every other slice for a minute or so).
 """
 
 import json
@@ -51,10 +52,13 @@ def measure_one(c):
     print(f"{name}: {gpcs} GPCs, {gb} GB = {share:.3f} of {card} (slice peak {peak / 1e9:.0f} GB/s)")
     g = mc.primitives(c, peak, gpcs)
     validation = mc.validation_layers(c)
-    print("\nrepeat pass of the primitives (same sweeps, later in time; compare with the first):")
-    repeat = mc.primitives(c, peak, gpcs)
-    g.update(device=name, profile=f"{gpcs}g.{gb}gb", gb=gb, card=card, mem_share=share,
-             validation=validation, repeat=repeat)
+    if c["concurrency"]:  # this slice's work with the card's other slices busy (probe v6 on)
+        others = [u for u in os.environ.get("MEASURE_MIG_OTHERS", "").split(",") if u]
+        g["concurrency"] = mc.concurrency(c, [sys.executable, os.path.abspath(__file__)], others)
+    if c["repeat"]:
+        print("\nrepeat pass of the primitives (same sweeps, later in time; compare with the first):")
+        g["repeat"] = mc.primitives(c, peak, gpcs)
+    g.update(device=name, profile=f"{gpcs}g.{gb}gb", gb=gb, card=card, mem_share=share, validation=validation)
     with open(c["child_out"], "w") as f:
         json.dump(g, f)
 
@@ -66,9 +70,14 @@ def main():
         mc.PRIMITIVE_CONFIG,  # the sweeps; override any key here
         gpu=0,  # the GPU whose slices to measure (nvidia-smi index)
         json="constants_mig.json",
+        concurrency=True,  # also time a slice's work with the card's other slices busy (probe v6)
+        repeat=False,  # a second pass of the primitives (probes v3-v5 showed 0.2-0.4%; off since v6)
     )
     c = CONFIG
 
+    if os.environ.get("MEASURE_MIG_LOADER"):  # a decode-like load on this slice (concurrency())
+        mc.gpu_load(float(os.environ["MEASURE_MIG_LOADER"]))
+        return None
     if os.environ.get("MEASURE_MIG_CHILD"):
         c["child_out"] = os.environ["MEASURE_MIG_CHILD"]
         return measure_one(c)
@@ -85,7 +94,8 @@ def main():
     for profile, uuid in once.items():
         out = f"/tmp/measure_mig_{profile}_{os.getpid()}.json"
         print(f"\n===== {profile} ({uuid}) =====", flush=True)
-        env = dict(os.environ, CUDA_VISIBLE_DEVICES=uuid, MEASURE_MIG_CHILD=out)
+        env = dict(os.environ, CUDA_VISIBLE_DEVICES=uuid, MEASURE_MIG_CHILD=out,
+                   MEASURE_MIG_OTHERS=",".join(u for _, u in slices if u != uuid))  # every other slice
         r = subprocess.run([sys.executable, os.path.abspath(__file__)], env=env)
         if r.returncode != 0 or not os.path.exists(out):
             print(f"  {profile}: FAILED (exit {r.returncode}); continuing with the other slices")
