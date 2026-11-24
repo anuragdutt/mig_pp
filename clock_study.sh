@@ -39,8 +39,8 @@ PROBLEM="8,4;16,8;16,4;8,2"
 STABLE="32,16;32,8;16,2;32,4;32,2"
 HOST="${INV_HOST:-$(hostname -s)}"
 case "$HOST" in
-    mig1 | mig2) ;;
-    *) echo "clock_study.sh: this host is not mig1 or mig2 (INV_HOST overrides)" >&2; exit 2 ;;
+    mig1 | mig2 | mig3) ;;
+    *) echo "clock_study.sh: this host is not mig1, mig2 or mig3 (INV_HOST overrides)" >&2; exit 2 ;;
 esac
 
 # Wall seconds per split, measured in runs 10-15; only for the time estimate.
