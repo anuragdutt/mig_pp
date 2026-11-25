@@ -34,9 +34,12 @@ for v in $(compgen -e); do
 done
 
 # --- config -----------------------------------------------------------------------------------
-ROUNDS=1  # 1: 2 runs per split per condition on each box, 4 with both boxes (~27 h per box)
+# P2 (2026-11-25): run 17's leftover only, (32,2) at max. P1 (mig3) ran ROUNDS=1 with all 5 stable
+# pairs and stopped at the lease end after (32,4); for the full study set ROUNDS=1 and
+# STABLE="32,16;32,8;16,2;32,4;32,2" again.
+ROUNDS=0  # 0: no problem-pair blocks; 1: 2 runs per split per condition (~27 h per box)
 PROBLEM="8,4;16,8;16,4;8,2"
-STABLE="32,16;32,8;16,2;32,4;32,2"
+STABLE="32,2"
 HOST="${INV_HOST:-$(hostname -s)}"
 case "$HOST" in
     mig1 | mig2 | mig3) ;;
@@ -291,7 +294,7 @@ $ROUNDS), then stable pairs $STABLE at max once. GPU at max: $lock. ~$(hours $((
 [ "$DRY" = 1 ] || printf '# run %s clock_study.sh host=%s rounds=%s gpu_lock=%s\n' \
     "$(date '+%Y-%m-%d_%H:%M:%S')" "$HOST" "$ROUNDS" "$GPU_LOCK" >> "$MANIFEST"
 
-for _ in $(seq 1 "$ROUNDS"); do
+for ((round = 1; round <= ROUNDS; round++)); do  # not seq: BSD `seq 1 0` counts down
     run_block default "$PROBLEM" union 0
     run_block max "$PROBLEM" union 1
     run_block max "$PROBLEM" union 0
