@@ -109,6 +109,10 @@ GPUS_40GB = {
     # mig2's (possibly mig2's old card); kept as its own host so its runs are labelled mig3.
     "mig3": ["MIG-6dd23494-5fab-5507-9b31-70197c7ffce2", "MIG-160ce58f-ba42-5f9c-93f2-4cab3d5f326c",
              "MIG-029d8a35-aac6-5bf8-b3a2-a5a0359a5c7e", "MIG-0fc29125-4eec-5484-9f26-cbc72a3603fc"],
+    # The P2 box from 2026-11-25 (hostname `mig`, run with INV_HOST=mig4); a different card from
+    # mig3 (GPU UUID GPU-a5f865ba-...), MIG 20/10/5/5 created 2026-11-25.
+    "mig4": ["MIG-2c8eaa9b-ce72-56b6-8bd0-a54f2fc9d866", "MIG-67acbdb3-a3bc-5786-a4eb-ee64a17644f5",
+             "MIG-9bd950cf-a856-528f-a34f-0e3684b0e974", "MIG-39e3f166-9d13-5312-9aa3-0130e2085a34"],
 }
 # Single-node Vicuna-7B oracle: candidate splits x the cross-node sweep's 9 pairs, pairs split so
 # both boxes take about the same time. Front-runners first (see the module).
