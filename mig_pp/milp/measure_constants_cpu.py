@@ -237,6 +237,13 @@ def main():
         pool_mbs=[8, 16],  # receive copy of mb x hidden values: 32768 (one thread) and 65536 (the pool) at hidden 4096
         copy_gaps_ms=[0, 10, 50],  # receive copy every N ms, asleep between (0 = back to back)
         windows=5,  # repeated windows per number (median and spread kept)
+        # probe v7: launch as the harness issues a rank's stack, CPU clock sampled (mc.harness_launch_us)
+        harness_launch=True,
+        launch_layers=8,  # distinct decoder layers in the stack (~0.4 GB each for 7B)
+        launch_mb=8,
+        launch_ctx=64,
+        launch_windows=5,  # windows per method, methods alternating
+        launch_stacks=10,  # stack calls per window
         json="constants_cpu.json",
     )
     c = CONFIG
@@ -297,6 +304,15 @@ def main():
           f"step_start_us {step['median']:.1f} ({100 * step['spread']:.0f}%), "
           + ", ".join(f"{k} {v['median']:.1f} ({100 * v['spread']:.0f}%)" for k, v in g.items()) + "  [wall time]")
 
+    # probe v7: launch as the harness issues a rank's stack of distinct layers, with the CPU clock;
+    # last, because it imports the benchmark module (and with it the SHM transport)
+    harness = None
+    if c["harness_launch"]:
+        print("\nlaunch as the harness issues it (distinct layers; CPU clock sampled)  [wall time, CPU only]:")
+        del layer
+        torch.cuda.empty_cache()
+        harness = mc.harness_launch_us(c)
+
     big = max(c["pool_mbs"])
     print(f"""
 # measured on {host['cpu']}, governor {host['governor']}, {host['allowed_cpus']} CPUs,
@@ -318,6 +334,7 @@ CPU_CONSTANTS["<box>"] = dict(
     mc.save_json(c["json"], dict(host=host, config=c, kernels_per_layer=kpl, rotary_kernels=rotary_kernels,
                                  launch_us=launch, launch_us_cold=launch_cold, memcpy_bw=send, shm_to_pinned_bw=recv, token_staging_us=staging,
                                  step_start_us=step, recv_copy_gaps=gaps, pool_copy=pool, **g,
+                                 **({"launch_harness": harness} if harness else {}),
                                  timing="all wall time (CPU, and GPU waits where the transport waits)"))
 
 if __name__ == "__main__":

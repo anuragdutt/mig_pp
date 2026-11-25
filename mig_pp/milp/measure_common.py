@@ -27,6 +27,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 
 CARD_BW = {"A100-40GB": 1555e9, "A100-80GB": 2039e9}  # peak HBM bytes/s, as hardware_constants.CARD_BW
 
+DEVICE = "cuda"  # load_layers / stack_cache / harness_launch_us only (tests set "cpu")
+
 # Architecture of the model being measured; load_model() sets them from config.json.
 HIDDEN, INTER, VOCAB, N_HEADS, N_KV_HEADS, HEAD_DIM = 4096, 11008, 32000, 32, 32, 128
 
@@ -520,6 +522,294 @@ def concurrency(c, loader_cmd, others):
                 others=len(others), sm_clock_loaded_mhz=clock_loaded)
 
 
+# ---------------------------------------------------------------------------
+# probe v7: the GPU's idle gap between kernels, and launch as the harness issues it
+# ---------------------------------------------------------------------------
+def gap_layer_set(mb, ctx, device="cuda", hidden=4096, inter=11008, heads=32, d=128):
+    """Tensors for one generic decode layer (Llama-7B shapes, random): weights, the K/V cache of ctx
+    tokens, and the microbatch's hidden state. A model-free stand-in for a decoder layer's ops."""
+    f16 = dict(dtype=torch.float16, device=device)
+    return dict(
+        wq=torch.randn(hidden, hidden, **f16), wk=torch.randn(hidden, hidden, **f16),
+        wv=torch.randn(hidden, hidden, **f16), wo=torch.randn(hidden, hidden, **f16),
+        wg=torch.randn(inter, hidden, **f16), wu=torch.randn(inter, hidden, **f16),
+        wd=torch.randn(hidden, inter, **f16), n1=torch.randn(hidden, **f16), n2=torch.randn(hidden, **f16),
+        kc=torch.randn(mb, heads, ctx, d, **f16), vc=torch.randn(mb, heads, ctx, d, **f16),
+        cos=torch.randn(mb, 1, 1, d, **f16), sin=torch.randn(mb, 1, 1, d, **f16),
+        x=torch.randn(mb, 1, hidden, **f16), heads=heads, d=d)
+
+
+def gap_layer(s):
+    """One generic decode layer launched eagerly in the harness's op order (~40 kernels for
+    Llama shapes): RMSNorm, q / k / v GEMMs, rotary on q and k, KV append (cat), SDPA, o GEMM,
+    residual add, RMSNorm, gate / up GEMMs, SiLU x up, down GEMM, residual add. Not a model: the
+    validation layers stay a check only."""
+    def norm(h, w):
+        v = h.to(torch.float32)
+        v = v * torch.rsqrt(v.pow(2).mean(-1, keepdim=True) + 1e-6)
+        return w * v.to(torch.float16)
+
+    def rope(t):
+        half = t.shape[-1] // 2
+        return t * s["cos"] + torch.cat((-t[..., half:], t[..., :half]), dim=-1) * s["sin"]
+
+    x = s["x"]
+    mb, H, d = x.shape[0], s["heads"], s["d"]
+    h = norm(x, s["n1"])
+    q = torch.matmul(h, s["wq"].t()).view(mb, 1, H, d).transpose(1, 2)
+    k = torch.matmul(h, s["wk"].t()).view(mb, 1, H, d).transpose(1, 2)
+    v = torch.matmul(h, s["wv"].t()).view(mb, 1, H, d).transpose(1, 2)
+    q, k = rope(q), rope(k)
+    kk = torch.cat([s["kc"], k], dim=-2)
+    vv = torch.cat([s["vc"], v], dim=-2)
+    a = F.scaled_dot_product_attention(q, kk, vv).transpose(1, 2).reshape(mb, 1, H * d)
+    h = x + torch.matmul(a, s["wo"].t())
+    m = norm(h, s["n2"])
+    m = torch.matmul(F.silu(torch.matmul(m, s["wg"].t())) * torch.matmul(m, s["wu"].t()), s["wd"].t())
+    return h + m
+
+
+def boundary_gap(c):
+    """Probe v7, item 1: the GPU's idle time between consecutive kernels of an eager decode sequence,
+    per slice. A stack of c["gap_layers"] generic decode layers (gap_layer, two weight sets in turn so
+    weights stream from HBM), per microbatch size in c["gap_mb"], context c["gap_ctx"]:
+      kernel_us   summed profiler kernel durations of the stack (what the ILP composes)
+      span_queued_us  CUDA-event span of the same stack with every launch queued before the GPU
+                  reaches it (a sleep kernel holds the GPU while the CPU launches): GPU-side gaps only
+      span_live_us    the span launched live, the GPU idle at the start (CPU launch can starve the GPU,
+                  as in a pipeline rank that waited on a receive)
+    gap per kernel = (span - kernel_us) / kernels. Median of c["gap_windows"] windows."""
+    out = {}
+    warm_gpu(c["warm_s"])
+    e0, e1 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+    for mb in c["gap_mb"]:
+        sets = [gap_layer_set(mb, c["gap_ctx"]) for _ in range(2)]
+        n = c["gap_layers"]
+
+        def stack():
+            for i in range(n):
+                gap_layer(sets[i % 2])
+
+        with torch.no_grad():
+            for _ in range(3):  # warm these shapes
+                stack()
+            torch.cuda.synchronize()
+            t0 = time.perf_counter()
+            stack()
+            launch_s = time.perf_counter() - t0
+            torch.cuda.synchronize()
+            sleep_cycles = int(max(3 * launch_s, 0.005) * 1410e6)  # SM cycles at ~1410 MHz
+            rows = []
+            for _ in range(c["gap_windows"]):
+                warm_gpu(0.2)
+                count, kus = kernels(stack, copies=True)
+                torch.cuda.synchronize()
+                torch.cuda._sleep(sleep_cycles)
+                e0.record()
+                stack()
+                e1.record()
+                queued_ok = not e0.query()  # the CPU finished launching before the GPU reached the stack
+                torch.cuda.synchronize()
+                span_q = e0.elapsed_time(e1) * 1000
+                warm_gpu(0.2)
+                torch.cuda.synchronize()
+                t0 = time.perf_counter()
+                e0.record()
+                stack()
+                e1.record()
+                launch_live = (time.perf_counter() - t0) * 1e6
+                torch.cuda.synchronize()
+                span_l = e0.elapsed_time(e1) * 1000
+                rows.append(dict(kernels=count, kernel_us=kus, span_queued_us=span_q, span_live_us=span_l,
+                                 launch_live_us=launch_live, queued_ok=queued_ok))
+        med = {k: statistics.median(r[k] for r in rows) for k in ("kernels", "kernel_us", "span_queued_us",
+                                                                  "span_live_us", "launch_live_us")}
+        med["gap_queued_us_per_kernel"] = (med["span_queued_us"] - med["kernel_us"]) / med["kernels"]
+        med["gap_live_us_per_kernel"] = (med["span_live_us"] - med["kernel_us"]) / med["kernels"]
+        med["queued_ok"] = all(r["queued_ok"] for r in rows)
+        med["windows"] = rows
+        out[str(mb)] = med
+        print(f"  gap mb {mb:2d}: {med['kernels']:.0f} kernels, kernel sum {med['kernel_us']:.0f} us, span queued "
+              f"{med['span_queued_us']:.0f} us ({med['gap_queued_us_per_kernel']:.2f} us/kernel"
+              f"{'' if med['queued_ok'] else ', NOT fully queued'}), live {med['span_live_us']:.0f} us "
+              f"({med['gap_live_us_per_kernel']:.2f} us/kernel; CPU launch {med['launch_live_us']:.0f} us)", flush=True)
+        del sets
+    return dict(by_mb=out, layers=c["gap_layers"], ctx=c["gap_ctx"], sm_clock_mhz=sm_clock_mhz(),
+                timing="span = CUDA events around the stack; kernel_us = profiler kernel durations (incl. memcpy)")
+
+
+class CpuFreqSampler:
+    """scaling_cur_freq (kHz) of the allowed CPUs every period_s in a child process, so the
+    measuring process keeps its CPU to itself. samples() -> [(time.time(), {cpu: kHz})]."""
+
+    SCRIPT = ("import os, sys, time, json\n"
+              "cpus = sorted(os.sched_getaffinity(0)); p = float(sys.argv[1])\n"
+              "while True:\n"
+              "    row = {}\n"
+              "    for c in cpus:\n"
+              "        try: row[c] = int(open(f'/sys/devices/system/cpu/cpu{c}/cpufreq/scaling_cur_freq').read())\n"
+              "        except OSError: pass\n"
+              "    print(json.dumps([time.time(), row]), flush=True)\n"
+              "    time.sleep(p)\n")
+
+    def __init__(self, period_s=0.02):
+        import subprocess
+        import tempfile
+
+        self.file = tempfile.TemporaryFile(mode="w+")
+        self.proc = subprocess.Popen([sys.executable, "-c", self.SCRIPT, str(period_s)], stdout=self.file)
+
+    def samples(self):
+        import json
+
+        self.proc.kill()
+        self.proc.wait()
+        self.file.seek(0)
+        rows = []
+        for line in self.file:
+            try:
+                t, row = json.loads(line)
+                rows.append((t, {int(k): v for k, v in row.items()}))
+            except ValueError:
+                pass
+        return rows
+
+
+def current_cpu():
+    """The CPU this process runs on now (field 39 of /proc/self/stat), or None."""
+    try:
+        return int(open("/proc/self/stat").read().rsplit(")", 1)[1].split()[36])
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def load_layers(path, n):
+    """n decoder layers (layer_idx 0..n-1, distinct weights) + rotary of the model at path, random
+    weights, and a DynamicCache factory filled for all n layers (as a rank holds its stack)."""
+    from transformers import AutoConfig
+    import model_family
+
+    cfg = AutoConfig.from_pretrained(os.path.expanduser(path))
+    cfg._attn_implementation = "sdpa"
+    fam = model_family.resolve(cfg.model_type)
+    layers = torch.nn.ModuleList([fam.decoder_layer(cfg, layer_idx=i).half().to(DEVICE).eval() for i in range(n)])
+    rotary = fam.rotary_embedding(config=cfg, device=torch.device(DEVICE))
+    return layers, rotary, cfg.hidden_size
+
+
+def stack_cache(layers, rotary, hidden, mb, ctx):
+    """A DynamicCache holding ctx tokens for mb sequences in every layer of the stack."""
+    from transformers import DynamicCache
+
+    cache = DynamicCache()
+    x = torch.randn(mb, ctx, hidden, dtype=torch.float16, device=DEVICE)
+    pos = torch.arange(ctx, device=DEVICE).unsqueeze(0).expand(mb, -1)
+    with torch.no_grad():
+        emb = rotary(x, pos)
+        for layer in layers:
+            layer_forward(layer, x, emb, cache)
+    return cache
+
+
+def harness_forward():
+    """The harness's own forward_through_layers (benchmark_pipeline_microbatching.py), or None if
+    the benchmark module does not import here; then a loop of layer_forward is timed instead."""
+    try:
+        import benchmark_pipeline_microbatching as bench
+        return bench.forward_through_layers
+    except Exception as err:  # report and keep going
+        print(f"  (benchmark module not importable: {type(err).__name__}: {err}; timing layer_forward)", flush=True)
+        return None
+
+
+def harness_launch_us(c):
+    """Probe v7, item 2: CPU time per decode layer as the harness launches a rank's stack, to find
+    the ~10% between the probe's launch (v6) and the events runs' 0.67 ms per layer. c["launch_layers"]
+    distinct layers (own weights, own cache slots), one decode microbatch of c["launch_mb"] at
+    context c["launch_ctx"], called the way the harness does: the stack as one forward_through_layers
+    call (time / layers), and the same layers one by one with layer_forward (each call timed, first
+    left out, as v6). For comparison, v6's measurement (one layer object called again and again).
+    The CPU's clock is sampled during every window (the CPU the process ran on, start and end).
+    Windows alternate the three methods so drift hits them alike. Returns medians and raw windows."""
+    layers, rotary, hidden = load_layers(c["model_path"], c["launch_layers"])
+    n, mb, ctx = len(layers), c["launch_mb"], c["launch_ctx"]
+    cache = stack_cache(layers, rotary, hidden, mb, ctx)
+    ftl = harness_forward()
+    h = torch.randn(mb, 1, hidden, dtype=torch.float16, device=DEVICE)
+    pos = torch.full((mb, 1), ctx, dtype=torch.long, device=DEVICE)
+    emb = rotary(h, pos)
+    kpl, _ = kernels(lambda: layer_forward(layers[0], h, emb, cache))
+
+    def one_call():  # the harness's call, per layer
+        t0 = time.perf_counter()
+        if ftl is not None:
+            ftl(layers, h, emb, None, cache)
+        else:
+            x = h
+            for layer in layers:
+                x = layer_forward(layer, x, emb, cache)
+        return [(time.perf_counter() - t0) / n]
+
+    def per_layer():  # each layer timed, the first left out (v6's method on distinct layers)
+        out, x = [], h
+        for i, layer in enumerate(layers):
+            t0 = time.perf_counter()
+            x = layer_forward(layer, x, emb, cache)
+            if i:
+                out.append(time.perf_counter() - t0)
+        return out
+
+    def same_layer():  # v6: one layer object, n calls
+        out = []
+        for i in range(n):
+            t0 = time.perf_counter()
+            layer_forward(layers[0], h, emb, cache)
+            if i:
+                out.append(time.perf_counter() - t0)
+        return out
+
+    methods = {"forward_through_layers" if ftl else "layer_forward_loop": one_call,
+               "per_layer_distinct": per_layer, "per_layer_same_v6": same_layer}
+    sampler = CpuFreqSampler(c.get("freq_period_s", 0.02))
+    windows = []
+    try:
+        with torch.no_grad():
+            for fn in methods.values():  # warm every path
+                fn()
+            torch.cuda.synchronize()
+            for w in range(c["launch_windows"]):
+                for name, fn in methods.items():
+                    vals, cpus = [], []
+                    t_start = time.time()
+                    for _ in range(c["launch_stacks"]):
+                        torch.cuda.synchronize()
+                        cpus.append(current_cpu())
+                        vals += fn()
+                        cpus.append(current_cpu())
+                    torch.cuda.synchronize()
+                    windows.append(dict(method=name, window=w, us_per_layer=statistics.median(vals) * 1e6,
+                                        t0=t_start, t1=time.time(), cpus=sorted({x for x in cpus if x is not None})))
+    finally:
+        freq = sampler.samples()
+    for wd in windows:  # the clock of the CPUs this window ran on, while it ran
+        ks = [row[cpu] for t, row in freq if wd["t0"] <= t <= wd["t1"] for cpu in wd["cpus"] if cpu in row]
+        wd["cpu_khz_median"] = statistics.median(ks) if ks else None
+        wd["cpu_khz_min"] = min(ks) if ks else None
+    res = {}
+    for name in methods:
+        ws = [wd for wd in windows if wd["method"] == name]
+        us = statistics.median(wd["us_per_layer"] for wd in ws)
+        khz = [wd["cpu_khz_median"] for wd in ws if wd["cpu_khz_median"]]
+        res[name] = dict(us_per_layer=us, us_per_kernel=us / kpl, cpu_khz_median=statistics.median(khz) if khz else None)
+        print(f"  launch {name:24s}: {us:7.1f} us per layer = {us / kpl:5.2f} us per kernel"
+              f" ({kpl} kernels); CPU clock {res[name]['cpu_khz_median'] or '?'} kHz", flush=True)
+    del layers, cache
+    torch.cuda.empty_cache()
+    return dict(methods=res, kernels_per_layer=kpl, layers=n, mb=mb, ctx=ctx, windows=windows,
+                harness_function=ftl is not None,
+                freq_samples=len(freq), timing="wall time, CPU only (the GPU works through the queue meanwhile)")
+
+
 def primitives(c, peak, gpcs):
     """Generic GPU primitives on the visible device (a whole GPU or one MIG slice), as functions
     of shape, no model, launched eagerly one by one as the harness does, kernel time from the
@@ -567,6 +857,21 @@ def primitives(c, peak, gpcs):
             pts.append((N * K * 2, t, m, dict(N=N, K=K, M=M, replays_us=reps)))
         del ws
     report("gemm_decode", pts, "weight bytes", 1e9, "GB/s")
+    # decode GEMMs with a bias (probe v7): F.linear(x, w, b), as nn.Linear(bias=True) runs Qwen2's
+    # q / k / v projections; cuBLAS picks a different kernel (bias epilogue) than without bias
+    if c.get("gemm_bias_shapes"):
+        group("gemm_bias_decode")
+        pts = []
+        for N, K in c["gemm_bias_shapes"]:
+            ws = [torch.randn(N, K, **f16) for _ in range(copies_for(N * K * 2))]
+            b = torch.randn(N, **f16)
+            for M in c["gemm_decode_m"]:
+                x = torch.randn(M, K, **f16)
+                calls = [(lambda w=w: F.linear(x, w, b)) for w in ws]
+                t, m, reps = eager_us(calls)
+                pts.append((N * K * 2, t, m, dict(N=N, K=K, M=M, replays_us=reps)))
+            del ws
+        report("gemm_bias_decode", pts, "weight bytes", 1e9, "GB/s")
     # prefill GEMMs (large M): FLOPs = 2 x M x N x K
     group("gemm_prefill")
     pts = []
@@ -579,6 +884,19 @@ def primitives(c, peak, gpcs):
             pts.append((2 * M * N * K, t, m, dict(N=N, K=K, M=M, replays_us=reps)))
         del ws
     report("gemm_prefill", pts, "FLOPs", 1e12, "TFLOP/s")
+    if c.get("gemm_bias_shapes"):  # prefill GEMMs with a bias (probe v7), as above
+        group("gemm_bias_prefill")
+        pts = []
+        for N, K in c["gemm_bias_shapes"]:
+            ws = [torch.randn(N, K, **f16) for _ in range(copies_for(N * K * 2))]
+            b = torch.randn(N, **f16)
+            for M in c["gemm_prefill_m"]:
+                x = torch.randn(M, K, **f16)
+                calls = [(lambda w=w: F.linear(x, w, b)) for w in ws]
+                t, m, reps = eager_us(calls)
+                pts.append((2 * M * N * K, t, m, dict(N=N, K=K, M=M, replays_us=reps)))
+            del ws
+        report("gemm_bias_prefill", pts, "FLOPs", 1e12, "TFLOP/s")
     # decode attention, as transformers 5.14.1 / 5.18.0 call SDPA in decode (no mask): full attention
     # as is; GQA with enable_gqa=True, K/V not expanded. Fitted per head shape.
     # bytes = 2 (K, V) x mb x kv x L x head_dim x 2
@@ -722,7 +1040,7 @@ def primitives(c, peak, gpcs):
 
     out.update(peak=peak, gpcs=gpcs, sm_clock_mhz=clocks)
     print(f"  SM clock after each warm-up (MHz): {clocks}")
-    rates = [k for k in out if k.endswith("_rate") and k not in ("gemm_prefill_rate", "d2h_rate", "h2d_rate")
+    rates = [k for k in out if k.endswith("_rate") and k not in ("gemm_prefill_rate", "gemm_bias_prefill_rate", "d2h_rate", "h2d_rate")
              and not k.startswith("attention_prefill") and out[k] == out[k]]  # bandwidths only
     print("  as fractions of peak: " + ", ".join(f"{k[:-5]} {out[k] / peak:.3f}" for k in rates)
           + f"; prefill {out['gemm_prefill_rate'] / gpcs / 1e12:.1f} TFLOP/s per GPC")
@@ -833,6 +1151,12 @@ PRIMITIVE_CONFIG = dict(
     conc_windows=3,  # concurrency(): windows per workload, alone / loaded / alone again
     load_seconds=600,  # a loader's lifetime cap (they are killed as soon as the loaded windows are done)
     load_warm_s=5.0,  # seconds the loaders run before the loaded windows
+    # probe v7
+    gemm_bias_shapes=[(3584, 3584), (512, 3584)],  # GEMMs with a bias: Qwen2.5-7B's q and k / v projections
+    gap_mb=[1, 8, 32],  # boundary_gap(): microbatch sizes
+    gap_ctx=320,  # boundary_gap(): cached tokens
+    gap_layers=8,  # boundary_gap(): generic decode layers per stack
+    gap_windows=5,  # boundary_gap(): windows per microbatch size (median kept)
 )
 
 

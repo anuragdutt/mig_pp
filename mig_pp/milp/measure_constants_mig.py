@@ -52,6 +52,9 @@ def measure_one(c):
     print(f"{name}: {gpcs} GPCs, {gb} GB = {share:.3f} of {card} (slice peak {peak / 1e9:.0f} GB/s)")
     g = mc.primitives(c, peak, gpcs)
     validation = mc.validation_layers(c)
+    if c["boundary_gap"]:  # the GPU's idle gap between kernels of an eager stack (probe v7)
+        print("\nkernel-boundary gap (generic decode layers, eager):", flush=True)
+        g["boundary_gap"] = mc.boundary_gap(c)
     if c["concurrency"]:  # this slice's work with the card's other slices busy (probe v6 on)
         others = [u for u in os.environ.get("MEASURE_MIG_OTHERS", "").split(",") if u]
         g["concurrency"] = mc.concurrency(c, [sys.executable, os.path.abspath(__file__)], others)
@@ -70,7 +73,8 @@ def main():
         mc.PRIMITIVE_CONFIG,  # the sweeps; override any key here
         gpu=0,  # the GPU whose slices to measure (nvidia-smi index)
         json="constants_mig.json",
-        concurrency=True,  # also time a slice's work with the card's other slices busy (probe v6)
+        concurrency=False,  # time a slice's work with the card's other slices busy (probe v6: x1.00-1.03; off since v7)
+        boundary_gap=True,  # the GPU's idle gap between kernels, span vs summed kernel time (probe v7)
         repeat=False,  # a second pass of the primitives (probes v3-v5 showed 0.2-0.4%; off since v6)
     )
     c = CONFIG
