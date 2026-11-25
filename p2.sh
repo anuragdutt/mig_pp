@@ -3,16 +3,18 @@
 #
 #   INV_HOST=<box> ./p2.sh [--dry-run]
 #
-# Steps, in order; a failed step is logged and the next one still runs:
+# Steps, in order (P2 started late, 2026-11-25 ~4 pm: ~15.5 h to the 7:30 am Thu deadline); a failed
+# step is logged and the next one still runs:
 #   1 drift    Vicuna-7B, default conditions: (8,4) [23,6,2,1] and (16,4) [20,9,2,1], the two splits
 #              run 17 measured under default on mig3 (blocks 1 and 4), to compare the boxes (~5 min)
-#   2 clock    ./clock_study.sh: run 17's leftover, (32,2) at max (~2.7 h); it sets and restores the
-#              governor and GPU clock itself
-#   3 probes   probe v7 into probes_v7/: CPU probe (pinned to the GPU's NUMA CPUs, first MIG slice),
-#              then MIG probe (~1-1.5 h)
-#   4 mistral  Mistral-7B near-best lists, all 9 pairs, 2-4 microbatch pairs first (~15 h); sealed:
-#              export it, do not analyse it before the ILP freeze
-#   5 check    download_models.py --check for Llama-2-7B and Qwen2.5-7B (gated repo, HF token)
+#   2 probes   probe v7 into probes_v7/: CPU probe (pinned to the GPU's NUMA CPUs, first MIG slice),
+#              then MIG probe (~1-1.5 h); first, the ILP freeze before P3 needs it
+#   3 mistral  Mistral-7B near-best lists, 7 pairs, 2-4 microbatch pairs first (~10.5 h); (32,4) and
+#              (32,2) go to P3. Sealed: export it, do not analyse it before the ILP freeze
+#   4 check    download_models.py --check for Llama-2-7B and Qwen2.5-7B (gated repo, HF token)
+#   5 clock    ./clock_study.sh: run 17's leftover, (32,2) at max (~2.7 h), only if it ends before
+#              P2_DEADLINE (default Thu 11/26 7:30 am EST) with 10% to spare; else skipped (-> P3).
+#              It sets and restores the governor and GPU clock itself
 # After every step: ~/<box>_p2_<N>_<step>.tgz with everything P2 has made so far (manifest, logs,
 # clock logs, probes_v7/, every run directory listed after p2's "# run" line). Copy the newest.
 # p2.log has every line this script prints.
@@ -33,7 +35,9 @@ INVESTIGATE="${P2_INVESTIGATE:-./investigate.sh}"
 SYS="${P2_SYS:-/sys}"
 OUT="${P2_OUT:-$HOME}"
 MISTRAL_DIR="${P2_MISTRAL_DIR:-$HOME/models/Mistral-7B-Instruct-v0.3}"
-MISTRAL_PAIRS="8,4;16,8;32,16;8,2;16,4;32,8;16,2;32,4;32,2"  # 2, 2, 2, 4, 4, 4, 8, 8, 16 microbatches
+MISTRAL_PAIRS="${P2_MISTRAL_PAIRS:-8,4;16,8;32,16;8,2;16,4;32,8;16,2}"  # 2, 2, 2, 4, 4, 4, 8 microbatches
+DEADLINE="${P2_DEADLINE:-1795696200}"  # epoch s: 2026-11-26 12:30 UTC = 7:30 am EST, lease end - 1 h
+CLOCK_S=$((160 * 60 * 11 / 10))  # (32,2) at max: 53 splits ~160 min, + 10%
 DRIFT=("8,4 23,6,2,1" "16,4 20,9,2,1")
 MANIFEST="investigation_runs.txt"
 LOG="p2.log"
@@ -139,6 +143,18 @@ mistral() {
 
 check() { "$PYTHON" download_models.py --check --only llama_7b qwen_7b < /dev/null; }
 
+clock() {
+    local now left
+    now=$(date +%s)
+    left=$((DEADLINE - now))
+    if [ "$left" -lt "$CLOCK_S" ]; then
+        say "clock: $((left / 60)) min to the deadline, (32,2) needs ~$((CLOCK_S / 60)): skipped (-> P3)"
+        return 0
+    fi
+    say "clock: $((left / 60)) min to the deadline, (32,2) needs ~$((CLOCK_S / 60)): running"
+    "$CLOCK" < /dev/null
+}
+
 # --- main ---------------------------------------------------------------------------------------
 say "host $HOST, commit $(git log --oneline -1 2>/dev/null), governors $(governor)"
 if [ "$DRY" = 0 ]; then
@@ -147,10 +163,10 @@ if [ "$DRY" = 0 ]; then
     printf '%s\n' "$MARK" >> "$MANIFEST"
 fi
 step drift "Vicuna-7B (8,4) [23,6,2,1] + (16,4) [20,9,2,1], default" drift
-step clock "run 17 leftover: (32,2) at max (clock_study.sh)" "$CLOCK"
 step probes "probe v7: CPU, then MIG, into probes_v7/" probes
-step mistral "Mistral-7B near-best, 9 pairs, 2-4 microbatch pairs first (sealed)" mistral
+step mistral "Mistral-7B near-best, pairs $MISTRAL_PAIRS (sealed)" mistral
 step check "download_models.py --check: Llama-2-7B, Qwen2.5-7B" check
+step clock "run 17 leftover: (32,2) at max (clock_study.sh), if it fits" clock
 if [ -n "$FAILED" ]; then
     say "done; check these steps:$FAILED"
     exit 1
