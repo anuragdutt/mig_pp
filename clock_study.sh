@@ -4,6 +4,11 @@
 #   ./clock_study.sh [--dry-run]       start inside tmux; runs in the foreground (~22 h)
 #   ./clock_study.sh --probes          the probes only (CPU, then MIG) at max with THREADS, into PROBE_DIR
 #
+# MODEL (default "": the setup's model, Vicuna-7B) is passed to every run as INV_MODEL, and step names
+# then start with it (mistral_7b -> mistral7b_clock_blk01_...), so a Vicuna step name never matches.
+# SPLIT_MODULE holds the split lists; VALIDATE_KIND picks NEAR_BEST ("near"), NEAR_BEST + BY_PAIR
+# ("union") or the module's ALL ("all", one list per pair, e.g. mistral7b_40gb_split_order).
+#
 # Two conditions, switched between blocks:
 #   default  CPU governor schedutil, GPU clocks at the driver default
 #   max      CPU governor performance, GPU SM clock locked at its max. If the driver refuses the lock
@@ -49,20 +54,27 @@ for v in $(compgen -e); do
 done
 
 # --- config -----------------------------------------------------------------------------------
-# P3 (2026-11-26): the 1-thread check before S runs (mig_pp/milp/SCORING.md, "Pre-registered"):
-# (32,16) and (16,8) at max with OMP_NUM_THREADS=1, NEAR_BEST + BY_PAIR, 2 passes, and between
-# them (32,16) once with torch's default threads, the same-box thread effect (~7.4 h).
+# P3 Run B (2026-11-26, current.md): Mistral-7B step 1 under the main condition (performance + GPU
+# locked + OMP_NUM_THREADS=1), all 9 pairs, mistral7b_40gb_split_order.ALL (136 splits per pair),
+# one run each (~37 h). Sealed until the Mistral picks are frozen (mig_pp/milp/SCORING.md).
+# P3 Run A (mig5) ran MODEL="", VALIDATE="32,16;16,8", VALIDATE_KIND="union", VALIDATE_PASSES=2,
+# CONTRAST="32,16", NOTIFY_LABEL="P3 RunA" (the 1-thread check, SCORING.md "Pre-registered").
 # P2 (mig4) ran ROUNDS=0, STABLE="32,2", THREADS="", VALIDATE="". P1 (mig3) ran ROUNDS=1,
 # STABLE="32,16;32,8;16,2;32,4;32,2", THREADS="", VALIDATE="" (the full study).
+MODEL="mistral_7b"  # parallel_config.MODELS key, passed as INV_MODEL; "" = the setup's model (Vicuna-7B)
+SPLIT_MODULE="mistral7b_40gb_split_order"  # where the split lists come from (vicuna7b_40gb_split_order for Vicuna)
 ROUNDS=0  # 0: no problem-pair blocks; 1: 2 runs per split per condition (~27 h per box)
 PROBLEM="8,4;16,8;16,4;8,2"
-VALIDATE="32,16;16,8"  # at max over NEAR_BEST + BY_PAIR, VALIDATE_PASSES passes; "" = none
-VALIDATE_PASSES=2  # pass 1 forward, pass 2 reversed, ...
+VALIDATE="8,4;16,8;32,16;8,2;16,4;32,8;16,2;32,4;32,2"  # at max, VALIDATE_PASSES passes; "" = none
+VALIDATE_KIND="all"  # near | union | all (SPLIT_MODULE.ALL)
+EXPECT_SPLITS=136  # kind "all": every pair's list must have exactly this many distinct splits; "" = no count check
+EXPECT_LAYERS=32  # every split must have 4 ranks and this many layers; "" = only "all splits alike"
+VALIDATE_PASSES=1  # pass 1 forward, pass 2 reversed, ...
 STABLE=""  # at max over NEAR_BEST, once, last; "" = none
 THREADS=1  # OMP_NUM_THREADS for every run (torchrun's default for multi-process jobs); "" = torch's default
-CONTRAST="32,16"  # at max with torch's default threads, NEAR_BEST + BY_PAIR, once, after validate pass 1; "" = none
+CONTRAST=""  # at max with torch's default threads, NEAR_BEST + BY_PAIR, once, after validate pass 1; "" = none
 REQUIRE_GPU_LOCK=1  # 1: stop unless the GPU locks at max and persistence mode is on (P3); 0: max blocks may run unlocked (P1/P2)
-NOTIFY_LABEL="P3 RunA"  # title of the phone notifications (no host names or paths in them)
+NOTIFY_LABEL="P3 RunB"  # title of the phone notifications (no host names or paths in them)
 HOST="${INV_HOST:-$(hostname -s)}"
 PROBE_DIR="probes_v71_$HOST"  # --probes: output folder, relative to the repo root; never overwritten
 PROBE_LABEL="P3 probes"  # --probes: title of the phone notifications
@@ -116,6 +128,7 @@ NC=0  # contrast blocks that run
 [ -z "$CONTRAST" ] || NC=1
 NBLOCKS=$((4 * ROUNDS + NV + NC + NS))
 NUMA_LIST=""  # the GPU's NUMA-local CPU list (start_loggers sets it)
+STEP_PREFIX="${MODEL:+${MODEL//_/}_}"  # mistral_7b -> "mistral7b_"; "" for the setup's model
 
 say() {
     local line
@@ -137,19 +150,74 @@ gpu_clocks() {
 }
 hours() { awk -v s="$1" 'BEGIN { printf "%.1f", s / 3600 }'; }
 
-# "b,mb" near|union reverse(0|1) -> "a,b,c,d;..." (NEAR_BEST, plus the BY_PAIR splits not in it)
+# "b,mb" near|union|all reverse(0|1) -> "a,b,c,d;..." from SPLIT_MODULE: NEAR_BEST, NEAR_BEST plus
+# the BY_PAIR splits not in it, or ALL
 split_list() {
-    "$PYTHON" - "$1" "$2" "$3" <<'PY'
+    "$PYTHON" - "$1" "$2" "$3" "$SPLIT_MODULE" <<'PY'
+import importlib
 import sys
-import vicuna7b_40gb_split_order as v
+v = importlib.import_module(sys.argv[4])
 pair = tuple(int(x) for x in sys.argv[1].split(","))
-out = [list(s) for s in v.NEAR_BEST[pair]]
+if sys.argv[2] == "all":
+    out = [list(s) for s in v.ALL[pair]]
+else:
+    out = [list(s) for s in v.NEAR_BEST[pair]]
 if sys.argv[2] == "union":
     out += [list(s) for s in v.BY_PAIR[pair] if list(s) not in out]
 if sys.argv[3] == "1":
     out.reverse()
 print(";".join(",".join(map(str, s)) for s in out))
 PY
+}
+
+# Every list the run will use, checked before anything is touched (dry runs too): the module
+# imports, and each pair's list is non-empty, has no duplicates, and all its splits have the same
+# rank count and layer total; with EXPECT_LAYERS, 4 ranks and that total; with EXPECT_SPLITS, kind
+# "all" lists have exactly that many splits (a stale or short list on the box stops the run). Args: "kind:pairs" per block kind that runs, e.g. "all:8,4;16,8".
+check_lists() {
+    local out
+    out=$("$PYTHON" - "$SPLIT_MODULE" "$EXPECT_SPLITS" "$EXPECT_LAYERS" "$@" 2>&1 <<'PY'
+import importlib
+import sys
+try:
+    v = importlib.import_module(sys.argv[1])
+except Exception as e:
+    sys.exit(f"cannot import {sys.argv[1]}: {type(e).__name__}: {e}")
+want_n = int(sys.argv[2]) if sys.argv[2] else None
+want_layers = int(sys.argv[3]) if sys.argv[3] else None
+bad, counts = [], []
+for group in sys.argv[4:]:
+    kind, pairs = group.split(":", 1)
+    for text in [p for p in pairs.split(";") if p.strip()]:
+        pair = tuple(int(x) for x in text.split(","))
+        try:
+            if kind == "all":
+                out = [list(s) for s in v.ALL[pair]]
+            else:
+                out = [list(s) for s in v.NEAR_BEST[pair]]
+                if kind == "union":
+                    out += [list(s) for s in v.BY_PAIR[pair] if list(s) not in out]
+        except Exception as e:
+            bad.append(f"{text} {kind}: {type(e).__name__}: {e}")
+            continue
+        shapes = {(len(s), sum(s)) for s in out}
+        if not out:
+            bad.append(f"{text} {kind}: empty")
+        elif len({tuple(s) for s in out}) != len(out):
+            bad.append(f"{text} {kind}: {len(out) - len({tuple(s) for s in out})} duplicate splits")
+        elif len(shapes) != 1:
+            bad.append(f"{text} {kind}: splits differ in ranks / layer total {sorted(shapes)}")
+        elif want_layers is not None and shapes != {(4, want_layers)}:
+            bad.append(f"{text} {kind}: splits are {sorted(shapes)} (ranks, layers), want (4, {want_layers})")
+        elif kind == "all" and want_n is not None and len(out) != want_n:
+            bad.append(f"{text} {kind}: {len(out)} splits, want {want_n}")
+        counts.append(f"{text} {len(out)}")
+if bad:
+    sys.exit("; ".join(bad))
+print(", ".join(counts))
+PY
+) || die "split lists ($SPLIT_MODULE): $(echo "$out" | tail -1)"
+    say "split lists ok ($SPLIT_MODULE): $out"
 }
 
 est_seconds() { # pairs kind
@@ -209,6 +277,13 @@ trap 'INTERRUPTED=1; say "interrupted"; exit 130' INT TERM HUP
 
 preflight() {
     local apps bad out pm sm
+    if [ -n "$MODEL" ] && [ "$PROBES" = 0 ]; then  # before anything is touched; probes need no weights
+        # The planner's own check (parallel_plan): complete HF weights, not just a config.json.
+        out=$("$PYTHON" -c 'import sys, parallel_config as p, model_family as mf
+mf.find_weight_files(mf.resolve_model_path(str(p.MODELS[sys.argv[1]]["path"])))' "$MODEL" 2>&1) \
+            || die "no complete weights for MODEL=$MODEL ($(echo "$out" | tail -1)); python3 download_models.py --only $MODEL"
+        say "model $MODEL (INV_MODEL for every run; step names start with $STEP_PREFIX)"
+    fi
     if pgrep -f run_parallel.sh > /dev/null; then die "run_parallel.sh is already running"; fi
     apps=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | grep -c -E '^[0-9]+')
     [ "$apps" -eq 0 ] || die "$apps processes are on the GPU"
@@ -349,8 +424,8 @@ run_oracle() { # step pair splits
     limit="${CLOCK_WATCH_SECONDS:-$((2 * n * $(sec_per_split "$2") + 600))}"
     ( sleep "$limit"; notify "$1 still running after $((limit / 60)) min (about 2x its estimate); check the box" ) &
     WATCH=$!
-    env ${BLOCK_THREADS:+"OMP_NUM_THREADS=$BLOCK_THREADS"} INV_RUN=custom INV_PAIRS="$2" INV_SPLITS="$3" \
-        ./run_parallel.sh start < /dev/null
+    env ${BLOCK_THREADS:+"OMP_NUM_THREADS=$BLOCK_THREADS"} ${MODEL:+"INV_MODEL=$MODEL"} INV_RUN=custom \
+        INV_PAIRS="$2" INV_SPLITS="$3" ./run_parallel.sh start < /dev/null
     rc=$?
     kill "$WATCH" 2>/dev/null
     WATCH=""
@@ -378,7 +453,7 @@ run_block() { # condition pairs near|union reverse(0|1) [threads: default $THREA
     for pair in "${list[@]}"; do
         splits=$(split_list "$pair" "$kind" "$rev")
         n=$(echo "$splits" | tr ';' '\n' | grep -c .)
-        step=$(printf 'clock_blk%02d_%s_b%s_mb%s' "$BLOCK" "$label" "${pair%,*}" "${pair#*,}")
+        step=$(printf '%sclock_blk%02d_%s_b%s_mb%s' "$STEP_PREFIX" "$BLOCK" "$label" "${pair%,*}" "${pair#*,}")
         say "== block $BLOCK/$NBLOCKS $label ($pair): $n splits ($kind$order), ~$((n * $(sec_per_split "$pair") / 60)) min"
         [ "$DRY" = 1 ] || run_oracle "$step" "$pair" "$splits"
     done
@@ -440,24 +515,32 @@ if [ "$PROBES" = 1 ]; then
 fi
 TOTAL_RUNS=$((4 * ROUNDS * $(npairs "$PROBLEM") + NV * $(npairs "$VALIDATE") + NC * $(npairs "$CONTRAST") \
     + NS * $(npairs "$STABLE")))
+LISTS=()
+[ "$ROUNDS" = 0 ] || LISTS+=("union:$PROBLEM")
+[ "$NV" = 0 ] || LISTS+=("$VALIDATE_KIND:$VALIDATE")
+[ "$NC" = 0 ] || LISTS+=("union:$CONTRAST")
+[ "$NS" = 0 ] || LISTS+=("near:$STABLE")
+[ "${#LISTS[@]}" = 0 ] || check_lists "${LISTS[@]}"
 if [ "$DRY" = 0 ]; then
     preflight
     start_loggers
 fi
-P=$(est_seconds "$PROBLEM" union)
-V=$(est_seconds "$VALIDATE" union)
+P=0
+[ "$ROUNDS" = 0 ] || P=$(est_seconds "$PROBLEM" union)
+V=$(est_seconds "$VALIDATE" "$VALIDATE_KIND")
 C=$(est_seconds "$CONTRAST" union)
 S=$(est_seconds "$STABLE" near)
 lock="locked at $SM_MAX MHz"
 [ "$GPU_LOCK" = 1 ] || lock="not locked (logged only)"
 [ "$DRY" = 0 ] || lock="tested at start"
-say "plan, $HOST: problem pairs $PROBLEM in $((4 * ROUNDS)) blocks ((default, max, max, default) x \
-$ROUNDS); validate pairs ${VALIDATE:-none} at max x $NV; contrast pairs ${CONTRAST:-none} at max, torch's \
+say "plan, $HOST, model ${MODEL:-setup default}, splits from $SPLIT_MODULE: problem pairs $PROBLEM in $((4 * ROUNDS)) blocks ((default, max, max, default) x \
+$ROUNDS); validate pairs ${VALIDATE:-none} at max ($VALIDATE_KIND) x $NV; contrast pairs ${CONTRAST:-none} at max, torch's \
 default threads, once; stable pairs ${STABLE:-none} at max once. OMP_NUM_THREADS ${THREADS:-unset (torch \
 default)} except contrast. GPU at max: $lock. ~$(hours $((4 * ROUNDS * P + NV * V + NC * C + S))) h"
-notify "started: $TOTAL_RUNS runs, ~$(hours $((4 * ROUNDS * P + NV * V + NC * C + S))) h; GPU $lock"
-[ "$DRY" = 1 ] || printf '# run %s clock_study.sh host=%s rounds=%s gpu_lock=%s threads=%s contrast=%s\n' \
-    "$(date '+%Y-%m-%d_%H:%M:%S')" "$HOST" "$ROUNDS" "$GPU_LOCK" "${THREADS:-default}" "${CONTRAST:-none}" >> "$MANIFEST"
+notify "started${MODEL:+ $MODEL}: $TOTAL_RUNS runs, ~$(hours $((4 * ROUNDS * P + NV * V + NC * C + S))) h; GPU $lock"
+[ "$DRY" = 1 ] || printf '# run %s clock_study.sh host=%s model=%s splits=%s:%s rounds=%s gpu_lock=%s threads=%s contrast=%s\n' \
+    "$(date '+%Y-%m-%d_%H:%M:%S')" "$HOST" "${MODEL:-default}" "$SPLIT_MODULE" "$VALIDATE_KIND" "$ROUNDS" "$GPU_LOCK" \
+    "${THREADS:-default}" "${CONTRAST:-none}" >> "$MANIFEST"
 
 for ((round = 1; round <= ROUNDS; round++)); do  # not seq: BSD `seq 1 0` counts down
     run_block default "$PROBLEM" union 0
@@ -466,7 +549,7 @@ for ((round = 1; round <= ROUNDS; round++)); do  # not seq: BSD `seq 1 0` counts
     run_block default "$PROBLEM" union 1
 done
 for ((pass = 1; pass <= NV; pass++)); do
-    run_block max "$VALIDATE" union $(((pass + 1) % 2))  # pass 1 forward, 2 reversed, ...
+    run_block max "$VALIDATE" "$VALIDATE_KIND" $(((pass + 1) % 2))  # pass 1 forward, 2 reversed, ...
     if [ "$pass" = 1 ] && [ "$NC" = 1 ]; then
         run_block max "$CONTRAST" union 0 ""  # torch's default threads, between the 1-thread passes
     fi
