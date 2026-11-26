@@ -8,8 +8,11 @@
 #   max      CPU governor performance, GPU SM clock locked at its max. If the driver refuses the lock
 #            (MIG), max blocks run with the GPU clock logged only, and the log says so.
 # Problem pairs: ROUNDS x [default, max, max, default] blocks. Each block runs the 4 problem pairs
-# over NEAR_BEST + BY_PAIR splits; the split order is reversed on every other block. Then the 5
-# stable pairs at max, NEAR_BEST, once. mig1 and mig2 run the same schedule; their runs add up.
+# over NEAR_BEST + BY_PAIR splits; the split order is reversed on every other block. Then the
+# VALIDATE pairs at max over NEAR_BEST + BY_PAIR, VALIDATE_PASSES times (forward, reversed, ...).
+# Then the STABLE pairs at max, NEAR_BEST, once. THREADS sets OMP_NUM_THREADS for every benchmark
+# run (empty: torch's default, one thread per allowed CPU); a step name then carries it in the
+# condition, e.g. clock_blk01_max-t1_b32_mb16. The host must be in parallel_config.GPUS_40GB.
 #
 # Writes (appends): investigation_runs.txt (one "# run" line, then "<step> <run dir>" per oracle, step =
 # clock_blkNN_<condition>_bB_mbM), clock_study.log (what this script prints, including the governors
@@ -34,17 +37,17 @@ for v in $(compgen -e); do
 done
 
 # --- config -----------------------------------------------------------------------------------
-# P2 (2026-11-25): run 17's leftover only, (32,2) at max. P1 (mig3) ran ROUNDS=1 with all 5 stable
-# pairs and stopped at the lease end after (32,4); for the full study set ROUNDS=1 and
-# STABLE="32,16;32,8;16,2;32,4;32,2" again.
+# P3 (2026-11-26): the 1-thread check before S runs (mig_pp/milp/SCORING.md, "Pre-registered"):
+# (32,16) and (16,8) at max with OMP_NUM_THREADS=1, NEAR_BEST + BY_PAIR, 2 passes (~5 h).
+# P2 (mig4) ran ROUNDS=0, STABLE="32,2", THREADS="", VALIDATE="". P1 (mig3) ran ROUNDS=1,
+# STABLE="32,16;32,8;16,2;32,4;32,2", THREADS="", VALIDATE="" (the full study).
 ROUNDS=0  # 0: no problem-pair blocks; 1: 2 runs per split per condition (~27 h per box)
 PROBLEM="8,4;16,8;16,4;8,2"
-STABLE="32,2"
+VALIDATE="32,16;16,8"  # at max over NEAR_BEST + BY_PAIR, VALIDATE_PASSES passes; "" = none
+VALIDATE_PASSES=2  # pass 1 forward, pass 2 reversed, ...
+STABLE=""  # at max over NEAR_BEST, once, last; "" = none
+THREADS=1  # OMP_NUM_THREADS for every run (torchrun's default for multi-process jobs); "" = torch's default
 HOST="${INV_HOST:-$(hostname -s)}"
-case "$HOST" in
-    mig1 | mig2 | mig3 | mig4) ;;
-    *) echo "clock_study.sh: this host is not mig1, mig2, mig3 or mig4 (INV_HOST overrides)" >&2; exit 2 ;;
-esac
 
 # Wall seconds per split, measured in runs 10-15; only for the time estimate.
 sec_per_split() {
@@ -57,6 +60,11 @@ sec_per_split() {
 DRY=0
 [ "${1:-}" = "--dry-run" ] && DRY=1
 PYTHON="${PYTHON:-python3}"
+if ! INV_HOST="$HOST" "$PYTHON" -c 'import sys, parallel_config as p; sys.exit(p.HOST not in p.GPUS_40GB)' 2> /dev/null; then
+    echo "clock_study.sh: host '$HOST' is not in parallel_config.GPUS_40GB (INV_HOST overrides)" >&2
+    exit 2
+fi
+LABEL_SUFFIX="${THREADS:+-t$THREADS}"  # step names: max -> max-t1 when THREADS=1
 SYS="${CLOCK_SYS:-/sys}"  # tests point this at a fake tree
 MANIFEST="investigation_runs.txt"
 LOG="clock_study.log"
@@ -68,7 +76,11 @@ GPU_LOCK=0
 SM_MAX=""
 PM_WAS=""
 BLOCK=0
-NBLOCKS=$((4 * ROUNDS + 1))
+NV=0  # validate passes that run
+[ -z "$VALIDATE" ] || NV=$VALIDATE_PASSES
+NS=0  # stable blocks that run
+[ -z "$STABLE" ] || NS=1
+NBLOCKS=$((4 * ROUNDS + NV + NS))
 
 say() {
     local line
@@ -101,6 +113,7 @@ PY
 
 est_seconds() { # pairs kind
     local s=0 pair n list
+    [ -n "$1" ] || { echo 0; return; }
     IFS=';' read -r -a list <<< "$1"
     for pair in "${list[@]}"; do
         n=$(split_list "$pair" "$2" 0 | tr ';' '\n' | grep -c .)
@@ -146,6 +159,12 @@ preflight() {
     sudo -n true 2>/dev/null || die "sudo asks for a password (sudo -n failed)"
     bad=$(grep -L -x schedutil "$SYS"/devices/system/cpu/cpu*/cpufreq/scaling_governor | wc -l | tr -d ' ')
     [ "$bad" -eq 0 ] || die "$bad CPUs are not on schedutil; put them back first"
+    if [ -n "$THREADS" ]; then
+        # The benchmark does not log its thread count: check that torch here takes OMP_NUM_THREADS.
+        out=$(OMP_NUM_THREADS="$THREADS" "$PYTHON" -c 'import torch; print(torch.get_num_threads())' 2>&1 | tail -1)
+        [ "$out" = "$THREADS" ] || die "OMP_NUM_THREADS=$THREADS, but torch reports $out threads"
+        say "threads: OMP_NUM_THREADS=$THREADS for every run (torch reports $out)"
+    fi
     say "host $HOST, commit $(git log --oneline -1 2>/dev/null)"
     say "GPU (name, driver, MIG, max sm, power limit, persistence): $(nvidia-smi -i 0 \
 --query-gpu=name,driver_version,mig.mode.current,clocks.max.sm,power.limit,persistence_mode \
@@ -249,7 +268,8 @@ run_oracle() { # step pair splits
     local before after rc
     # shellcheck disable=SC2012  # run directories are timestamps
     before=$(ls -td runs/*/ 2>/dev/null | head -1)
-    INV_RUN=custom INV_PAIRS="$2" INV_SPLITS="$3" ./run_parallel.sh start < /dev/null
+    env ${THREADS:+"OMP_NUM_THREADS=$THREADS"} INV_RUN=custom INV_PAIRS="$2" INV_SPLITS="$3" \
+        ./run_parallel.sh start < /dev/null
     rc=$?
     # shellcheck disable=SC2012
     after=$(ls -td runs/*/ 2>/dev/null | head -1)
@@ -272,8 +292,8 @@ run_block() { # condition pairs near|union reverse(0|1)
     for pair in "${list[@]}"; do
         splits=$(split_list "$pair" "$kind" "$rev")
         n=$(echo "$splits" | tr ';' '\n' | grep -c .)
-        step=$(printf 'clock_blk%02d_%s_b%s_mb%s' "$BLOCK" "$cond" "${pair%,*}" "${pair#*,}")
-        say "== block $BLOCK/$NBLOCKS $cond ($pair): $n splits ($kind$order), ~$((n * $(sec_per_split "$pair") / 60)) min"
+        step=$(printf 'clock_blk%02d_%s_b%s_mb%s' "$BLOCK" "$cond$LABEL_SUFFIX" "${pair%,*}" "${pair#*,}")
+        say "== block $BLOCK/$NBLOCKS $cond$LABEL_SUFFIX ($pair): $n splits ($kind$order), ~$((n * $(sec_per_split "$pair") / 60)) min"
         [ "$DRY" = 1 ] || run_oracle "$step" "$pair" "$splits"
     done
 }
@@ -285,14 +305,16 @@ if [ "$DRY" = 0 ]; then
     start_loggers
 fi
 P=$(est_seconds "$PROBLEM" union)
+V=$(est_seconds "$VALIDATE" union)
 S=$(est_seconds "$STABLE" near)
 lock="locked at $SM_MAX MHz"
 [ "$GPU_LOCK" = 1 ] || lock="not locked (logged only)"
 [ "$DRY" = 0 ] || lock="tested at start"
 say "plan, $HOST: problem pairs $PROBLEM in $((4 * ROUNDS)) blocks ((default, max, max, default) x \
-$ROUNDS), then stable pairs $STABLE at max once. GPU at max: $lock. ~$(hours $((4 * ROUNDS * P + S))) h"
-[ "$DRY" = 1 ] || printf '# run %s clock_study.sh host=%s rounds=%s gpu_lock=%s\n' \
-    "$(date '+%Y-%m-%d_%H:%M:%S')" "$HOST" "$ROUNDS" "$GPU_LOCK" >> "$MANIFEST"
+$ROUNDS); validate pairs ${VALIDATE:-none} at max x $NV; stable pairs ${STABLE:-none} at max once. \
+OMP_NUM_THREADS ${THREADS:-unset (torch default)}. GPU at max: $lock. ~$(hours $((4 * ROUNDS * P + NV * V + S))) h"
+[ "$DRY" = 1 ] || printf '# run %s clock_study.sh host=%s rounds=%s gpu_lock=%s threads=%s\n' \
+    "$(date '+%Y-%m-%d_%H:%M:%S')" "$HOST" "$ROUNDS" "$GPU_LOCK" "${THREADS:-default}" >> "$MANIFEST"
 
 for ((round = 1; round <= ROUNDS; round++)); do  # not seq: BSD `seq 1 0` counts down
     run_block default "$PROBLEM" union 0
@@ -300,7 +322,10 @@ for ((round = 1; round <= ROUNDS; round++)); do  # not seq: BSD `seq 1 0` counts
     run_block max "$PROBLEM" union 0
     run_block default "$PROBLEM" union 1
 done
-run_block max "$STABLE" near 0
+for ((pass = 1; pass <= NV; pass++)); do
+    run_block max "$VALIDATE" union $(((pass + 1) % 2))  # pass 1 forward, 2 reversed, ...
+done
+[ -z "$STABLE" ] || run_block max "$STABLE" near 0
 if [ -n "$FAILED" ]; then
     say "all $NBLOCKS blocks ran, but some oracles failed (listed below)"
     exit 1
