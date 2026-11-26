@@ -2,6 +2,7 @@
 # clock_study.sh -- max-clock reruns of Vicuna-7B on mig1 / mig2 (2026-11-16), one command per box.
 #
 #   ./clock_study.sh [--dry-run]       start inside tmux; runs in the foreground (~22 h)
+#   ./clock_study.sh --probes          the probes only (CPU, then MIG) at max with THREADS, into PROBE_DIR
 #
 # Two conditions, switched between blocks:
 #   default  CPU governor schedutil, GPU clocks at the driver default
@@ -28,6 +29,11 @@
 # oracle failed. Inherited INV_* (but INV_HOST), MIG_*, MASTER_*, PYTORCH_* and thread settings are
 # cleared at start, and logged, so the run is what this file says (model, benchmark, logging, threads).
 #   --dry-run   print the schedule and hours only, touch nothing (INV_HOST=mig1 to try it elsewhere)
+#   --probes    probe v7.1 under the main condition (2026-11-26): same preflight, loggers, max condition
+#               (performance + GPU locked) and restore as the runs, OMP_NUM_THREADS=$THREADS; the CPU
+#               probe (measure_constants_cpu.py) on the first MIG slice, pinned to the GPU's NUMA CPUs,
+#               then the MIG probe (measure_constants_mig.py), both run inside PROBE_DIR (must not
+#               exist), logs constants_{cpu,mig}_v71.log there. No benchmark runs, no manifest lines (~10 min).
 
 set -u
 cd "$(dirname "$0")" || exit 1
@@ -58,6 +64,8 @@ CONTRAST="32,16"  # at max with torch's default threads, NEAR_BEST + BY_PAIR, on
 REQUIRE_GPU_LOCK=1  # 1: stop unless the GPU locks at max and persistence mode is on (P3); 0: max blocks may run unlocked (P1/P2)
 NOTIFY_LABEL="P3 RunA"  # title of the phone notifications (no host names or paths in them)
 HOST="${INV_HOST:-$(hostname -s)}"
+PROBE_DIR="probes_v71_$HOST"  # --probes: output folder, relative to the repo root; never overwritten
+PROBE_LABEL="P3 probes"  # --probes: title of the phone notifications
 
 # Wall seconds per split, measured in runs 10-15; only for the time estimate.
 sec_per_split() {
@@ -68,7 +76,15 @@ sec_per_split() {
 }
 
 DRY=0
-[ "${1:-}" = "--dry-run" ] && DRY=1
+PROBES=0
+for a in "$@"; do
+    case "$a" in
+        --dry-run) DRY=1 ;;
+        --probes) PROBES=1 ;;
+        *) echo "clock_study.sh: unknown argument '$a' (--dry-run, --probes)" >&2; exit 2 ;;
+    esac
+done
+[ "$PROBES" = 0 ] || NOTIFY_LABEL="$PROBE_LABEL"
 PYTHON="${PYTHON:-python3}"
 NOTIFY_TOPIC="${CLOCK_NOTIFY_TOPIC:-migpp-871bf4d064194bc2}"  # ntfy.sh topic (user's phone); CLOCK_NOTIFY_TOPIC overrides, "" stays on
 if ! INV_HOST="$HOST" "$PYTHON" -c 'import sys, parallel_config as p; sys.exit(p.HOST not in p.GPUS_40GB)' 2> /dev/null; then
@@ -99,6 +115,7 @@ NS=0  # stable blocks that run
 NC=0  # contrast blocks that run
 [ -z "$CONTRAST" ] || NC=1
 NBLOCKS=$((4 * ROUNDS + NV + NC + NS))
+NUMA_LIST=""  # the GPU's NUMA-local CPU list (start_loggers sets it)
 
 say() {
     local line
@@ -297,6 +314,7 @@ print(" ".join(str(c) for p in sys.argv[1].split(",") if p.strip()
     tail -n +$((c0 + 1)) clock_cpu.txt \
         | awk '$1 ~ /^[0-9]+$/ { for (i = 2; i <= NF; i++) if ($i ~ /^[0-9]+$/) ok = 1 } END { exit !ok }' \
         || die "CPU frequency log is not writing (scaling_cur_freq unreadable)"
+    NUMA_LIST="$list"
     say "logging: GPU every 1 s -> clock_gpu.csv ($q); CPUs ${list:-all} every 2 s -> clock_cpu.txt"
 }
 
@@ -366,8 +384,60 @@ run_block() { # condition pairs near|union reverse(0|1) [threads: default $THREA
     done
 }
 
+# --probes: one probe script inside PROBE_DIR, with a watchdog push past limit seconds.
+run_probe() { # name script log limit gpu ("" = all) [taskset cpu list]
+    local rc
+    ( sleep "$4"; notify "probe $1 still running after $(($4 / 60)) min; check the box" ) &
+    WATCH=$!
+    (
+        cd "$PROBE_DIR" || exit 1
+        env ${THREADS:+"OMP_NUM_THREADS=$THREADS"} ${5:+"CUDA_VISIBLE_DEVICES=$5"} \
+            ${6:+taskset -c "$6"} "$PYTHON" "../mig_pp/milp/$2"
+    ) < /dev/null 2>&1 | tee -a "$PROBE_DIR/$3"
+    rc=${PIPESTATUS[0]}
+    kill "$WATCH" 2>/dev/null
+    WATCH=""
+    if [ "$rc" = 0 ]; then
+        OK_RUNS=$((OK_RUNS + 1))
+        say "probe $1 ok -> $PROBE_DIR/$3"
+    else
+        FAILED="$FAILED probe_$1"
+        say "probe $1 failed (exit $rc); log $PROBE_DIR/$3"
+    fi
+}
+
+run_probes() {
+    BLOCK=1
+    say "== probes, $HOST: CPU probe (first MIG slice, CPUs ${NUMA_LIST:-unpinned}), then MIG probe; \
+max condition, OMP_NUM_THREADS ${THREADS:-unset (torch default)} -> $PROBE_DIR (~10 min)"
+    [ "$DRY" = 1 ] && return
+    set_condition max
+    PROBE_GPU=$(nvidia-smi -L | grep -o 'MIG-[^)]*' | head -1)
+    [ -n "$PROBE_GPU" ] || die "no MIG slice in nvidia-smi -L"
+    mkdir "$PROBE_DIR" || die "could not create $PROBE_DIR"
+    run_probe cpu measure_constants_cpu.py constants_cpu_v71.log 1200 "$PROBE_GPU" "$NUMA_LIST"
+    # MIG probe as in P2: unpinned, every slice visible; it starts one child per slice type itself
+    # (CUDA_VISIBLE_DEVICES per child).
+    run_probe mig measure_constants_mig.py constants_mig_v71.log 2700 ""
+    say "condition at the end: governors $(governors); GPU (sm, max sm, temp, power) $(gpu_clocks)"
+}
+
 # --- main ---------------------------------------------------------------------------------------
 [ -z "$CLEARED" ] || say "cleared from the environment:$CLEARED"
+if [ "$PROBES" = 1 ]; then
+    TOTAL_RUNS=2
+    # Checked before anything is touched: an existing folder is earlier probe data.
+    [ ! -e "$PROBE_DIR" ] || die "$PROBE_DIR exists (earlier probe data); move it away first, nothing was touched"
+    if [ "$DRY" = 0 ]; then
+        preflight
+        start_loggers
+        notify "probes started: CPU + MIG, ~10 min; GPU locked at $SM_MAX MHz"
+    fi
+    run_probes
+    [ -z "$FAILED" ] || exit 1
+    say "probes done"
+    exit 0
+fi
 TOTAL_RUNS=$((4 * ROUNDS * $(npairs "$PROBLEM") + NV * $(npairs "$VALIDATE") + NC * $(npairs "$CONTRAST") \
     + NS * $(npairs "$STABLE")))
 if [ "$DRY" = 0 ]; then

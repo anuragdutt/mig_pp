@@ -675,6 +675,14 @@ class CpuFreqSampler:
         return rows
 
 
+def cpu_khz(cpu):
+    """scaling_cur_freq (kHz) of one CPU, or None."""
+    try:
+        return int(open(f"/sys/devices/system/cpu/cpu{cpu}/cpufreq/scaling_cur_freq").read())
+    except (OSError, ValueError, TypeError):
+        return None
+
+
 def current_cpu():
     """The CPU this process runs on now (field 39 of /proc/self/stat), or None."""
     try:
@@ -738,7 +746,8 @@ def harness_launch_us(c):
     h = torch.randn(mb, 1, hidden, dtype=torch.float16, device=DEVICE)
     pos = torch.full((mb, 1), ctx, dtype=torch.long, device=DEVICE)
     emb = rotary(h, pos)
-    kpl, _ = kernels(lambda: layer_forward(layers[0], h, emb, cache))
+    with torch.no_grad():  # as every timed call below (v7 counted outside no_grad: 35, not 40)
+        kpl, _ = kernels(lambda: layer_forward(layers[0], h, emb, cache))
 
     def one_call():  # the harness's call, per layer
         t0 = time.perf_counter()
@@ -770,31 +779,31 @@ def harness_launch_us(c):
 
     methods = {"forward_through_layers" if ftl else "layer_forward_loop": one_call,
                "per_layer_distinct": per_layer, "per_layer_same_v6": same_layer}
-    sampler = CpuFreqSampler(c.get("freq_period_s", 0.02))
+    # v7.1: the CPU's clock read in this process right before and after every stack, on the CPU it
+    # ran on (v7's sampler child recorded nothing on the box)
     windows = []
-    try:
-        with torch.no_grad():
-            for fn in methods.values():  # warm every path
-                fn()
-            torch.cuda.synchronize()
-            for w in range(c["launch_windows"]):
-                for name, fn in methods.items():
-                    vals, cpus = [], []
-                    t_start = time.time()
-                    for _ in range(c["launch_stacks"]):
-                        torch.cuda.synchronize()
-                        cpus.append(current_cpu())
-                        vals += fn()
-                        cpus.append(current_cpu())
+    nfreq = 0
+    with torch.no_grad():
+        for fn in methods.values():  # warm every path
+            fn()
+        torch.cuda.synchronize()
+        for w in range(c["launch_windows"]):
+            for name, fn in methods.items():
+                vals, ks = [], []
+                for _ in range(c["launch_stacks"]):
                     torch.cuda.synchronize()
-                    windows.append(dict(method=name, window=w, us_per_layer=statistics.median(vals) * 1e6,
-                                        t0=t_start, t1=time.time(), cpus=sorted({x for x in cpus if x is not None})))
-    finally:
-        freq = sampler.samples()
-    for wd in windows:  # the clock of the CPUs this window ran on, while it ran
-        ks = [row[cpu] for t, row in freq if wd["t0"] <= t <= wd["t1"] for cpu in wd["cpus"] if cpu in row]
-        wd["cpu_khz_median"] = statistics.median(ks) if ks else None
-        wd["cpu_khz_min"] = min(ks) if ks else None
+                    cpu0 = current_cpu()
+                    k0 = cpu_khz(cpu0)
+                    vals += fn()
+                    cpu1 = current_cpu()
+                    k1 = cpu_khz(cpu1)
+                    ks += [k for k in (k0, k1) if k is not None]
+                torch.cuda.synchronize()
+                nfreq += len(ks)
+                windows.append(dict(method=name, window=w, us_per_layer=statistics.median(vals) * 1e6,
+                                    cpu_khz_median=statistics.median(ks) if ks else None,
+                                    cpu_khz_min=min(ks) if ks else None, cpu_last=cpu1))
+    freq = range(nfreq)  # count only, for the summary below
     res = {}
     for name in methods:
         ws = [wd for wd in windows if wd["method"] == name]
@@ -872,6 +881,21 @@ def primitives(c, peak, gpcs):
                 pts.append((N * K * 2, t, m, dict(N=N, K=K, M=M, replays_us=reps)))
             del ws
         report("gemm_bias_decode", pts, "weight bytes", 1e9, "GB/s")
+        # the same shapes with a 3-D input (mb, 1, K), as a decoder layer's nn.Linear gets it (probe v7.1),
+        # with and without the bias: is the layer's slower q projection the bias or the input shape?
+        for name, with_bias in (("gemm3d_decode", False), ("gemm_bias3d_decode", True)):
+            group(name)
+            pts = []
+            for N, K in c["gemm_bias_shapes"]:
+                ws = [torch.randn(N, K, **f16) for _ in range(copies_for(N * K * 2))]
+                b = torch.randn(N, **f16) if with_bias else None
+                for M in c["gemm_decode_m"]:
+                    x = torch.randn(M, 1, K, **f16)
+                    calls = [(lambda w=w: F.linear(x, w, b)) for w in ws]
+                    t, m, reps = eager_us(calls)
+                    pts.append((N * K * 2, t, m, dict(N=N, K=K, M=M, replays_us=reps)))
+                del ws
+            report(name, pts, "weight bytes", 1e9, "GB/s")
     # prefill GEMMs (large M): FLOPs = 2 x M x N x K
     group("gemm_prefill")
     pts = []
