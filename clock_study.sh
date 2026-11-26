@@ -12,7 +12,13 @@
 # VALIDATE pairs at max over NEAR_BEST + BY_PAIR, VALIDATE_PASSES times (forward, reversed, ...).
 # Then the STABLE pairs at max, NEAR_BEST, once. THREADS sets OMP_NUM_THREADS for every benchmark
 # run (empty: torch's default, one thread per allowed CPU); a step name then carries it in the
-# condition, e.g. clock_blk01_max-t1_b32_mb16. The host must be in parallel_config.GPUS_40GB.
+# condition, e.g. clock_blk01_max-t1_b32_mb16. CONTRAST pairs run once at max with torch's default
+# threads (step condition "max", as in run 17), between validate passes 1 and 2, so the thread
+# setting is compared on one box with drift balanced (1 thread, default, 1 thread).
+# The host must be in parallel_config.GPUS_40GB. REQUIRE_GPU_LOCK=1 stops the run unless the GPU
+# clock locks at its max and persistence mode is on (both read back). It sends a phone notification
+# through ntfy.sh (topic NOTIFY_TOPIC below; CLOCK_NOTIFY_TOPIC overrides it) at start,
+# when the run ends for any reason, and when one oracle runs past ~2x its estimate.
 #
 # Writes (appends): investigation_runs.txt (one "# run" line, then "<step> <run dir>" per oracle, step =
 # clock_blkNN_<condition>_bB_mbM), clock_study.log (what this script prints, including the governors
@@ -38,7 +44,8 @@ done
 
 # --- config -----------------------------------------------------------------------------------
 # P3 (2026-11-26): the 1-thread check before S runs (mig_pp/milp/SCORING.md, "Pre-registered"):
-# (32,16) and (16,8) at max with OMP_NUM_THREADS=1, NEAR_BEST + BY_PAIR, 2 passes (~5 h).
+# (32,16) and (16,8) at max with OMP_NUM_THREADS=1, NEAR_BEST + BY_PAIR, 2 passes, and between
+# them (32,16) once with torch's default threads, the same-box thread effect (~7.4 h).
 # P2 (mig4) ran ROUNDS=0, STABLE="32,2", THREADS="", VALIDATE="". P1 (mig3) ran ROUNDS=1,
 # STABLE="32,16;32,8;16,2;32,4;32,2", THREADS="", VALIDATE="" (the full study).
 ROUNDS=0  # 0: no problem-pair blocks; 1: 2 runs per split per condition (~27 h per box)
@@ -47,6 +54,9 @@ VALIDATE="32,16;16,8"  # at max over NEAR_BEST + BY_PAIR, VALIDATE_PASSES passes
 VALIDATE_PASSES=2  # pass 1 forward, pass 2 reversed, ...
 STABLE=""  # at max over NEAR_BEST, once, last; "" = none
 THREADS=1  # OMP_NUM_THREADS for every run (torchrun's default for multi-process jobs); "" = torch's default
+CONTRAST="32,16"  # at max with torch's default threads, NEAR_BEST + BY_PAIR, once, after validate pass 1; "" = none
+REQUIRE_GPU_LOCK=1  # 1: stop unless the GPU locks at max and persistence mode is on (P3); 0: max blocks may run unlocked (P1/P2)
+NOTIFY_LABEL="P3 RunA"  # title of the phone notifications (no host names or paths in them)
 HOST="${INV_HOST:-$(hostname -s)}"
 
 # Wall seconds per split, measured in runs 10-15; only for the time estimate.
@@ -60,11 +70,12 @@ sec_per_split() {
 DRY=0
 [ "${1:-}" = "--dry-run" ] && DRY=1
 PYTHON="${PYTHON:-python3}"
+NOTIFY_TOPIC="${CLOCK_NOTIFY_TOPIC:-migpp-871bf4d064194bc2}"  # ntfy.sh topic (user's phone); CLOCK_NOTIFY_TOPIC overrides, "" stays on
 if ! INV_HOST="$HOST" "$PYTHON" -c 'import sys, parallel_config as p; sys.exit(p.HOST not in p.GPUS_40GB)' 2> /dev/null; then
     echo "clock_study.sh: host '$HOST' is not in parallel_config.GPUS_40GB (INV_HOST overrides)" >&2
     exit 2
 fi
-LABEL_SUFFIX="${THREADS:+-t$THREADS}"  # step names: max -> max-t1 when THREADS=1
+BLOCK_THREADS="$THREADS"  # OMP_NUM_THREADS of the block running now (run_block sets it)
 SYS="${CLOCK_SYS:-/sys}"  # tests point this at a fake tree
 MANIFEST="investigation_runs.txt"
 LOG="clock_study.log"
@@ -75,12 +86,19 @@ TOUCHED=0
 GPU_LOCK=0
 SM_MAX=""
 PM_WAS=""
+STOP_REASON=""
+INTERRUPTED=0
+OK_RUNS=0
+TOTAL_RUNS=0
+WATCH=""
 BLOCK=0
 NV=0  # validate passes that run
 [ -z "$VALIDATE" ] || NV=$VALIDATE_PASSES
 NS=0  # stable blocks that run
 [ -z "$STABLE" ] || NS=1
-NBLOCKS=$((4 * ROUNDS + NV + NS))
+NC=0  # contrast blocks that run
+[ -z "$CONTRAST" ] || NC=1
+NBLOCKS=$((4 * ROUNDS + NV + NC + NS))
 
 say() {
     local line
@@ -88,7 +106,13 @@ say() {
     printf '%s\n' "$line"
     printf '%s\n' "$line" >> "$LOG"
 }
-die() { say "STOP: $*"; exit 1; }
+die() { STOP_REASON="$*"; say "STOP: $*"; exit 1; }
+notify() { # message: one push to the phone; a failure is logged, never fatal
+    [ -n "$NOTIFY_TOPIC" ] && [ "$DRY" = 0 ] || return 0
+    curl -fsS --max-time 15 -H "Title: $NOTIFY_LABEL" -d "$1" "https://ntfy.sh/$NOTIFY_TOPIC" > /dev/null 2>&1 \
+        || say "notification not sent (curl failed): $1"
+}
+npairs() { [ -n "$1" ] && echo "$1" | tr ';' '\n' | grep -c . || echo 0; }
 governors() { cat "$SYS"/devices/system/cpu/cpu*/cpufreq/scaling_governor | sort | uniq -c | xargs; }
 gpu_clocks() {
     nvidia-smi -i 0 --query-gpu=clocks.sm,clocks.max.sm,temperature.gpu,power.draw \
@@ -123,9 +147,10 @@ est_seconds() { # pairs kind
 }
 
 cleanup() {
-    local rc=$? bad problems=""
+    local rc=$? bad problems="" status restore=""
     # shellcheck disable=SC2086  # LOGGERS is a list of pids
     [ -z "$LOGGERS" ] || kill $LOGGERS 2>/dev/null
+    [ -z "$WATCH" ] || kill "$WATCH" 2>/dev/null
     if [ "$TOUCHED" = 1 ]; then
         echo schedutil | sudo -n tee "$SYS"/devices/system/cpu/cpu*/cpufreq/scaling_governor > /dev/null 2>&1
         bad=$(grep -L -x schedutil "$SYS"/devices/system/cpu/cpu*/cpufreq/scaling_governor | wc -l | tr -d ' ')
@@ -141,18 +166,32 @@ cleanup() {
         if [ -n "$problems" ]; then
             say "RESTORE FAILED, fix by hand before any other run:$problems governors now $(governors)"
             [ "$rc" -ne 0 ] || rc=1
+            restore="; RESTORE FAILED, fix by hand:$problems"
         else
             say "restored: governors $(governors); GPU (sm, max sm, temp, power) $(gpu_clocks)"
+            restore="; governor and GPU clock restored"
         fi
     fi
     [ -z "$FAILED" ] || say "FAILED:$FAILED"
+    if [ "$INTERRUPTED" = 1 ]; then
+        status="interrupted after $OK_RUNS/$TOTAL_RUNS runs"
+    elif [ -n "$STOP_REASON" ]; then
+        status="STOPPED after $OK_RUNS/$TOTAL_RUNS runs: $STOP_REASON"
+    elif [ -n "$FAILED" ]; then
+        status="finished, but failed:$FAILED ($OK_RUNS/$TOTAL_RUNS ok)"
+    elif [ "$rc" = 0 ]; then
+        status="done: $OK_RUNS/$TOTAL_RUNS runs ok"
+    else
+        status="exited with code $rc after $OK_RUNS/$TOTAL_RUNS runs"
+    fi
+    notify "$status$restore"
     exit "$rc"
 }
 trap cleanup EXIT
-trap 'say "interrupted"; exit 130' INT TERM HUP
+trap 'INTERRUPTED=1; say "interrupted"; exit 130' INT TERM HUP
 
 preflight() {
-    local apps bad out
+    local apps bad out pm sm
     if pgrep -f run_parallel.sh > /dev/null; then die "run_parallel.sh is already running"; fi
     apps=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | grep -c -E '^[0-9]+')
     [ "$apps" -eq 0 ] || die "$apps processes are on the GPU"
@@ -175,14 +214,33 @@ $(cat "$SYS"/devices/system/cpu/cpufreq/boost 2>/dev/null || echo n/a), governor
     PM_WAS=$(nvidia-smi -i 0 --query-gpu=persistence_mode --format=csv,noheader | tr -d ' ')
     TOUCHED=1
     if [ "$PM_WAS" != Enabled ]; then
-        # A clock lock only holds between benchmark processes with persistence mode on.
-        sudo -n nvidia-smi -i 0 -pm 1 > /dev/null 2>&1 && say "persistence mode on (was $PM_WAS)"
+        # A clock lock only holds between benchmark processes with persistence mode on: read it back.
+        sudo -n nvidia-smi -i 0 -pm 1 > /dev/null 2>&1
+        pm=$(nvidia-smi -i 0 --query-gpu=persistence_mode --format=csv,noheader | tr -d ' ')
+        if [ "$pm" = Enabled ]; then
+            say "persistence mode on (was $PM_WAS)"
+        elif [ "$REQUIRE_GPU_LOCK" = 1 ]; then
+            die "persistence mode did not turn on (reads '$pm'); a GPU lock would not hold between runs"
+        else
+            say "persistence mode did not turn on (reads '$pm'); continuing (REQUIRE_GPU_LOCK=0)"
+        fi
     fi
     if out=$(sudo -n nvidia-smi -i 0 -lgc "$SM_MAX,$SM_MAX" 2>&1); then
         GPU_LOCK=1
         sleep 2
+        # Read the SM clock back (up to 5 tries: a single read can come back [N/A]).
+        for _ in 1 2 3 4 5; do
+            sm=$(nvidia-smi -i 0 --query-gpu=clocks.sm --format=csv,noheader,nounits | tr -d ' ')
+            [ "$sm" = "$SM_MAX" ] && break
+            sleep 1
+        done
+        if [ "$sm" != "$SM_MAX" ] && [ "$REQUIRE_GPU_LOCK" = 1 ]; then
+            die "GPU lock set, but the SM clock reads '$sm' MHz, not $SM_MAX"
+        fi
         say "GPU lock test ok at $SM_MAX MHz: (sm, max sm, temp, power) $(gpu_clocks)"
         sudo -n nvidia-smi -i 0 -rgc > /dev/null 2>&1
+    elif [ "$REQUIRE_GPU_LOCK" = 1 ]; then
+        die "GPU lock refused (REQUIRE_GPU_LOCK=1). nvidia-smi said: $out"
     else
         say "GPU lock refused; max blocks run with the GPU clock logged only. nvidia-smi said: $out"
     fi
@@ -265,17 +323,25 @@ set_condition() { # default|max
 
 # One oracle: like investigate.sh run_step, with this study's step name.
 run_oracle() { # step pair splits
-    local before after rc
+    local before after rc n limit
     # shellcheck disable=SC2012  # run directories are timestamps
     before=$(ls -td runs/*/ 2>/dev/null | head -1)
-    env ${THREADS:+"OMP_NUM_THREADS=$THREADS"} INV_RUN=custom INV_PAIRS="$2" INV_SPLITS="$3" \
+    # Watchdog: a push if this oracle runs past ~2x its estimate (+10 min); killed when it ends.
+    n=$(echo "$3" | tr ';' '\n' | grep -c .)
+    limit="${CLOCK_WATCH_SECONDS:-$((2 * n * $(sec_per_split "$2") + 600))}"
+    ( sleep "$limit"; notify "$1 still running after $((limit / 60)) min (about 2x its estimate); check the box" ) &
+    WATCH=$!
+    env ${BLOCK_THREADS:+"OMP_NUM_THREADS=$BLOCK_THREADS"} INV_RUN=custom INV_PAIRS="$2" INV_SPLITS="$3" \
         ./run_parallel.sh start < /dev/null
     rc=$?
+    kill "$WATCH" 2>/dev/null
+    WATCH=""
     # shellcheck disable=SC2012
     after=$(ls -td runs/*/ 2>/dev/null | head -1)
     if [ -n "$after" ] && [ "$after" != "$before" ]; then
         printf '%s %s\n' "$1" "${after%/}" >> "$MANIFEST"
         say "$1 -> ${after%/} (exit $rc)"
+        [ "$rc" = 0 ] && OK_RUNS=$((OK_RUNS + 1))
     else
         say "$1: no new run directory (exit $rc)"
         FAILED="$FAILED $1"
@@ -283,8 +349,10 @@ run_oracle() { # step pair splits
     [ "$rc" = 0 ] || FAILED="$FAILED $1"
 }
 
-run_block() { # condition pairs near|union reverse(0|1)
-    local cond="$1" kind="$3" rev="$4" pair list splits n step order=""
+run_block() { # condition pairs near|union reverse(0|1) [threads: default $THREADS, "" = torch's default]
+    local cond="$1" kind="$3" rev="$4" pair list splits n step order="" label
+    BLOCK_THREADS="${5-$THREADS}"
+    label="$cond${BLOCK_THREADS:+-t$BLOCK_THREADS}"  # max -> max-t1 when the block runs 1 thread
     BLOCK=$((BLOCK + 1))
     [ "$DRY" = 1 ] || set_condition "$cond"
     [ "$rev" = 1 ] && order=", reversed"
@@ -292,29 +360,34 @@ run_block() { # condition pairs near|union reverse(0|1)
     for pair in "${list[@]}"; do
         splits=$(split_list "$pair" "$kind" "$rev")
         n=$(echo "$splits" | tr ';' '\n' | grep -c .)
-        step=$(printf 'clock_blk%02d_%s_b%s_mb%s' "$BLOCK" "$cond$LABEL_SUFFIX" "${pair%,*}" "${pair#*,}")
-        say "== block $BLOCK/$NBLOCKS $cond$LABEL_SUFFIX ($pair): $n splits ($kind$order), ~$((n * $(sec_per_split "$pair") / 60)) min"
+        step=$(printf 'clock_blk%02d_%s_b%s_mb%s' "$BLOCK" "$label" "${pair%,*}" "${pair#*,}")
+        say "== block $BLOCK/$NBLOCKS $label ($pair): $n splits ($kind$order), ~$((n * $(sec_per_split "$pair") / 60)) min"
         [ "$DRY" = 1 ] || run_oracle "$step" "$pair" "$splits"
     done
 }
 
 # --- main ---------------------------------------------------------------------------------------
 [ -z "$CLEARED" ] || say "cleared from the environment:$CLEARED"
+TOTAL_RUNS=$((4 * ROUNDS * $(npairs "$PROBLEM") + NV * $(npairs "$VALIDATE") + NC * $(npairs "$CONTRAST") \
+    + NS * $(npairs "$STABLE")))
 if [ "$DRY" = 0 ]; then
     preflight
     start_loggers
 fi
 P=$(est_seconds "$PROBLEM" union)
 V=$(est_seconds "$VALIDATE" union)
+C=$(est_seconds "$CONTRAST" union)
 S=$(est_seconds "$STABLE" near)
 lock="locked at $SM_MAX MHz"
 [ "$GPU_LOCK" = 1 ] || lock="not locked (logged only)"
 [ "$DRY" = 0 ] || lock="tested at start"
 say "plan, $HOST: problem pairs $PROBLEM in $((4 * ROUNDS)) blocks ((default, max, max, default) x \
-$ROUNDS); validate pairs ${VALIDATE:-none} at max x $NV; stable pairs ${STABLE:-none} at max once. \
-OMP_NUM_THREADS ${THREADS:-unset (torch default)}. GPU at max: $lock. ~$(hours $((4 * ROUNDS * P + NV * V + S))) h"
-[ "$DRY" = 1 ] || printf '# run %s clock_study.sh host=%s rounds=%s gpu_lock=%s threads=%s\n' \
-    "$(date '+%Y-%m-%d_%H:%M:%S')" "$HOST" "$ROUNDS" "$GPU_LOCK" "${THREADS:-default}" >> "$MANIFEST"
+$ROUNDS); validate pairs ${VALIDATE:-none} at max x $NV; contrast pairs ${CONTRAST:-none} at max, torch's \
+default threads, once; stable pairs ${STABLE:-none} at max once. OMP_NUM_THREADS ${THREADS:-unset (torch \
+default)} except contrast. GPU at max: $lock. ~$(hours $((4 * ROUNDS * P + NV * V + NC * C + S))) h"
+notify "started: $TOTAL_RUNS runs, ~$(hours $((4 * ROUNDS * P + NV * V + NC * C + S))) h; GPU $lock"
+[ "$DRY" = 1 ] || printf '# run %s clock_study.sh host=%s rounds=%s gpu_lock=%s threads=%s contrast=%s\n' \
+    "$(date '+%Y-%m-%d_%H:%M:%S')" "$HOST" "$ROUNDS" "$GPU_LOCK" "${THREADS:-default}" "${CONTRAST:-none}" >> "$MANIFEST"
 
 for ((round = 1; round <= ROUNDS; round++)); do  # not seq: BSD `seq 1 0` counts down
     run_block default "$PROBLEM" union 0
@@ -324,7 +397,13 @@ for ((round = 1; round <= ROUNDS; round++)); do  # not seq: BSD `seq 1 0` counts
 done
 for ((pass = 1; pass <= NV; pass++)); do
     run_block max "$VALIDATE" union $(((pass + 1) % 2))  # pass 1 forward, 2 reversed, ...
+    if [ "$pass" = 1 ] && [ "$NC" = 1 ]; then
+        run_block max "$CONTRAST" union 0 ""  # torch's default threads, between the 1-thread passes
+    fi
 done
+if [ "$NV" = 0 ] && [ "$NC" = 1 ]; then
+    run_block max "$CONTRAST" union 0 ""
+fi
 [ -z "$STABLE" ] || run_block max "$STABLE" near 0
 if [ -n "$FAILED" ]; then
     say "all $NBLOCKS blocks ran, but some oracles failed (listed below)"
