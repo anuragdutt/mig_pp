@@ -130,6 +130,10 @@ def main():
         boxes={  # set name -> exported probe folder (constants_cpu.json, constants_mig.json, probe_cpu_interactions.json)
             "mig1": "~/Desktop/AP/logs/mig1_probes_v6",
             "mig2": "~/Desktop/AP/logs/mig2_probes_v6",
+            # P3 (2026-11-26): probe v7.1 on mig5 under the main condition (performance + GPU locked +
+            # 1 thread); no probe_cpu_interactions.json, so no clock or pool model: clock="fast" only.
+            # mig4.json (P2, probe v7) was built from a scratch folder with v3's interactions copied in.
+            "mig5": "~/Desktop/AP/logs/mig5_probes_v71/probes_v71_mig5",
         },
         out_dir=os.path.join(os.path.dirname(os.path.abspath(__file__)), "probe_sets"),
         check_model="vicuna_7b",  # the probe counted kernels on this model's decode layer (mb 1, ctx 64)

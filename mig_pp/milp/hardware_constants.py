@@ -6,6 +6,12 @@ entry of CONSTANTS with the same keys, and pick it in the ILP's CONFIG:
 
     constants=hardware_constants.CONSTANTS["<name>"]
 
+Probe sets, named by box (e.g. "mig1"): run the probes on the box (setup.md, "Probe runs"),
+export the folder, run probe_constants.py on it; it writes probe_sets/<box>.json, loaded below as
+CONSTANTS["<box>"]. Their slices hold generic GPU primitives with their measured points, from
+which graph_placement composes every GPU time (layer_ops); they carry the CPU clock and thread
+pool from the CPU probes. The sets written out below stay as they are.
+
 New cards go into CARD_BW and MEMORY_SLICES.
 """
 
@@ -32,6 +38,41 @@ CONSTANTS = {
         send_queue_calls=2,  # ... and on sending ranks (not measured)
     ),
 }
+
+# mig1 / mig2: A100-PCIE-40GB, one GPU, MIG 20/10/5/5 (3g.20gb, 2g.10gb, 1g.5gb, 1g.5gb),
+# schedutil governor. graph_placement.py reads `slices` per rank by slice GB.
+# Per slice, measure_constants.py on these machines, Vicuna-7B config (measurements.md on branch
+# test/intra-gpu-setup-2-A100-40gb: slice_3g20_v2, slice_2g10_v2, slice_1g5):
+#   weight_rate      achieved bytes/s streaming the weights (mean of M = 1, 8, 32)
+#   layer_fixed_us   decode layer kernel time - weight time = layer_fixed + mb x act_bytes(ctx) / act_rate,
+#   act_rate         least squares over mb 1 / 8 / 32 x ctx 64..575 (worst point 6.5-8.2% off)
+#   prefill_flops    prefill FLOP/s at mb 16, seq 64
+#   pcie_bw          pinned D2H of a 64 KiB decode activation;  recv_h2d_bw  pinned H2D, same size
+# launch_us: the harness's own CPU launch time per decode layer at full clock (run 10 events data,
+#   0.67-0.70 ms per layer = 40 kernels x 17.2 us; the slice probe measured 19.8-20.1 us per kernel).
+# Not measured on these machines yet, so from the whole-GPU set above: handshake_ack_us,
+#   tok_roundtrip_us, token_staging_us, step_start_us, barrier_us, memcpy_bw, shm_to_pinned_bw.
+# CPU clock, used with CONFIG clock="schedutil". Unlike the rest, fitted to measured data
+# (run 3 events data, schedutil, Vicuna-7B):
+#   clock_slow_factor     launch time per layer at 1.5 GHz / at boost: 1.56 / 0.69 ms
+#   clock_busy_threshold  per rank: fast when N x GPU time per microbatch / step >= this, both as
+#                         graph_placement predicts them with this set (so the ILP applies them
+#                         consistently); Vicuna 99 / 94 / 89 / 89% of levels right, held-out
+#                         Qwen-7B 99 / 93 / 71 / 81%
+CONSTANTS["a100_40gb_pcie_mig"] = dict(
+    CONSTANTS["a100_80gb_pcie_whole_gpu"],
+    launch_us=17.2,
+    slices={
+        20: dict(weight_rate=6.36e11, layer_fixed_us=137.0, act_rate=2.03e11, prefill_flops=71.4e12,
+                 pcie_bw=1.37e9, recv_h2d_bw=2.01e9),  # 3g.20gb, mig1
+        10: dict(weight_rate=3.36e11, layer_fixed_us=142.8, act_rate=1.10e11, prefill_flops=46.2e12,
+                 pcie_bw=1.34e9, recv_h2d_bw=1.97e9),  # 2g.10gb, mig1
+        5: dict(weight_rate=1.76e11, layer_fixed_us=149.1, act_rate=5.50e10, prefill_flops=21.2e12,
+                pcie_bw=1.28e9, recv_h2d_bw=1.90e9),  # 1g.5gb, mig2
+    },
+    clock_slow_factor=2.26,
+    clock_busy_threshold=[0.31, 0.40, 0.55, 0.78],
+)
 
 # ---------------------------------------------------------------------------
 # Inter-GPU setup (inter_gpu_measurements.md): two A100-PCIE-40GB nodes, MIG on each.
@@ -113,3 +154,24 @@ MEMORY_SLICES = {
     "A100-40GB": {5: 1, 10: 2, 20: 4, 40: 8},
     "A100-80GB": {10: 1, 20: 2, 40: 4, 80: 8},
 }
+
+
+# ---------------------------------------------------------------------------
+# Probe sets, one JSON per box, written by probe_constants.py
+# ---------------------------------------------------------------------------
+def _load_probe_sets():
+    import glob
+    import json
+    import os
+
+    here = os.path.join(os.path.dirname(os.path.abspath(__file__)), "probe_sets")
+    for path in sorted(glob.glob(os.path.join(here, "*.json"))):
+        with open(path) as f:
+            s = json.load(f)
+        s["slices"] = {int(gb): prims for gb, prims in s["slices"].items()}
+        if "clock_threshold_by_period" in s:
+            s["clock_threshold_by_period"] = {int(p): v for p, v in s["clock_threshold_by_period"].items()}
+        CONSTANTS[os.path.splitext(os.path.basename(path))[0]] = s
+
+
+_load_probe_sets()

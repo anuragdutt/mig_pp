@@ -133,7 +133,7 @@ def main():
         samples=8,  # decode contexts inside the MILP; predict_ms uses every step
         min_last_rank_layers=1,  # 0 allows a last rank with only norm + lm_head
         check=False,  # also run the brute force over every split (slow)
-        constants=hardware_constants.CONSTANTS["a100_80gb_pcie_whole_gpu"],  # see hardware_constants.py
+        constants=hardware_constants.CONSTANTS["a100_40gb_pcie_mig"],  # mig1/mig2; see hardware_constants.py
     )
 
     print(f"GPipe: {CONFIG['model']} on {CONFIG['slice_gb']} ({CONFIG['card']})")
