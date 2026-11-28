@@ -2,6 +2,31 @@
 
 Deferred items, agreed with the user on 2026-11-26. Current state stays in `current.md` (NOW).
 
+## Runbook: mig5 from Sat 11/28 (presets in `clock_study.sh`, one command each, export by hand)
+
+Export names the Mac scripts expect: `~/Desktop/AP/logs/mig5_p3_runB_step1`, `_step2`, `_step3`,
+`_step3b`, `_post`, `mig5_p3_vicuna_topup` (step names `vicuna7b_vtop_`). Each export packs the last `# run` block + the 3 clock logs.
+
+| # | On the Mac first | On mig5 (after `git pull`, check `git log --oneline -1`) |
+|---|---|---|
+| 1 | export step 1; `runb_finish_check.py` ALL OK; `runb_lists.py` step=2; commit `mistral7b_step2_split_order.py` | `INV_HOST=mig5 ./clock_study.sh runB_step2 --dry-run`, then without `--dry-run` |
+| 2 | export step 2; finish check (module `mistral7b_step2_split_order`); `runb_lists.py` step=3; commit `mistral7b_step3_split_order.py` | `... ./clock_study.sh runB_step3` |
+| 3 | export step 3; finish check; `runb_noise_check.py`; if it wrote `mistral7b_step3b_split_order.py`, commit it | `... ./clock_study.sh runB_step3_rerun` (only if written) |
+| 4 | - | `... ./clock_study.sh vicuna_topup` (~45 min) |
+| 5 | - | `... ./clock_study.sh runB_post` (~24 h; 88 splits x 9 pairs) |
+
+Steps 4-5 need no new files. Then score Mistral (steps 1-3 only), then Qwen.
+`runb_finish_check.py` CONFIG per step (module / prefix): step 1 `mistral7b_40gb_split_order` /
+`mistral7b_clock_`; step 2 `mistral7b_step2_split_order` / `mistral7b_s2_`; step 3
+`mistral7b_step3_split_order` / `mistral7b_s3_`; rerun `mistral7b_step3b_split_order` / `mistral7b_s3b_`;
+post `mistral7b_post_split_order` / `mistral7b_post_`; Vicuna `vicuna7b_topup_split_order` /
+`vicuna7b_vtop_` with `passes=2` (all others 1). `runb_noise_check.py` takes each earlier export with
+its prefix (step 1 `mistral7b_clock_`, step 2 `mistral7b_s2_`). Both refuse a wrong or incomplete
+export (wrong phase, a folder given twice, repeated oracle, missing pair or split) instead of
+reporting OK. `runb_lists.py` checks each export's phase and one oracle per pair, and for step 3 a
+measurement of every frozen pick and every baseline that fits (else "NO LIST WRITTEN"); it does not
+count splits, so run the finish check to ALL OK first.
+
 ## Before Run B step 1 ends (~Sat 11/28 7:41 am EST: started Thu 11/26 6:35 pm EST + 37.1 h)
 
 - **Finish check for Run B** (review point 3, 2026-11-26): per step `mistral7b_clock_blk01_*`, count the
@@ -59,6 +84,29 @@ Deferred items, agreed with the user on 2026-11-26. Current state stays in `curr
   not depend on it (Mistral's 8 KV heads are covered). Matters for the S models on SXM4.
 
 ## After Run B completes (mig5, user's call 2026-11-26)
+
+- **Vicuna-7B baseline top-up** (user, 2026-11-27; after the Mistral runs, before Qwen): only the
+  baselines / ILP picks never measured under the main condition. mig5 = mig3's card, so run 17's data
+  stands: no anchors, no repeats. One command, preset `vicuna_topup` (`vicuna7b_topup_split_order.py`),
+  2 passes everywhere (simpler than matching (32,8) and (16,2)'s single runs: +4 runs, ~8 min).
+  11 splits, 22 runs as planned + 4, ~45 min:
+
+  | Pair | Runs | Measure |
+  |---|---|---|
+  | (8,4) | 2 | [8,8,8,8], [14,9,5,4], GPipe [20,10,1,1] |
+  | (16,8) | 2 | [14,9,5,4] |
+  | (32,16) | 2 | [14,9,5,4] |
+  | (8,2) | 2 | [8,8,8,8], [14,9,5,4] |
+  | (16,4) | 2 | [14,9,5,4], GPipe [16,9,3,4] |
+  | (32,8) | 1 | [14,9,5,4], GPipe [18,10,1,3] |
+  | (16,2) | 1 | [8,8,8,8], [14,9,5,4] |
+  | (32,4), (32,2) | - | nothing missing |
+
+  All graph ILP picks (frozen setup: mig5 set, live gap, `clock="fast"`) are already measured.
+  **Even [8,8,8,8] does not fit for Vicuna-7B at 6 pairs** (memory model): batch 32 -> ranks 2 and 3
+  out of memory (6 layers fit on each 5GB slice); (16,8), (16,4) -> rank 3 only (7 fit: it also holds
+  the output head and its logits). Report as "does not fit"; not run. Edge cases by one layer: rank 2
+  at (16,8) / (16,4) and rank 3 at (16,2) fit exactly 8.
 
 - **Mistral-7B validation layer** (step-3 gate): add `~/models/Mistral-7B-Instruct-v0.3` (local
   path; the HF repo is gated) to `validate_models` (`mig_pp/milp/measure_common.py` ~line 1170),

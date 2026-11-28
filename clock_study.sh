@@ -3,6 +3,11 @@
 #
 #   ./clock_study.sh [--dry-run]       start inside tmux; runs in the foreground (~22 h)
 #   ./clock_study.sh --probes          the probes only (CPU, then MIG) at max with THREADS, into PROBE_DIR
+#   ./clock_study.sh <preset> [--dry-run]   a named run from the list below (none: the config as written)
+#
+# Presets (2026-11-27), each overriding the config block below, so a run is started by name with no
+# edit: runB_step1 (= the config as written), runB_step2, runB_step3, runB_step3_rerun, runB_post,
+# vicuna_topup. Generated lists (runb_lists.py, runb_noise_check.py) must be committed first.
 #
 # MODEL (default "": the setup's model, Vicuna-7B) is passed to every run as INV_MODEL, and step names
 # then start with it (mistral_7b -> mistral7b_clock_blk01_...), so a Vicuna step name never matches.
@@ -75,6 +80,7 @@ THREADS=1  # OMP_NUM_THREADS for every run (torchrun's default for multi-process
 CONTRAST=""  # at max with torch's default threads, NEAR_BEST + BY_PAIR, once, after validate pass 1; "" = none
 REQUIRE_GPU_LOCK=1  # 1: stop unless the GPU locks at max and persistence mode is on (P3); 0: max blocks may run unlocked (P1/P2)
 NOTIFY_LABEL="P3 RunB"  # title of the phone notifications (no host names or paths in them)
+STEP_TAG=""  # step names: <model>_<tag>_clock_blk..; "" for Run B step 1 (as the running job wrote them)
 HOST="${INV_HOST:-$(hostname -s)}"
 PROBE_DIR="probes_v71_$HOST"  # --probes: output folder, relative to the repo root; never overwritten
 PROBE_LABEL="P3 probes"  # --probes: title of the phone notifications
@@ -89,19 +95,51 @@ sec_per_split() {
 
 DRY=0
 PROBES=0
+PRESET=""
 for a in "$@"; do
     case "$a" in
         --dry-run) DRY=1 ;;
         --probes) PROBES=1 ;;
-        *) echo "clock_study.sh: unknown argument '$a' (--dry-run, --probes)" >&2; exit 2 ;;
+        runB_step1 | runB_step2 | runB_step3 | runB_step3_rerun | runB_post | vicuna_topup)
+            [ -z "$PRESET" ] || { echo "clock_study.sh: two presets ('$PRESET', '$a')" >&2; exit 2; }
+            PRESET="$a" ;;
+        *) echo "clock_study.sh: unknown argument '$a' (--dry-run, --probes, or a preset:" \
+               "runB_step1 runB_step2 runB_step3 runB_step3_rerun runB_post vicuna_topup)" >&2; exit 2 ;;
     esac
 done
+# Mistral-7B, main condition, 1 pass over SPLIT_MODULE.ALL unless set otherwise; "module" = the pairs
+# the module lists (the 3rd-run module holds only the pairs the noise check flagged).
+case "$PRESET" in
+    "" | runB_step1) ;;
+    runB_step2)
+        SPLIT_MODULE="mistral7b_step2_split_order"; EXPECT_SPLITS=""; STEP_TAG="s2"
+        NOTIFY_LABEL="P3 RunB step2" ;;
+    runB_step3)
+        SPLIT_MODULE="mistral7b_step3_split_order"; EXPECT_SPLITS=""; STEP_TAG="s3"
+        NOTIFY_LABEL="P3 RunB step3" ;;
+    runB_step3_rerun)
+        SPLIT_MODULE="mistral7b_step3b_split_order"; EXPECT_SPLITS=""; STEP_TAG="s3b"; VALIDATE="module"
+        NOTIFY_LABEL="P3 RunB step3 rerun" ;;
+    runB_post)
+        SPLIT_MODULE="mistral7b_post_split_order"; EXPECT_SPLITS=88; STEP_TAG="post"
+        NOTIFY_LABEL="P3 RunB post" ;;
+    vicuna_topup)
+        # explicit model: the weights check runs, and step names say vicuna7b_ (an exported INV_MODEL
+        # is cleared at start anyway)
+        MODEL="vicuna_7b"; SPLIT_MODULE="vicuna7b_topup_split_order"; EXPECT_SPLITS=""; STEP_TAG="vtop"
+        VALIDATE="module"; VALIDATE_PASSES=2; NOTIFY_LABEL="P3 Vicuna topup" ;;
+esac
 [ "$PROBES" = 0 ] || NOTIFY_LABEL="$PROBE_LABEL"
 PYTHON="${PYTHON:-python3}"
 NOTIFY_TOPIC="${CLOCK_NOTIFY_TOPIC:-migpp-871bf4d064194bc2}"  # ntfy.sh topic (user's phone); CLOCK_NOTIFY_TOPIC overrides, "" stays on
 if ! INV_HOST="$HOST" "$PYTHON" -c 'import sys, parallel_config as p; sys.exit(p.HOST not in p.GPUS_40GB)' 2> /dev/null; then
     echo "clock_study.sh: host '$HOST' is not in parallel_config.GPUS_40GB (INV_HOST overrides)" >&2
     exit 2
+fi
+if [ "$VALIDATE" = module ]; then  # the module's own pairs, in its order
+    VALIDATE=$("$PYTHON" -c 'import importlib, sys
+print(";".join(f"{b},{mb}" for b, mb in importlib.import_module(sys.argv[1]).ALL))' "$SPLIT_MODULE" 2> /dev/null)
+    [ -n "$VALIDATE" ] || { echo "clock_study.sh: no pairs from $SPLIT_MODULE (missing or empty module)" >&2; exit 2; }
 fi
 BLOCK_THREADS="$THREADS"  # OMP_NUM_THREADS of the block running now (run_block sets it)
 SYS="${CLOCK_SYS:-/sys}"  # tests point this at a fake tree
@@ -128,7 +166,7 @@ NC=0  # contrast blocks that run
 [ -z "$CONTRAST" ] || NC=1
 NBLOCKS=$((4 * ROUNDS + NV + NC + NS))
 NUMA_LIST=""  # the GPU's NUMA-local CPU list (start_loggers sets it)
-STEP_PREFIX="${MODEL:+${MODEL//_/}_}"  # mistral_7b -> "mistral7b_"; "" for the setup's model
+STEP_PREFIX="${MODEL:+${MODEL//_/}_}${STEP_TAG:+${STEP_TAG}_}"  # mistral_7b + s2 -> "mistral7b_s2_"
 
 say() {
     local line
@@ -533,14 +571,14 @@ S=$(est_seconds "$STABLE" near)
 lock="locked at $SM_MAX MHz"
 [ "$GPU_LOCK" = 1 ] || lock="not locked (logged only)"
 [ "$DRY" = 0 ] || lock="tested at start"
-say "plan, $HOST, model ${MODEL:-setup default}, splits from $SPLIT_MODULE: problem pairs $PROBLEM in $((4 * ROUNDS)) blocks ((default, max, max, default) x \
+say "plan, $HOST, preset ${PRESET:-none}, model ${MODEL:-setup default}, splits from $SPLIT_MODULE: problem pairs $PROBLEM in $((4 * ROUNDS)) blocks ((default, max, max, default) x \
 $ROUNDS); validate pairs ${VALIDATE:-none} at max ($VALIDATE_KIND) x $NV; contrast pairs ${CONTRAST:-none} at max, torch's \
 default threads, once; stable pairs ${STABLE:-none} at max once. OMP_NUM_THREADS ${THREADS:-unset (torch \
 default)} except contrast. GPU at max: $lock. ~$(hours $((4 * ROUNDS * P + NV * V + NC * C + S))) h"
-notify "started${MODEL:+ $MODEL}: $TOTAL_RUNS runs, ~$(hours $((4 * ROUNDS * P + NV * V + NC * C + S))) h; GPU $lock"
-[ "$DRY" = 1 ] || printf '# run %s clock_study.sh host=%s model=%s splits=%s:%s rounds=%s gpu_lock=%s threads=%s contrast=%s\n' \
-    "$(date '+%Y-%m-%d_%H:%M:%S')" "$HOST" "${MODEL:-default}" "$SPLIT_MODULE" "$VALIDATE_KIND" "$ROUNDS" "$GPU_LOCK" \
-    "${THREADS:-default}" "${CONTRAST:-none}" >> "$MANIFEST"
+notify "started${PRESET:+ $PRESET}${MODEL:+ $MODEL}: $TOTAL_RUNS runs, ~$(hours $((4 * ROUNDS * P + NV * V + NC * C + S))) h; GPU $lock"
+[ "$DRY" = 1 ] || printf '# run %s clock_study.sh preset=%s host=%s model=%s splits=%s:%s rounds=%s gpu_lock=%s threads=%s contrast=%s\n' \
+    "$(date '+%Y-%m-%d_%H:%M:%S')" "${PRESET:-none}" "$HOST" "${MODEL:-default}" "$SPLIT_MODULE" "$VALIDATE_KIND" "$ROUNDS" \
+    "$GPU_LOCK" "${THREADS:-default}" "${CONTRAST:-none}" >> "$MANIFEST"
 
 for ((round = 1; round <= ROUNDS; round++)); do  # not seq: BSD `seq 1 0` counts down
     run_block default "$PROBLEM" union 0
